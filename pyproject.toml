@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "budgetapp"
+version = "0.1.0"
+description = "Personal American Express budget tracker: Plaid sync, categories, budgets and trends, running only on this Mac."
+readme = "README.md"
+requires-python = ">=3.14"
+# Ranges only: the exact, tested versions are pinned in requirements.txt, and production installs
+# them first (`pip install -r requirements.txt`, then `pip install --no-deps <repo>`).
+dependencies = [
+    "fastapi>=0.162",
+    "uvicorn[standard]>=0.54",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.32",
+    "sqlalchemy>=2.1,<2.2",
+    "alembic>=1.20",
+    "psycopg[binary]>=3.3,<4",
+    "plaid-python>=46,<47",
+    "keyring>=25.7",
+]
+
+[project.scripts]
+budgetapp = "budgetapp.cli:main"
+
+[tool.hatch.build.targets.wheel]
+# The whole package ships, including web/templates, web/static and migrations: production runs a
+# non-editable install from ~/Library/Application Support/budgetapp/venv.
+packages = ["budgetapp"]
+
+[tool.hatch.build.targets.sdist]
+include = ["budgetapp", "alembic.ini", "requirements*.txt", "README.md"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "sandbox: live tests against the real Plaid Sandbox (run with ./run test --sandbox; need Sandbox keys in Keychain)",
+    "slow: slow tests (for example the PERF-1 performance checks)",
+]
+filterwarnings = [
+    "error::sqlalchemy.exc.SAWarning",
+    "error::sqlalchemy.exc.SADeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+extend-exclude = ["budgetapp/web/static/vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["budgetapp", "tests"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Header",
+    "fastapi.params.Depends",
+]
