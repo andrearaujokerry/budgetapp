@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# One command for everything (MNT-1).
+#   ./run              start the Sandbox app (same as ./run start)
+#   ./run live ...     start the production app (same as ./run start --env production ...)
+#   ./run <command>    any other command; ./run --help lists them
+set -euo pipefail
+
+# Work from the repository, wherever this script is called from.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+die() {
+    printf '\n%s\n\n' "$*" >&2
+    exit 1
+}
+
+PYTHON_BIN="${BUDGETAPP_PYTHON:-python3.14}"
+VENV=".venv"
+
+if [[ ! -x "$VENV/bin/python" ]]; then
+    command -v "$PYTHON_BIN" >/dev/null 2>&1 ||
+        die "Python 3.14 is required but '$PYTHON_BIN' was not found. Install it with: brew install python@3.14"
+    echo "Creating the virtual environment in $VENV ..."
+    "$PYTHON_BIN" -m venv "$VENV" || die "Could not create $VENV with $PYTHON_BIN."
+fi
+
+# Reinstall the pinned dependencies whenever requirements*.txt change.
+STAMP="$VENV/.requirements.sha256"
+WANT="$(cat requirements.txt requirements-dev.txt | shasum -a 256 | cut -d' ' -f1)"
+if [[ ! -f "$STAMP" || "$(cat "$STAMP")" != "$WANT" ]]; then
+    echo "Installing pinned dependencies (requirements-dev.txt) ..."
+    "$VENV/bin/python" -m pip install --quiet --disable-pip-version-check -r requirements-dev.txt ||
+        die "Installing dependencies failed. Check your internet connection, then run ./run again."
+    printf '%s\n' "$WANT" >"$STAMP"
+fi
+
+if [[ $# -eq 0 ]]; then
+    set -- start
+elif [[ "$1" == "live" ]]; then
+    shift
+    set -- start --env production "$@"
+fi
+
+exec "$VENV/bin/python" -m budgetapp "$@"

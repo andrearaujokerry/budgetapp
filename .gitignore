@@ -1,0 +1,22 @@
+# Python / tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Never commit data, dumps, logs or secrets
+*.dump
+*.log
+.env*
+.DS_Store
+
+# Bank downloads (real financial data). Synthetic test fixtures are the only exception.
+*.csv
+!tests/fixtures/**/*.csv
+*.xlsx
+*.qfx
+*.ofx
