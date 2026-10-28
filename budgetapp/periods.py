@@ -313,6 +313,16 @@ def budget_period_for(
     return cycle if cycle is not None else month_of(day)
 
 
+def _require_cycle_inputs(closings: Iterable[date], closing_day: int | None) -> tuple[date, ...]:
+    stored = tuple(closings)
+    if not stored and closing_day is None:
+        raise ValueError(
+            "statement periods need the card's closing dates or closing day "
+            "(pass closings= and/or closing_day=)"
+        )
+    return stored
+
+
 def previous_period(
     period: Period,
     *,
@@ -320,13 +330,18 @@ def previous_period(
     closing_day: int | None = None,
     first_period_start: date | None = None,
 ) -> Period:
-    """The period before ``period`` (same kind; statement cycles need the closing dates)."""
+    """The period before ``period`` (same kind; statement cycles need the closing dates).
+
+    For a statement cycle pass the card's ``closings`` and/or ``closing_day``; without either a
+    ``ValueError`` is raised (a silent calendar-month answer would corrupt rollover chains).
+    """
     if period.kind == MONTH:
         year, month = add_months(period.start.year, period.start.month, -1)
         return month_period(year, month)
     if period.kind == YEAR:
         return year_period(period.start.year - 1)
     if period.kind == STATEMENT:
+        closings = _require_cycle_inputs(closings, closing_day)
         return budget_period_for(
             period.start - timedelta(days=1),
             mode="statement",
@@ -345,13 +360,18 @@ def next_period(
     closing_day: int | None = None,
     first_period_start: date | None = None,
 ) -> Period:
-    """The period after ``period`` (same kind; statement cycles need the closing dates)."""
+    """The period after ``period`` (same kind; statement cycles need the closing dates).
+
+    Like :func:`previous_period`, a statement cycle without ``closings`` or ``closing_day``
+    raises ``ValueError``.
+    """
     if period.kind == MONTH:
         year, month = add_months(period.start.year, period.start.month, 1)
         return month_period(year, month)
     if period.kind == YEAR:
         return year_period(period.start.year + 1)
     if period.kind == STATEMENT:
+        closings = _require_cycle_inputs(closings, closing_day)
         return budget_period_for(
             period.end + timedelta(days=1),
             mode="statement",

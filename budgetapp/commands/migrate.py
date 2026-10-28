@@ -1,8 +1,9 @@
 """``migrate`` — upgrade this environment's database to the code's schema (Alembic).
 
-Connects as the environment's owner role. Production normally migrates only through the
-Application Support install (``./run install-agents`` / ``./run live``); doing it here needs an
-explicit ``--env production``.
+Connects as the environment's owner role. Production is upgraded only by the guarded upgrade of
+the Application Support install (``./run install-agents`` / ``./run live``: backup, sync lock,
+migrations from the new install — ARCHITECTURE §2), so ``--env production`` is refused when this
+runs from a git checkout; it works only from the installed copy.
 """
 
 from __future__ import annotations
@@ -25,7 +26,17 @@ def register(subparsers: Any) -> None:
     parser.add_argument("--revision", default="head", help="target revision (default head)")
 
 
+PRODUCTION_FROM_CHECKOUT = (
+    "Refusing to migrate the PRODUCTION database from a git checkout ({repo}). Production is "
+    "upgraded only from the installed copy, after a backup and under the sync lock: run "
+    "./run live (or ./run install-agents)."
+)
+
+
 def run(args: argparse.Namespace, settings: Settings) -> int:
+    if settings.is_production and settings.repo_dir is not None:
+        print(PRODUCTION_FROM_CHECKOUT.format(repo=settings.repo_dir))
+        return 2
     if not wait_for_db(settings, timeout=30):
         print("The database is not running. Start it with: ./run db start")
         return 1

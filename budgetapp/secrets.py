@@ -18,7 +18,12 @@ Keychain account                       Value
 
 Rules: values are never written to the database, files (except the 0600 recovery file below), logs,
 exceptions, process arguments or templates; every value read is registered with the log redactor;
-tests use :class:`MemoryStore` (``use_store``), never the real Keychain.
+tests use :class:`MemoryStore` (``use_store``), never the real Keychain (the live Sandbox tests may
+read only the Sandbox items).
+
+Production link guard (ARCHITECTURE §7, Principle 4): :func:`production_link_blockers` lists every
+reason outside the database not to issue a new production link — a saved production token, an
+unexpired link-in-progress marker, or a production token waiting in a recovery file.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ import os
 import re
 import secrets as _stdlib_secrets
 import sys
+import tempfile
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -140,13 +146,24 @@ class AccessTokenConflict(SecretStoreError):
 
 
 class TokenNotSavedError(SecretStoreError):
-    """An access token could not be saved; it was written to a 0600 recovery file instead."""
+    """An access token could not be saved; it was written to a 0600 recovery file instead.
 
-    def __init__(self, message: str, recovery_path: Path) -> None:
+    ``recovery_path`` is ``None`` when even the recovery file could not be written: the token then
+    exists only in the caller's memory (the ``ExchangeResult``), so the caller must show it to the
+    user once to keep. The message never contains the token.
+    """
+
+    def __init__(self, message: str, recovery_path: Path | None) -> None:
         self.recovery_path = recovery_path
-        super().__init__(
-            f"{message} The token was saved to {recovery_path} (readable only by you)."
-        )
+        if recovery_path is not None:
+            detail = f"The token was saved to {recovery_path} (readable only by you)."
+        else:
+            detail = (
+                "Writing a recovery file failed too, so the token exists only in this process: "
+                "show it to the user to copy into a password manager, then store it with "
+                "./run setup --env production --access-token."
+            )
+        super().__init__(f"{message} {detail}")
 
 
 # --------------------------------------------------------------------------- stores
@@ -210,16 +227,38 @@ def _keychain_status(exc: BaseException) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def is_sandbox_account(account: str) -> bool:
+    """Keychain accounts the live Sandbox tests may touch (never production or DB passwords)."""
+    return account in (
+        PLAID_CLIENT_ID,
+        "plaid.secret.sandbox",
+        SANDBOX_ITEM_INDEX,
+    ) or account.startswith("plaid.access_token.sandbox.")
+
+
 class KeychainStore:
     """The login Keychain via ``keyring`` (service ``budgetapp``).
 
     ``backend`` defaults to keyring's macOS backend; tests pass a fake with the keyring backend
     API (``get_password``/``set_password``/``delete_password``) to exercise the error mapping.
+    Under ``BUDGETAPP_ENV=test`` the real Keychain is refused, except for the live Sandbox tests
+    (``BUDGETAPP_LIVE_SANDBOX=1``), which may touch only :func:`is_sandbox_account` items.
     """
 
     def __init__(self, service: str = SERVICE, backend: Any = None) -> None:
         self.service = service
         self._backend = backend
+        self._injected = backend is not None
+
+    def _check_account(self, account: str) -> None:
+        if (
+            not self._injected
+            and os.environ.get("BUDGETAPP_ENV") == "test"
+            and not is_sandbox_account(account)
+        ):
+            raise SecretStoreError(
+                f"Live Sandbox tests may use only the Sandbox Keychain items, not {account!r}."
+            )
 
     @property
     def backend(self) -> Any:
@@ -251,6 +290,7 @@ class KeychainStore:
     def get(self, account: str) -> str | None:
         from keyring.errors import KeyringError
 
+        self._check_account(account)
         try:
             value = self.backend.get_password(self.service, account)
         except KeyringError as exc:
@@ -261,6 +301,7 @@ class KeychainStore:
     def set(self, account: str, value: str) -> None:
         from keyring.errors import KeyringError
 
+        self._check_account(account)
         register_secret(value)
         try:
             self.backend.set_password(self.service, account, value)
@@ -270,6 +311,7 @@ class KeychainStore:
     def delete(self, account: str) -> None:
         from keyring.errors import KeyringError
 
+        self._check_account(account)
         try:
             self.backend.delete_password(self.service, account)
         except KeyringError as exc:
@@ -411,10 +453,15 @@ def store_access_token(
     * The token is never rewritten: if a different token is already stored under the same
       account, nothing is overwritten and :class:`AccessTokenConflict` is raised (after saving the
       new token to a recovery file, because every production token used a Trial connection).
-    * If the write or the read-back fails, the token goes to a 0600 recovery file under
-      ``settings.state_dir`` and :class:`TokenNotSavedError` is raised; callers stop and show
-      the path and ``./run setup --env production --access-token``.
-    * Sandbox tokens are also added to the ``plaid.item_ids.sandbox`` index.
+    * If the write or the read-back fails — for ANY reason, including Ctrl-C (re-raised after
+      the file is written) — the token goes to a 0600 recovery file under ``settings.state_dir``
+      (or, if that fails too, under :func:`fallback_recovery_dir`) and
+      :class:`TokenNotSavedError` is raised; callers stop and show the path and
+      ``./run setup --env production --access-token``. An unsaved production recovery file keeps
+      blocking new links (:func:`production_link_blockers`).
+    * Sandbox tokens are added to the ``plaid.item_ids.sandbox`` index BEFORE the token is written
+      (an index entry without a token is harmless; a token nobody can find is an orphan).
+    * Callers clear the link-in-progress marker only after this returns normally.
     """
     if not access_token or not item_id:
         raise ValueError("item_id and access_token are required")
@@ -424,19 +471,25 @@ def store_access_token(
     account = access_token_key(plaid_env, item_id)
 
     def _recover(reason: str, cls: type[SecretStoreError] = TokenNotSavedError) -> SecretStoreError:
-        path = write_access_token_recovery_file(settings, item_id, access_token)
+        path = _save_recovery_file(settings, item_id, access_token)
         if cls is AccessTokenConflict:
-            return AccessTokenConflict(
-                f"{reason} The new token was saved to {path} (readable only by you)."
+            where = (
+                f"The new token was saved to {path} (readable only by you)."
+                if path is not None
+                else "The new token could not be written to a recovery file either."
             )
+            return AccessTokenConflict(f"{reason} {where}")
         return TokenNotSavedError(reason, path)
 
     # Any failure below must not lose the token (each production token used a Trial connection),
-    # so every exception, not only SecretStoreError, ends in the recovery file.
+    # so every exception — even KeyboardInterrupt/SystemExit — ends in the recovery file.
     try:
         existing = store.get(account)
-    except Exception as exc:
-        raise _recover("Keychain could not be read before saving the access token.") from exc
+    except BaseException as exc:
+        error = _recover("Keychain could not be read before saving the access token.")
+        if not isinstance(exc, Exception):
+            raise
+        raise error from exc
     if existing is not None:
         if existing == access_token:
             if plaid_env == "sandbox":
@@ -447,18 +500,111 @@ def store_access_token(
             AccessTokenConflict,
         )
     try:
+        if plaid_env == "sandbox":
+            _add_sandbox_item_id(item_id, store)
         store.set(account, access_token)
         readback = store.get(account)
-    except Exception as exc:
-        raise _recover("Keychain refused to save the access token.") from exc
+    except BaseException as exc:
+        error = _recover("Keychain refused to save the access token.")
+        if not isinstance(exc, Exception):
+            raise
+        raise error from exc
     if readback != access_token:
         raise _recover("Keychain read-back of the access token did not match.")
-    if plaid_env == "sandbox":
-        _add_sandbox_item_id(item_id, store)
 
 
-def write_access_token_recovery_file(settings: Settings, item_id: str, access_token: str) -> Path:
-    """Write a token that could not be saved to Keychain to a 0600 file with instructions."""
+def fallback_recovery_dir() -> Path:
+    """Where a recovery file goes when ``state_dir`` is unwritable: the per-user temp folder
+    (a per-process scratch folder in tests)."""
+    from budgetapp.config import in_test_process, scratch_dir_for_tests
+
+    if in_test_process():
+        return scratch_dir_for_tests() / "tmp"
+    return Path(tempfile.gettempdir()).resolve() / "budgetapp"
+
+
+def _save_recovery_file(settings: Settings, item_id: str, access_token: str) -> Path | None:
+    """Write the recovery file under ``state_dir``, else :func:`fallback_recovery_dir`; never
+    raises (``None`` when both failed)."""
+    for directory in (settings.state_dir, fallback_recovery_dir()):
+        try:
+            return write_access_token_recovery_file(
+                settings, item_id, access_token, state_dir=directory
+            )
+        except Exception:
+            continue
+    return None
+
+
+def _recovery_dirs(settings: Settings) -> list[Path]:
+    return [Path(settings.state_dir) / "recovery", fallback_recovery_dir() / "recovery"]
+
+
+def unsaved_production_tokens(settings: Settings) -> list[Path]:
+    """Recovery files holding a production access token that was never stored in Keychain.
+
+    Each one is a production Item that exists at Plaid; while any is listed, no new production
+    link may be offered (:func:`production_link_blockers`). ``./run setup --env production
+    --access-token`` stores the token and marks its files ``.saved`` (:func:`mark_recovery_saved`).
+    """
+    found: list[Path] = []
+    for directory in _recovery_dirs(settings):
+        try:
+            found.extend(sorted(directory.glob("access-token-production-*.txt")))
+        except OSError:
+            continue
+    return found
+
+
+def mark_recovery_saved(settings: Settings, access_token: str) -> list[Path]:
+    """Rename the unsaved recovery files that hold ``access_token`` to ``*.saved`` (call only
+    after the token is in Keychain and read back); returns the new paths."""
+    renamed: list[Path] = []
+    for path in unsaved_production_tokens(settings):
+        try:
+            if access_token not in path.read_text(encoding="utf-8"):
+                continue
+            target = path.with_suffix(".saved")
+            path.rename(target)
+            renamed.append(target)
+        except OSError:
+            continue
+    return renamed
+
+
+def production_link_blockers(settings: Settings, *, store: SecretStore | None = None) -> list[str]:
+    """Every reason, outside the database, not to issue a production new-link token (§7).
+
+    The guard (under ``db.link_lock``) issues a token only when this is empty AND no
+    ``plaid_items`` row exists. Reasons: a production access token in Keychain (offer
+    "Re-attach", never a new link), an unexpired link-in-progress marker, or an unsaved
+    production token in a recovery file. Keychain errors propagate (fail safe).
+    """
+    reasons: list[str] = []
+    if get_access_token("production", store=store):
+        reasons.append(
+            "A production access token is saved in Keychain: re-attach the existing connection "
+            "instead of linking again."
+        )
+    expires = get_link_in_progress(plaid_env="production", store=store)
+    if expires is not None:
+        reasons.append(
+            "A production link was started and may still finish (the marker expires at "
+            f"{expires:%Y-%m-%d %H:%M} UTC); finish or cancel it first."
+        )
+    for path in unsaved_production_tokens(settings):
+        reasons.append(
+            f"A production access token is waiting in the recovery file {path}: store it with "
+            "./run setup --env production --access-token (it is an existing connection)."
+        )
+    return reasons
+
+
+def write_access_token_recovery_file(
+    settings: Settings, item_id: str, access_token: str, *, state_dir: Path | None = None
+) -> Path:
+    """Write a token that could not be saved to Keychain to a 0600 file with instructions
+    (under ``<state_dir or settings.state_dir>/recovery``)."""
     stamp = clock.now().strftime("%Y%m%dT%H%M%SZ")
     content = (
         "Budget Tracker could not save this Plaid access token to the macOS Keychain.\n"
@@ -471,7 +617,7 @@ def write_access_token_recovery_file(settings: Settings, item_id: str, access_to
         f"access_token: {access_token}\n"
     )
     return write_recovery_file(
-        settings.state_dir, f"access-token-{settings.plaid_env}-{stamp}", content
+        state_dir or settings.state_dir, f"access-token-{settings.plaid_env}-{stamp}", content
     )
 
 
@@ -592,23 +738,26 @@ def keychain_approval_message() -> tuple[str, str]:
 def claim_daily_marker(state_dir: Path, key: str, *, today: date | None = None) -> bool:
     """Once-a-day de-duplication without the database (e.g. Keychain or backup notifications).
 
-    Returns ``True`` the first time it is called for ``key`` on a given day (and records it in a
-    0600 file under ``<state_dir>/markers``), ``False`` on later calls that day.
+    Returns ``True`` the first time it is called for ``key`` on a given day, ``False`` on later
+    calls that day — also across processes racing at the same moment (the sync and backup agents
+    start together at login): the claim is an exclusive create of the 0600 file
+    ``<state_dir>/markers/<key>.<YYYY-MM-DD>``. Older days' files for ``key`` are removed.
     """
     day = (today or clock.today()).isoformat()
     directory = Path(state_dir) / "markers"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path = directory / (re.sub(r"[^A-Za-z0-9._-]", "_", key) + ".day")
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", key)
+    path = directory / f"{safe}.{day}"
     try:
-        if path.read_text(encoding="utf-8").strip() == day:
-            return False
-    except FileNotFoundError:
-        pass
-    tmp = path.with_suffix(f".tmp{os.getpid()}")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(day)
-    os.replace(tmp, path)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    os.close(fd)
+    stale = re.compile(re.escape(safe) + r"\.\d{4}-\d{2}-\d{2}")
+    for other in directory.iterdir():
+        if other.name != path.name and stale.fullmatch(other.name):
+            with contextlib.suppress(OSError):
+                other.unlink()
     return True
 
 

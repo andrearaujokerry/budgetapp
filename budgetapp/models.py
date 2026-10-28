@@ -7,8 +7,15 @@ constraint names follow :data:`NAMING_CONVENTION`; every foreign key states its 
 Sign convention: positive amount = charge, fee or interest; negative = credit (refund, payment).
 
 The schema itself is created by Alembic migrations (``budgetapp/migrations``); a test checks that
-these models and the migrations agree. ``v_allocations`` (the single source of truth for money) is
-a view, mapped on the separate :data:`view_metadata` for querying only.
+these models and the migrations agree exactly (columns, constraints and index definitions).
+``v_allocations`` (the single source of truth for money) is a view, mapped on the separate
+:data:`view_metadata` for querying only. PostgreSQL pins every column a view uses: a migration that
+drops, renames or retypes one of the ``transactions`` / ``transaction_splits`` columns the view
+reads must drop and recreate the view in the same migration.
+
+JSON columns (``location``, ``item_snapshot``, ``user_state``): engines from ``db.make_engine``
+store ``Decimal`` as a JSON number and read numbers back as ``Decimal``. Money is never stored as a
+JSON number; ``userstate.to_json`` writes amounts as exact strings.
 """
 
 from __future__ import annotations
@@ -129,8 +136,12 @@ class PlaidItem(IdMixin, TimestampMixin, Base):
     institution_id: Mapped[str | None]
     institution_name: Mapped[str | None]
     status: Mapped[str] = mapped_column(default="healthy", server_default="healthy")
+    #: The last error (Plaid or internal), all three cleared on success. ``error_message`` is the
+    #: technical message (logs, doctor); ``error_display_message`` is Plaid's ``display_message``
+    #: for the user, when Plaid sent one.
     error_code: Mapped[str | None]
     error_message: Mapped[str | None]
+    error_display_message: Mapped[str | None]
     #: Saved /transactions/sync cursor; NULL means "start from scratch" (never store '').
     transactions_cursor: Mapped[str | None]
     transactions_update_status: Mapped[str | None]
@@ -149,7 +160,9 @@ class PlaidItem(IdMixin, TimestampMixin, Base):
     last_sync_success_at: Mapped[dt.datetime | None]
     item_snapshot: Mapped[dict[str, Any] | None]
 
-    accounts: Mapped[list[Account]] = relationship(back_populates="item")
+    #: ``passive_deletes="all"``: deleting an Item never nulls ``accounts.item_id`` in Python, so
+    #: the database's ON DELETE RESTRICT refuses to delete an Item that still has accounts.
+    accounts: Mapped[list[Account]] = relationship(back_populates="item", passive_deletes="all")
 
 
 class Account(IdMixin, TimestampMixin, Base):
@@ -161,6 +174,8 @@ class Account(IdMixin, TimestampMixin, Base):
             "statement_closing_day IS NULL OR statement_closing_day BETWEEN 1 AND 31",
             name="statement_closing_day",
         ),
+        # A manual account has neither; a linked account has both (never "half-manual").
+        CheckConstraint("(item_id IS NULL) = (plaid_account_id IS NULL)", name="manual_or_linked"),
     )
 
     item_id: Mapped[int | None] = mapped_column(ForeignKey("plaid_items.id", ondelete="RESTRICT"))
@@ -204,13 +219,23 @@ class Account(IdMixin, TimestampMixin, Base):
 
 
 class Category(IdMixin, TimestampMixin, Base):
-    """A spending category. ``kind``: expense (spending), income (credits), transfer (payments)."""
+    """A spending category. ``kind``: expense (spending), income (credits), transfer (payments).
+
+    ``color`` is a palette slot ``"cat-1"`` … ``"cat-16"``, ``"other"`` (neutral grey) or a custom
+    ``"#rrggbb"``; the web layer resolves all three for the current theme.
+    """
 
     __tablename__ = "categories"
     __table_args__ = (
         _check_in("kind", CATEGORY_KINDS, "kind"),
         _check_in("system_key", SYSTEM_KEYS, "system_key", nullable=True),
         CheckConstraint("system_key IS NULL OR NOT is_hidden", name="system_not_hidden"),
+        # The spending definition (§6) relies on these two kinds never changing.
+        CheckConstraint(
+            "system_key IS NULL OR (system_key = 'uncategorized' AND kind = 'expense') "
+            "OR (system_key = 'card_payments' AND kind = 'transfer')",
+            name="system_kind",
+        ),
     )
 
     name: Mapped[str]

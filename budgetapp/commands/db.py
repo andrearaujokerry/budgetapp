@@ -14,7 +14,7 @@ from typing import Any
 from budgetapp import pgcluster, secrets
 from budgetapp.commands import add_command
 from budgetapp.config import Settings
-from budgetapp.db import database_url
+from budgetapp.db import database_url, refuse_superuser_in_tests
 
 
 def register(subparsers: Any) -> None:
@@ -34,7 +34,12 @@ def register(subparsers: Any) -> None:
 
 
 def psql_command(settings: Settings, *, admin: bool = False) -> tuple[list[str], dict[str, str]]:
-    """``(argv, extra_env)`` for psql; the password only ever travels in the environment."""
+    """``(argv, extra_env)`` for psql; the password only ever travels in the environment.
+
+    ``admin=True`` (the cluster superuser) is refused in a test process.
+    """
+    if admin:
+        refuse_superuser_in_tests(settings)
     psql = settings.pg_bin("psql")
     if admin or settings.env == "test":
         user = settings.os_user if admin else settings.db_role

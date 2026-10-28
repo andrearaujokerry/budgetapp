@@ -134,13 +134,38 @@ def setup_logging(
 
 
 def install_excepthook() -> None:
-    """Print uncaught exceptions with secrets redacted (CLI entry points call this)."""
+    """Print uncaught exceptions with secrets redacted (CLI entry points call this).
+
+    Covers the main thread (``sys.excepthook``), every other thread (``threading.excepthook``,
+    e.g. the web app's background sync worker) and exceptions Python cannot raise
+    (``sys.unraisablehook``); under launchd stderr is a log file, so none may leak a secret.
+    """
 
     def hook(exc_type: Any, exc: BaseException, tb: Any) -> None:
         text = "".join(traceback.format_exception(exc_type, exc, tb))
         sys.stderr.write(redact(text))
 
+    def thread_hook(args: Any) -> None:
+        if args.exc_type is SystemExit:
+            return
+        name = args.thread.name if args.thread is not None else "unknown"
+        text = "".join(
+            traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)
+        )
+        sys.stderr.write(redact(f"Exception in thread {name}:\n{text}"))
+
+    def unraisable_hook(unraisable: Any) -> None:
+        message = unraisable.err_msg or "Exception ignored in"
+        text = "".join(
+            traceback.format_exception(
+                unraisable.exc_type, unraisable.exc_value, unraisable.exc_traceback
+            )
+        )
+        sys.stderr.write(redact(f"{message}: {unraisable.object!r}\n{text}"))
+
     sys.excepthook = hook
+    threading.excepthook = thread_hook
+    sys.unraisablehook = unraisable_hook
 
 
 def uvicorn_log_config(level: str = "info") -> dict[str, Any]:

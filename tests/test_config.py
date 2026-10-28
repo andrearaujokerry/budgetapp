@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from budgetapp.config import ConfigError, check_private_path, load_settings, resolve_env
+from budgetapp.config import (
+    ConfigError,
+    check_private_path,
+    in_test_process,
+    load_settings,
+    resolve_env,
+    scratch_dir_for_tests,
+)
 
 
 def test_sandbox_defaults():
@@ -43,6 +50,32 @@ def test_test_env_uses_a_per_process_database():
     assert s.is_test
 
 
+def test_test_env_never_writes_to_the_real_folders(settings):
+    """State (recovery files, daily markers), logs, backups and the install go to scratch."""
+    library = Path.home() / "Library"
+    scratch = scratch_dir_for_tests()
+    for s in (settings, load_settings("test")):
+        for name in ("state_dir", "logs_dir", "backups_dir", "install_dir"):
+            path = getattr(s, name)
+            assert not path.is_relative_to(library), name
+            assert path.is_relative_to(scratch), name
+        # ...while the cluster it connects to is the real one
+        assert s.pg_socket_dir == load_settings("sandbox").pg_socket_dir
+    assert load_settings("sandbox").state_dir.is_relative_to(library)
+
+
+def test_in_test_process(monkeypatch):
+    assert in_test_process() and in_test_process(load_settings("sandbox"))
+    monkeypatch.setenv("BUDGETAPP_ENV", "sandbox")
+    assert not in_test_process() and not in_test_process(load_settings("sandbox"))
+    assert in_test_process(load_settings("test"))
+
+
+def test_test_env_always_uses_the_plaid_sandbox():
+    with pytest.raises(ConfigError, match="Sandbox"):
+        load_settings("test", plaid_env="production")
+
+
 def test_env_comes_from_argument_then_variable_then_sandbox(monkeypatch):
     monkeypatch.setenv("BUDGETAPP_ENV", "production")
     assert resolve_env() == "production"
@@ -74,6 +107,11 @@ def test_settings_are_frozen():
     [
         {"pg_port": 5432},
         {"pg_port": 5433},
+        {"pg_port": "5432"},
+        {"pg_port": "5434"},
+        {"pg_port": True},
+        {"web_port": "8766"},
+        {"web_port": 0},
         {"web_host": "0.0.0.0"},
         {"pg_host": "192.168.1.10"},
         {"db_name": "budgetapp"},
@@ -99,6 +137,27 @@ def test_test_env_database_must_be_a_test_database():
 def test_data_in_protected_folders_is_refused(folder):
     with pytest.raises(ConfigError, match="protects or iCloud"):
         load_settings("sandbox", data_dir=Path.home() / folder / "budgetapp-data")
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        ("desktop", "bdata"),
+        ("DOCUMENTS", "bdata"),
+        ("downloads", "x"),
+        ("library", "mobile documents", "x"),
+        ("LIBRARY", "CLOUDSTORAGE", "x"),
+    ],
+)
+def test_protected_folders_are_matched_ignoring_case(parts):
+    """The default APFS volume is case-insensitive: ~/desktop IS ~/Desktop."""
+    with pytest.raises(ConfigError, match="protects or iCloud"):
+        load_settings("sandbox", data_dir=Path.home().joinpath(*parts))
+
+
+def test_the_repository_is_matched_ignoring_case(tmp_path):
+    with pytest.raises(ConfigError, match="git checkout"):
+        check_private_path(tmp_path / "REPO" / "data", repo_dir=tmp_path / "repo")
 
 
 def test_icloud_and_relative_paths_are_refused():

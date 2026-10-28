@@ -1,9 +1,12 @@
 """Alerts with de-duplication (ALR-1..3, SYNC-6) — ARCHITECTURE §11.
 
 :func:`record_and_notify` is the only way an alert is raised: it inserts an ``alert_events`` row
-keyed by ``dedupe_key`` (``INSERT … ON CONFLICT DO NOTHING``) and sends a notification ONLY when
-the row was inserted, so each alert fires once. :func:`clear_alert` deletes an event so it can
-fire again (e.g. spending fell back below a threshold after a pending hold dropped).
+keyed by ``dedupe_key`` (``INSERT … ON CONFLICT DO NOTHING``) and queues a notification ONLY when
+the row was inserted, so each alert fires once. The notification is sent after the caller's
+transaction COMMITS (never while it holds locks), and only if the row is still there then: a
+rolled-back transaction or savepoint sends nothing, so a later run can raise the alert again
+without a duplicate. :func:`clear_alert` deletes an event so it can fire again (e.g. spending fell
+back below a threshold after a pending hold dropped).
 
 The evaluation functions below are stubs until the ALR package implements them; callers (sync,
 CSV import, edits) already call them. Suggested dedupe keys: ``budget:<category_id|overall>:
@@ -16,9 +19,11 @@ database (Keychain approval needed, database down) use ``secrets.claim_daily_mar
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from dataclasses import dataclass
+from typing import Any
 
-from sqlalchemy import delete, update
+from sqlalchemy import Connection, Engine, delete, event
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -27,10 +32,18 @@ from budgetapp.models import AlertEvent
 from budgetapp.services.events import ImportOutcome, SyncOutcome
 from budgetapp.services.notify import Notifier
 
+log = logging.getLogger(__name__)
+
+_PENDING = "budgetapp.alerts.pending"
+
 
 @dataclass(frozen=True, slots=True)
 class AlertResult:
-    """``inserted`` is False when an event with the same ``dedupe_key`` already existed."""
+    """``inserted`` is False when an event with the same ``dedupe_key`` already existed.
+
+    ``queued``: the notification will be sent when the caller's transaction commits; the outcome
+    is then recorded on the row (``alert_events.delivered`` / ``delivered_at`` / ``error``).
+    """
 
     kind: str
     dedupe_key: str
@@ -38,6 +51,64 @@ class AlertResult:
     alert_id: int | None = None
     delivered: bool = False
     error: str | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _Pending:
+    notifier: Notifier
+    alert_id: int
+    title: str
+    message: str
+
+
+def _queue(session: Session, pending: _Pending) -> None:
+    queue = session.info.get(_PENDING)
+    if queue is None:
+        queue = session.info[_PENDING] = []
+        event.listen(session, "after_commit", _deliver_after_commit)
+        event.listen(session, "after_soft_rollback", _forget_after_rollback)
+    queue.append(pending)
+
+
+def _forget_after_rollback(session: Session, previous_transaction: Any) -> None:
+    # A savepoint rollback keeps the queue: delivery re-checks that each row still exists.
+    if previous_transaction.parent is None:
+        session.info.get(_PENDING, []).clear()
+
+
+def _deliver_after_commit(session: Session) -> None:
+    queue = session.info.get(_PENDING)
+    if not queue:
+        return
+    pending, queue[:] = list(queue), []
+    try:
+        bind = session.get_bind()
+    except Exception:
+        log.warning("alerts: no database bind to record deliveries; %d not sent", len(pending))
+        return
+    for item in pending:
+        try:
+            _deliver(bind, item)
+        except Exception:  # never break the caller's commit
+            log.warning("alerts: could not deliver alert %s", item.alert_id, exc_info=True)
+
+
+def _deliver(bind: Engine | Connection, item: _Pending) -> None:
+    """Send one committed alert and record the outcome in a short transaction of its own."""
+    with Session(bind=bind) as check:
+        row = check.get(AlertEvent, item.alert_id)
+        if row is None or row.delivered or row.delivered_at is not None or row.error is not None:
+            return  # rolled back with a savepoint, or already handled
+        try:
+            result = item.notifier.notify(item.title, item.message)
+            ok, error = result.ok, result.error
+        except Exception as exc:  # a broken notifier must not break a sync
+            ok, error = False, f"{type(exc).__name__}: {exc}"
+        row.delivered = ok
+        row.delivered_at = clock.now() if ok else None
+        row.error = error if not ok else None
+        check.commit()
 
 
 def record_and_notify(
@@ -55,9 +126,9 @@ def record_and_notify(
 ) -> AlertResult:
     """Record an alert once and notify only if it is new.
 
-    The notification goes out immediately after the insert (inside the caller's transaction);
-    ``delivered``/``delivered_at``/``error`` record whether osascript accepted it. Never raises
-    because of the notifier. The caller commits.
+    The notification is queued and sent right after the caller COMMITS (nothing is sent if the
+    transaction rolls back); ``alert_events.delivered``/``delivered_at``/``error`` then record
+    whether osascript accepted it. Never raises because of the notifier. The caller commits.
     """
     stmt = (
         pg_insert(AlertEvent)
@@ -78,17 +149,8 @@ def record_and_notify(
         return AlertResult(kind, dedupe_key, inserted=False)
     if not notify:
         return AlertResult(kind, dedupe_key, inserted=True, alert_id=alert_id)
-    try:
-        result = notifier.notify(title, message)
-        ok, error = result.ok, result.error
-    except Exception as exc:  # a broken notifier must not break a sync
-        ok, error = False, f"{type(exc).__name__}: {exc}"
-    session.execute(
-        update(AlertEvent)
-        .where(AlertEvent.id == alert_id)
-        .values(delivered=ok, delivered_at=clock.now() if ok else None, error=error)
-    )
-    return AlertResult(kind, dedupe_key, True, alert_id, ok, error)
+    _queue(session, _Pending(notifier, alert_id, title, message))
+    return AlertResult(kind, dedupe_key, inserted=True, alert_id=alert_id, queued=True)
 
 
 def clear_alert(session: Session, dedupe_key: str) -> bool:

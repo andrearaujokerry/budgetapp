@@ -7,12 +7,16 @@ sync can carry the same transaction id in ``added`` on page 1, ``modified`` on p
 cursor replays the same events.
 
 Helpers model what Plaid really does: pending → posted (removed + added with
-``pending_transaction_id``, optional amount change), churn (removed + added, unlinked),
-``NOT_READY`` (empty arrays and ``next_cursor == ''``),
-``TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION``
-(new events appear and the call fails), queued ``PlaidError``/``PlaidTransportError`` per method,
-Item errors (``ITEM_LOGIN_REQUIRED`` on data calls while ``/item/get`` still answers), balances,
-liabilities, ``/transactions/refresh`` callbacks, institution search and a call log.
+``pending_transaction_id``, optional amount change), transaction churn (removed + added,
+unlinked), account churn (:meth:`FakePlaidGateway.churn_account`: a new ``account_id`` and its
+history re-delivered under new ids), ``NOT_READY`` (empty arrays and ``next_cursor == ''``),
+``TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION`` (new events appear and the call fails), scripted
+sync calls (:meth:`FakePlaidGateway.script_sync`: on the item's n-th sync call append events, change
+the update status and/or fail — e.g. a transport error on page 2), queued
+``PlaidError``/``PlaidTransportError`` per method, Item errors (``ITEM_LOGIN_REQUIRED`` on data
+calls while ``/item/get`` still answers), balances, liabilities, ``/transactions/refresh``
+callbacks, institution search and a call log. :meth:`FakePlaidGateway.plaid_error` labels codes
+the way Plaid does (every ``*_LIMIT`` is a 429 ``RATE_LIMIT_EXCEEDED``).
 
 Amounts are served the way ``json.loads(parse_float=Decimal)`` would see Plaid's JSON: ``Decimal``
 for fractional numbers (``12.5``) and ``int`` for whole ones (``5000``).
@@ -79,6 +83,32 @@ def _iso(value: dt.date | str | None) -> str | None:
     return value.isoformat() if isinstance(value, dt.date) else value
 
 
+#: Codes Plaid returns as HTTP 429 ``RATE_LIMIT_EXCEEDED`` (RESEARCH T1.8, T1.10).
+RATE_LIMIT_CODES = frozenset(
+    {
+        "TRANSACTIONS_SYNC_LIMIT",
+        "TRANSACTIONS_REFRESH_LIMIT",
+        "TRANSACTIONS_LIMIT",
+        "ITEM_GET_LIMIT",
+        "ACCOUNTS_LIMIT",
+        "BALANCE_LIMIT",
+        "INSTITUTION_RATE_LIMIT",
+        "RATE_LIMIT",
+        "TRIAL_CONNECTION_LIMIT",
+    }
+)
+#: Codes Plaid returns as ``INVALID_INPUT`` (RESEARCH T1.3, T2.4b).
+INVALID_INPUT_CODES = frozenset(
+    {
+        "INVALID_ACCESS_TOKEN",
+        "INVALID_PUBLIC_TOKEN",
+        "INVALID_FIELD",
+        "INVALID_API_KEYS",
+        "ADDITIONAL_CONSENT_REQUIRED",
+    }
+)
+
+
 @dataclass(frozen=True)
 class Event:
     kind: str
@@ -87,6 +117,15 @@ class Event:
     @property
     def transaction_id(self) -> str:
         return self.transaction["transaction_id"]
+
+
+@dataclass
+class SyncScript:
+    """What happens on one of an Item's sync calls (see ``FakePlaidGateway.script_sync``)."""
+
+    events: list[Event] = field(default_factory=list)
+    error: BaseException | None = None
+    update_status: str | None = None
 
 
 @dataclass
@@ -108,7 +147,7 @@ class FakeItem:
     last_successful_update: str | None = "2026-10-15T06:00:00Z"
     last_failed_update: str | None = None
     sync_calls: int = 0
-    mutations: dict[int, list[Event]] = field(default_factory=dict)
+    scripts: dict[int, SyncScript] = field(default_factory=dict)
     on_refresh: Callable[[FakeItem], None] | None = None
     refresh_count: int = 0
 
@@ -284,16 +323,71 @@ class FakePlaidGateway:
         item.events.append(Event(ADDED, new))
         return copy.deepcopy(new)
 
+    def churn_account(
+        self,
+        item: FakeItem,
+        account_id: str,
+        *,
+        new_id: str | None = None,
+        redeliver: bool = True,
+    ) -> str:
+        """Account churn (§6 step 2): Plaid re-issues ``account_id`` as ``new_id`` (same type,
+        subtype and mask). With ``redeliver`` its current transactions are removed and added
+        again under new transaction ids on the new account. Returns the new account id."""
+        new_id = new_id or f"{account_id}-churned"
+        account = next(a for a in item.accounts if a["account_id"] == account_id)
+        account["account_id"] = new_id
+        if redeliver:
+            for txn_id, txn in self.current_transactions(item).items():
+                if txn["account_id"] != account_id:
+                    continue
+                item.events.append(
+                    Event(REMOVED, {"transaction_id": txn_id, "account_id": account_id})
+                )
+                again = {**txn, "transaction_id": f"{txn_id}-{new_id}", "account_id": new_id}
+                item.events.append(Event(ADDED, again))
+        return new_id
+
     def set_update_status(self, item: FakeItem, status: str) -> None:
         """``NOT_READY`` | ``INITIAL_UPDATE_COMPLETE`` | ``HISTORICAL_UPDATE_COMPLETE`` | …"""
         item.update_status = status
+
+    def script_sync(
+        self,
+        item: FakeItem,
+        call_number: int,
+        *,
+        events: Sequence[Event] = (),
+        error: BaseException | None = None,
+        update_status: str | None = None,
+    ) -> None:
+        """Script the item's ``call_number``-th ``transactions_sync`` call (counting from 1).
+
+        In this order: ``events`` are appended to the log, the update status changes to
+        ``update_status``, then ``error`` is raised (default: the mutation error when ``events``
+        are given, none otherwise); without an error the call answers normally. Examples: a
+        transport error on page 2 (``error=fake.transport_error()``), Plaid's history becoming
+        ready after N calls (``update_status="HISTORICAL_UPDATE_COMPLETE"``).
+        """
+        if error is None and events:
+            error = self.mutation_error()
+        item.scripts[call_number] = SyncScript(list(events), error, update_status)
+
+    def mutation_error(self) -> PlaidError:
+        """``TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION`` as Plaid sends it."""
+        return self.plaid_error(
+            MUTATION_CODE,
+            error_type="TRANSACTIONS_ERROR",
+            message="Underlying transaction data changed since last page was fetched. "
+            "Please restart pagination from last update.",
+        )
 
     def mutate_during_pagination(
         self, item: FakeItem, *, on_call: int, events: Sequence[Event] = ()
     ) -> None:
         """On the item's ``on_call``-th sync call, append ``events`` and fail with
         ``TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION`` (callers restart from their cursor)."""
-        item.mutations[on_call] = list(events)
+        self.script_sync(item, on_call, events=events, error=self.mutation_error())
 
     def queue_error(self, method: str, error: BaseException) -> None:
         """The next call of ``method`` raises ``error`` (FIFO; one error per queued entry)."""
@@ -309,10 +403,13 @@ class FakePlaidGateway:
         display_message: str | None = None,
         error_code_reason: str | None = None,
     ) -> PlaidError:
-        """Build a :class:`PlaidError` as the real gateway would raise it."""
+        """Build a :class:`PlaidError` as the real gateway would raise it (Plaid's error type
+        and HTTP status for the code unless given)."""
         if error_type is None:
-            if code in ("TRANSACTIONS_SYNC_LIMIT", "TRIAL_CONNECTION_LIMIT", "RATE_LIMIT"):
+            if code in RATE_LIMIT_CODES:
                 error_type = "RATE_LIMIT_EXCEEDED"
+            elif code in INVALID_INPUT_CODES:
+                error_type = "INVALID_INPUT"
             elif code.startswith("INSTITUTION_"):
                 error_type = "INSTITUTION_ERROR"
             elif code in ("INTERNAL_SERVER_ERROR", "PLANNED_MAINTENANCE"):
@@ -476,14 +573,13 @@ class FakePlaidGateway:
         item = self.item_for_token(access_token)
         self._raise_item_error(item)
         item.sync_calls += 1
-        if item.sync_calls in item.mutations:
-            item.events.extend(item.mutations.pop(item.sync_calls))
-            raise self.plaid_error(
-                MUTATION_CODE,
-                error_type="TRANSACTIONS_ERROR",
-                message="Underlying transaction data changed since last page was fetched. "
-                "Please restart pagination from last update.",
-            )
+        script = item.scripts.pop(item.sync_calls, None)
+        if script is not None:
+            item.events.extend(script.events)
+            if script.update_status is not None:
+                item.update_status = script.update_status
+            if script.error is not None:
+                raise script.error
         if item.update_status == "NOT_READY":
             return {
                 "accounts": [],
@@ -606,11 +702,13 @@ class FakePlaidGateway:
         *,
         override_username: str | None = None,
         override_password: str | None = None,
+        initial_products: Sequence[str] = ("transactions",),
     ) -> str:
         self._record(
             "sandbox_create_public_token",
             institution_id=institution_id,
             override_username=override_username,
+            initial_products=tuple(initial_products),
         )
         self._sandbox_only("sandbox_create_public_token")
         self._maybe_fail("sandbox_create_public_token")
@@ -618,7 +716,11 @@ class FakePlaidGateway:
             (i["name"] for i in self.institutions if i["institution_id"] == institution_id),
             "Sandbox Bank",
         )
-        item = self.add_item(institution_id=institution_id, institution_name=name)
+        products = list(dict.fromkeys(initial_products))
+        item = self.add_item(
+            institution_id=institution_id, institution_name=name, consented_products=products
+        )
+        item.products = products
         return self.public_token_for(item)
 
     def sandbox_reset_login(self, access_token: str) -> None:

@@ -2,13 +2,16 @@
 
 Each pytest process connects as ``budgetapp_test`` (a non-superuser, peer-mapped on the private
 socket), creates ``budgetapp_test_<pid>``, migrates it, and drops it at the end. The harness
-refuses to run unless the role is not a superuser and the database name starts with
-``budgetapp_test_``. Every test runs inside a transaction that is rolled back.
+refuses to run unless the role is not a superuser, the database name starts with
+``budgetapp_test_``, a superuser connection is refused (``db.admin_connect``) and the settings'
+state, logs, backups and install folders are a per-process scratch folder (never the real ones,
+removed at the end). Every test runs inside a transaction that is rolled back.
 
-Fixtures: ``settings``, ``engine``, ``db`` (a Session joined to the outer transaction with
-savepoints), ``session_factory`` (sessions on the same connection), ``secrets`` (the in-memory
-store, installed for EVERY test so nothing touches the real Keychain), ``notifier`` (recording),
-``fake_plaid``, ``freeze_today``.
+Fixtures: ``settings``, ``engine`` (connections wait at most 30 s for a lock, so a test that
+deadlocks on the ledger lock fails instead of hanging), ``db`` (a Session joined to the outer
+transaction with savepoints), ``session_factory`` (sessions on the same connection),
+``secrets`` (the in-memory store, installed for EVERY test so nothing touches the real Keychain),
+``notifier`` (recording), ``fake_plaid``, ``freeze_today``.
 """
 
 from __future__ import annotations
@@ -18,7 +21,9 @@ import os
 os.environ["BUDGETAPP_ENV"] = "test"  # before anything from budgetapp is imported
 
 import datetime as dt  # noqa: E402
+import shutil  # noqa: E402
 from collections.abc import Callable, Iterator  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 import psycopg  # noqa: E402
 import pytest  # noqa: E402
@@ -28,12 +33,20 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 
 from budgetapp import clock, logsetup  # noqa: E402
 from budgetapp import secrets as app_secrets  # noqa: E402
-from budgetapp.config import TEST_DB_PREFIX, Settings, load_settings  # noqa: E402
-from budgetapp.db import is_ready, make_engine, run_migrations  # noqa: E402
+from budgetapp.config import (  # noqa: E402
+    TEST_DB_PREFIX,
+    ConfigError,
+    Settings,
+    load_settings,
+    scratch_dir_for_tests,
+)
+from budgetapp.db import admin_connect, is_ready, make_engine, run_migrations  # noqa: E402
 from budgetapp.services.notify import RecordingNotifier  # noqa: E402
 from tests.fake_plaid import FakePlaidGateway  # noqa: E402
 
 LIVE_SANDBOX = bool(os.environ.get("BUDGETAPP_LIVE_SANDBOX"))
+#: Test connections never wait longer than this for a lock (a deadlock fails, never hangs).
+TEST_LOCK_TIMEOUT = "30s"
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -41,7 +54,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         return
     skip = pytest.mark.skip(reason="live Plaid Sandbox test: run with ./run test --sandbox")
     for item in items:
-        if "sandbox" in item.keywords:
+        # The marker only: a parametrize id such as "sandbox" is a keyword too.
+        if item.get_closest_marker("sandbox") is not None:
             item.add_marker(skip)
 
 
@@ -82,9 +96,23 @@ def drop_scratch_database(settings: Settings, name: str) -> None:
 
 
 @pytest.fixture(scope="session")
-def settings() -> Settings:
-    """Test settings (``budgetapp_test_<pid>`` as ``budgetapp_test``)."""
-    return load_settings("test")
+def settings() -> Iterator[Settings]:
+    """Test settings (``budgetapp_test_<pid>`` as ``budgetapp_test``).
+
+    ``state_dir``, ``logs_dir``, ``backups_dir`` and ``install_dir`` are a per-process scratch
+    folder (``config.scratch_dir_for_tests``), removed when the session ends.
+    """
+    settings = load_settings("test")
+    library = (Path.home() / "Library").resolve()
+    scratch = scratch_dir_for_tests()
+    for name in ("state_dir", "logs_dir", "backups_dir", "install_dir"):
+        path = Path(getattr(settings, name)).resolve()
+        if path.is_relative_to(library) or not path.is_relative_to(scratch):
+            _refuse(f"settings.{name} ({path}) is not this process's scratch folder")
+    try:
+        yield settings
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")
@@ -102,6 +130,13 @@ def test_database(settings: Settings) -> Iterator[str]:
         row = conn.execute("SELECT rolsuper FROM pg_roles WHERE rolname = current_user").fetchone()
         if row is None or row[0]:
             _refuse("the test role must exist and must not be a superuser")
+    try:
+        superuser = admin_connect(settings)
+    except ConfigError:
+        pass
+    else:
+        superuser.close()
+        _refuse("db.admin_connect() gave test code a superuser connection")
     create_scratch_database(settings, settings.db_name)
     engine = make_engine(settings)
     try:
@@ -114,8 +149,13 @@ def test_database(settings: Settings) -> Iterator[str]:
 
 @pytest.fixture(scope="session")
 def engine(settings: Settings, test_database: str) -> Iterator[Engine]:
-    """Engine for the migrated test database (verified: not superuser, budgetapp_test_*)."""
-    engine = make_engine(settings)
+    """Engine for the migrated test database (verified: not superuser, budgetapp_test_*).
+
+    Its connections set ``lock_timeout`` (:data:`TEST_LOCK_TIMEOUT`): in tests ``commit()`` only
+    releases a savepoint, so a ledger lock taken through ``db`` is held until the test ends, and
+    code that waits for it on another connection fails instead of hanging the suite.
+    """
+    engine = make_engine(settings, connect_args={"options": f"-c lock_timeout={TEST_LOCK_TIMEOUT}"})
     with engine.connect() as conn:
         database, is_super = conn.execute(
             text("SELECT current_database(), rolsuper FROM pg_roles WHERE rolname = current_user")

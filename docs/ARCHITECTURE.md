@@ -65,7 +65,12 @@ repository lives. So production **always** runs the Application Support install:
 - A **schema guard** in `db.py` compares the database's Alembic revision with the code's
   head at every entry point. In production nothing migrates automatically: the web app shows
   an "upgrade needed" page and sync exits quietly with one de-duplicated notice. Sandbox
-  `./run` migrates the sandbox database automatically.
+  `./run` migrates the sandbox database automatically. A database that cannot be reached is
+  not a schema problem: the guard raises `DatabaseUnavailable` ("try later" / an error page),
+  never "upgrade needed".
+- `./run setup` creates the production schema only while that database is still empty (the
+  first setup); it never upgrades it afterwards, and `migrate --env production` refuses to run
+  from a git checkout. Only `upgrade_install()` upgrades production.
 - Once a migration has been applied to production it is never edited.
 
 ### Dedicated PostgreSQL cluster
@@ -203,7 +208,8 @@ charge, fee or interest; a negative amount is a credit (refund, statement credit
 | plaid_item_id | text unique not null | |
 | institution_id, institution_name | text | |
 | status | text not null default 'healthy' | `healthy` \| `needs_reconnect` \| `error` |
-| error_code, error_message | text | last error (Plaid or internal), cleared on success |
+| error_code, error_message | text | last error (Plaid or internal), cleared on success; `error_message` is the technical text (logs, doctor) |
+| error_display_message | text | Plaid's `display_message` for the user, when sent; cleared on success |
 | transactions_cursor | text | saved cursor; null = start from scratch (never store `''`) |
 | transactions_update_status | text | last `transactions_update_status` |
 | history_complete_at | timestamptz | first time `HISTORICAL_UPDATE_COMPLETE` was seen |
@@ -234,14 +240,19 @@ charge, fee or interest; a negative amount is a credit (refund, statement credit
 | notice | text | a message for the user (e.g. "Plaid re-issued this account; please confirm") |
 | is_hidden | bool not null default false | hides the account in pickers; its money still counts |
 
+`CHECK ((item_id IS NULL) = (plaid_account_id IS NULL))`: an account is manual or linked, never
+half of each. The ORM relationship from `plaid_items` uses `passive_deletes="all"` so deleting an
+Item that still has accounts is refused by the database (ON DELETE RESTRICT), not "fixed" by
+nulling `item_id`.
+
 ### categories
 | column | type | notes |
 | --- | --- | --- |
 | name | text not null | unique on `lower(name)` |
 | kind | text not null default 'expense' | `expense` (spending) \| `income` (credits/rewards, not spending) \| `transfer` (card payments, not spending) |
-| system_key | text unique, null | `uncategorized`, `card_payments` — cannot be merged away or hidden |
+| system_key | text unique, null | `uncategorized` (always `expense`), `card_payments` (always `transfer`) — cannot be merged away, hidden or change kind (CHECK) |
 | is_hidden | bool not null default false | hidden from pickers and budget lists; transactions still count |
-| color | text | hex colour for charts and badges |
+| color | text | palette slot `cat-1` … `cat-16` (theme-aware; the seeded categories use these), `other` (neutral grey), or a custom `#rrggbb` |
 | icon | text | optional emoji |
 | sort_order | int not null default 0 | |
 
@@ -251,7 +262,11 @@ Categories are never deleted except by merging (section 6), which re-points ever
 `(source, external_key) → category_id` (FK ON DELETE CASCADE), unique on
 `(source, external_key)`. `source` is `plaid_pfc` (keys are Plaid **PFC v2** codes, detailed
 or primary) or `amex_csv` (Amex CSV `Group-Subgroup` strings, or the `Group` prefix).
-Lookup order: detailed/full key, then primary/group key, then Uncategorized.
+Lookup order: detailed/full key, then primary/group key, then Uncategorized. For a negative
+amount the keys with a `|credit` suffix are tried first (unless the row reads like a fee
+reversal): Amex files cash back and billing-inquiry credits under "Fees & Adjustments", so
+`Fees & Adjustments|credit` and `Fees & Adjustments-Fees & Adjustments|credit` map to Credits &
+Rewards while positive fees stay in Fees & Interest.
 
 ### rules (CAT-3)
 | column | type | notes |
@@ -321,10 +336,18 @@ to the transaction amount. Pending transactions cannot be split.
 One row per (transaction, category) allocation. Splits are used only when they sum exactly to
 the transaction's amount; otherwise the whole amount goes to the transaction's category (and
 the sync flags the row `needs_review`), so allocations always add up to `transactions.amount`.
-Rows with `duplicate_status = 'suspect'` are excluded.
+Rows with `duplicate_status = 'suspect'` are excluded. The CTE names the columns it needs (not
+`SELECT *`): PostgreSQL pins every column a view uses, so a migration that drops, renames or
+retypes one of these columns must recreate the view; any other `transactions` column can change
+freely.
 
 ```sql
-WITH t AS (SELECT * FROM transactions WHERE duplicate_status <> 'suspect'),
+WITH t AS (
+    SELECT id, account_id, date, authorized_date, posted_date, pending, category_id, amount,
+           pfc_primary, pfc_detailed, transaction_code, source
+    FROM transactions
+    WHERE duplicate_status <> 'suspect'
+),
 s AS (SELECT transaction_id, SUM(amount) AS total FROM transaction_splits GROUP BY 1)
 SELECT t.id AS transaction_id, t.account_id, t.date, t.authorized_date, t.posted_date,
        COALESCE(t.authorized_date, t.date) AS spend_date, t.pending,
@@ -423,9 +446,19 @@ For a new transaction:
    category. A positive `PAYMENT … RETURNED/REVERSED` is also Card Payments.
    (`category_source = 'system'`.)
 1. User state carried over from the transaction this one replaces (`category_source = 'user'`).
+   A card payment (step 0) never takes a carried category or carried splits; the row is flagged
+   `needs_review` when one was dropped.
 2. The first matching active rule by `(priority, id)`.
-3. Plaid PFC v2 mapping (detailed, then primary) or, for CSV rows, the Amex category mapping.
+3. Plaid PFC v2 mapping (detailed, then primary) or, for CSV rows, the Amex category mapping —
+   sign-aware: negative amounts try the `|credit` mappings first (section 5), and a positive
+   amount never reaches a `transfer` category through a mapping (it is a charge; real payment
+   reversals were caught by step 0, and a row Plaid codes as a card payment stays one): it goes
+   to Uncategorized, which counts as spending.
 4. Uncategorized.
+
+Every path that gives a row the user state of the row it replaces calls
+`categorize.apply_carried_state(categorizer, row, state)`, so this order never depends on call
+order. A row whose category the user already set keeps it, and keeps its own splits.
 
 A row with `transaction_code = 'refund'` never lands in an `income` or `transfer` category:
 it takes the most recent expense category used for the same merchant, else Uncategorized.
@@ -473,16 +506,24 @@ inserted rows, after every CSV import and after attaching a manual account:
   (CSV `Appears On Your Statement As`/`Description` vs Plaid `original_description`/`name`).
 - A pair moves the CSV row's user state onto the Plaid row (unless the Plaid row has its own),
   copies `csv_reference` and `csv_import_id` onto it, and deletes the CSV row. The globally
-  unique `csv_reference` then makes every re-import of that row a duplicate.
+  unique `csv_reference` then makes every re-import of that row a duplicate. Order matters
+  because that unique key is not deferrable (CSV import uses `ON CONFLICT (csv_reference) DO
+  NOTHING`): capture the CSV row's state, delete the CSV row and flush, then copy the reference
+  and apply the state.
 - **Cutover:** once the Item has `history_complete_at`, each account's `plaid_history_start`
   is set to its earliest Plaid posted date. Unpaired CSV rows dated on or after it become
   `duplicate_status = 'suspect'` (excluded from every total) and are listed on `/import` with
   "Keep" (→ `kept`) and "Delete".
 - `reconcile.attach_manual_account(session, manual_id, plaid_account_id)` (CSV package): drops
   manual rows whose Reference already exists, moves the rest (transactions, imports, rules,
-  statements), deletes the manual account, then runs the full pass. Linking calls it when
-  exactly one manual account and one credit account exist; otherwise the Connection page asks.
-  Once a production Item exists, CSV import may only target linked accounts.
+  statements — a statement that collides on `(account_id, closing_date)` or
+  `(account_id, plaid_issue_date)` is merged into the Plaid account's row, user-entered dates and
+  reported values winning), re-points `app_settings.budget_cycle_account_id` when it names the
+  manual account (its ON DELETE SET NULL would otherwise silently turn statement-cycle budgets
+  into calendar months), copies `statement_closing_day` and `notice` when the Plaid account has
+  none, deletes the manual account, then runs the full pass. Linking calls it when exactly one
+  manual account and one credit account exist; otherwise the Connection page asks. Once a
+  production Item exists, CSV import may only target linked accounts.
 
 ### Locks (REL-1)
 - **Sync lock** (per Item): `pg_try_advisory_lock` on a dedicated connection held for the whole
@@ -571,10 +612,13 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
 
 ### Linking safety (SYNC-1)
 - **The guard.** A production new-link token is issued only when there is no `plaid_items` row,
-  no `plaid.access_token.production` in Keychain and no unexpired
-  `plaid.link_in_progress.production` marker — checked and the marker set under the link lock.
-  The marker is cleared on a successful exchange or when the user cancels Link; otherwise it
-  expires after 4 hours (a Link token's lifetime).
+  no `plaid.access_token.production` in Keychain, no unexpired
+  `plaid.link_in_progress.production` marker and no unsaved production token in a recovery file
+  (`secrets.production_link_blockers`) — checked and the marker set under the link lock.
+  The marker is cleared after a successful exchange (once `store_access_token` has returned
+  normally) or when the user cancels Link; otherwise it expires after 4 hours (a Link token's
+  lifetime). `./run setup --env production --access-token` marks a stored token's recovery
+  files `*.saved`.
 - **Re-attach.** If Keychain holds a production token but the database has no Item (lost or
   restored database), the Connection page offers "Re-attach existing connection" (rebuild the row
   from `/item/get` and `/accounts/get`, sync from a null cursor, reconcile) — never a new link.
@@ -709,6 +753,10 @@ Script Editor and silently drops them until Script Editor is allowed to notify, 
 a one-time step (`./run notify-test`, then allow Script Editor in System Settings →
 Notifications) and `doctor` checks it.
 
+`alerts.record_and_notify` records each alert once (its `dedupe_key`) and sends the notification
+only after the caller's transaction commits, and only if the alert row is still there: a rolled
+back transaction or savepoint sends nothing, and no notification runs while a lock is held.
+
 - **Budget thresholds (ALR-1):** evaluated with `period_spending` (same basis and pending setting
   as the Budgets page) after each sync, import and edit that changes categories. A threshold `t`
   is crossed when `spent > 0` and `spent ≥ available × t / 100` (so a zero or negative available
@@ -728,7 +776,11 @@ Notifications) and `doctor` checks it.
 - Each pytest process connects as `budgetapp_test` (non-superuser) and creates
   `budgetapp_test_<pid>`, runs the migrations, and drops it afterwards. The harness refuses to run
   unless the role is not a superuser and the database name starts with `budgetapp_test_`. Each test
-  runs inside a transaction that is rolled back.
+  runs inside a transaction that is rolled back. Test code never gets a superuser connection and
+  never starts, stops or reconfigures the real cluster; the test settings' state, logs, backups
+  and install folders are a per-process scratch folder; test connections time out on locks after
+  30 s instead of hanging. A test compares the catalog built by the migrations with the one
+  built by the models (every column, constraint definition and index definition).
 - `tests/fake_plaid.py` replays an **event log**, so one sync can carry the same id in added,
   modified and removed on different pages, exactly as Plaid may. It also serves pending → posted,
   churn, `NOT_READY`, mutation-during-pagination, transport errors and item errors.

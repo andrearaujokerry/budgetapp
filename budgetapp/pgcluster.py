@@ -4,6 +4,11 @@ Data directory ``~/Library/Application Support/budgetapp/postgres``, port 5434, 
 Unix-socket directory, peer authentication (with an ident map) on the socket and scram-sha-256 on
 loopback TCP. This module never touches the shared development clusters on ports 5432/5433 and
 refuses to start or initialise when port 5434 belongs to a different data directory.
+
+Test processes (``BUDGETAPP_ENV=test``) may read the cluster's status but never initialise, start,
+stop, reload or administer the real cluster (a throwaway data directory elsewhere is allowed).
+Our settings live in ``budgetapp.conf``, pulled in with a plain ``include`` so a missing file stops
+the server instead of silently starting it with PostgreSQL's defaults (port 5432, a /tmp socket).
 """
 
 from __future__ import annotations
@@ -14,11 +19,12 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+import psycopg
 from psycopg import sql
 
 from budgetapp import secrets
-from budgetapp.config import FORBIDDEN_PG_PORTS, Settings
-from budgetapp.db import admin_connect, is_ready, wait_for_db
+from budgetapp.config import FORBIDDEN_PG_PORTS, Settings, default_data_dir, in_test_process
+from budgetapp.db import admin_connect, is_ready, refuse_superuser_in_tests, wait_for_db
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +35,9 @@ TEST_ROLE = "budgetapp_test"
 DATABASES = {"budgetapp_sandbox": "budgetapp_dev", "budgetapp": "budgetapp_live"}
 SOCKET_PATH_MAX = 103  # macOS limit for a Unix socket path, in bytes
 INCLUDE_FILE = "budgetapp.conf"
+INCLUDE_LINE = f"include = '{INCLUDE_FILE}'"
+#: Written by earlier versions; fails open (a missing file is skipped), so it is replaced.
+LEGACY_INCLUDE_LINE = f"include_if_exists = '{INCLUDE_FILE}'"
 PG_MAJOR = "18"
 
 INITDB_FLAGS = (
@@ -78,9 +87,14 @@ def _server_env() -> dict[str, str]:
 def _run(
     args: list[str], *, timeout: float = 120, check: bool = True
 ) -> subprocess.CompletedProcess:
-    result = subprocess.run(
-        args, capture_output=True, text=True, timeout=timeout, env=_server_env(), check=False
-    )
+    try:
+        result = subprocess.run(
+            args, capture_output=True, text=True, timeout=timeout, env=_server_env(), check=False
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ClusterError(f"{Path(args[0]).name} did not finish within {timeout} s") from exc
+    except OSError as exc:
+        raise ClusterError(f"Could not run {args[0]}: {exc}") from exc
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise ClusterError(f"{Path(args[0]).name} failed (exit {result.returncode}): {detail}")
@@ -95,6 +109,18 @@ def _ensure_private_dir(path: Path) -> None:
 def _check_port(settings: Settings) -> None:
     if settings.pg_port in FORBIDDEN_PG_PORTS:
         raise ClusterError(f"Refusing to manage a cluster on shared port {settings.pg_port}.")
+
+
+def _refuse_in_tests(settings: Settings, action: str) -> None:
+    """Test code never initialises, starts, stops or reloads the real (shared) cluster."""
+    if not in_test_process(settings):
+        return
+    shared = (default_data_dir() / "postgres").resolve(strict=False)
+    if settings.pg_data_dir.resolve(strict=False) == shared:
+        raise ClusterError(
+            f"Refusing to {action} the budgetapp cluster from the test environment; manage it "
+            "with ./run db start|stop in Terminal."
+        )
 
 
 def socket_path(settings: Settings) -> Path:
@@ -165,10 +191,15 @@ def listener_pids(port: int) -> list[int]:
     return sorted({int(line) for line in result.stdout.split() if line.strip().isdigit()})
 
 
+def _is_our_command(command: str, settings: Settings) -> bool:
+    program = Path(command.split(maxsplit=1)[0]).name if command.strip() else ""
+    return program == "postgres" and str(settings.pg_data_dir) in command
+
+
 def is_our_postgres(pid: int, settings: Settings) -> bool:
-    """True when ``pid`` is a postgres process started with our data directory."""
+    """True when ``pid`` is a ``postgres`` process started with our data directory."""
     command = process_command(pid)
-    return bool(command and "postgres" in command and str(settings.pg_data_dir) in command)
+    return bool(command) and _is_our_command(command, settings)
 
 
 def port_conflict(settings: Settings) -> str | None:
@@ -255,6 +286,26 @@ def _write_if_changed(path: Path, content: str) -> bool:
     return True
 
 
+def include_main_conf(text: str) -> str:
+    """``postgresql.conf`` with exactly one ``include = 'budgetapp.conf'`` line (an older
+    ``include_if_exists`` line is replaced in place, so a missing file can never fail open)."""
+    lines = text.splitlines()
+    if INCLUDE_LINE in lines and LEGACY_INCLUDE_LINE not in lines:
+        return text
+    kept: list[str] = []
+    placed = False
+    for line in lines:
+        if line.strip() in (INCLUDE_LINE, LEGACY_INCLUDE_LINE):
+            if not placed:
+                kept.append(INCLUDE_LINE)
+                placed = True
+            continue
+        kept.append(line)
+    if not placed:
+        kept += ["", "# budgetapp settings (port, sockets, auth)", INCLUDE_LINE]
+    return "\n".join(kept) + "\n"
+
+
 def write_config(settings: Settings) -> bool:
     """Write our config files into the data directory; returns ``True`` if anything changed."""
     data = settings.pg_data_dir
@@ -262,12 +313,7 @@ def write_config(settings: Settings) -> bool:
     changed |= _write_if_changed(data / "pg_hba.conf", render_hba())
     changed |= _write_if_changed(data / "pg_ident.conf", render_ident(settings.os_user))
     main_conf = data / "postgresql.conf"
-    include_line = f"include_if_exists = '{INCLUDE_FILE}'"
-    text = main_conf.read_text()
-    if include_line not in text.splitlines():
-        with main_conf.open("a") as fh:
-            fh.write(f"\n# budgetapp settings (port, sockets, auth)\n{include_line}\n")
-        changed = True
+    changed |= _write_if_changed(main_conf, include_main_conf(main_conf.read_text()))
     return changed
 
 
@@ -278,9 +324,13 @@ def init_cluster(settings: Settings) -> bool:
     """Create the cluster if needed and (re)write its config. Idempotent.
 
     Returns ``True`` when a new cluster was created. Refuses when the port belongs to another data
-    directory, or when an existing directory holds a different PostgreSQL major version.
+    directory, when an existing directory holds a different PostgreSQL major version, and in a
+    test process for the real cluster.
     """
     _check_port(settings)
+    _refuse_in_tests(settings, "initialise")
+    initdb = settings.require_pg_bin("initdb")
+    settings.require_pg_bin("pg_ctl")
     check_socket_path(settings)
     conflict = port_conflict(settings)
     if conflict:
@@ -303,7 +353,7 @@ def init_cluster(settings: Settings) -> bool:
         log.info("initialising the cluster at %s", settings.pg_data_dir)
         _run(
             [
-                settings.pg_bin("initdb"),
+                initdb,
                 "-D",
                 str(settings.pg_data_dir),
                 "-U",
@@ -329,11 +379,15 @@ def start(settings: Settings, *, timeout: int = 60) -> str:
     """Start the cluster if it is not running; returns what happened.
 
     Prefers ``launchctl kickstart`` when the ``local.budgetapp.postgres`` agent is loaded, else runs
-    ``pg_ctl -w start`` with ``LC_ALL=C.UTF-8`` and logs to ``<logs_dir>/postgres.log``.
+    ``pg_ctl -w start`` with ``LC_ALL=C.UTF-8`` and logs to ``<logs_dir>/postgres.log``. A stale
+    ``postmaster.pid`` (its PID is gone, or is not a postgres of this data directory) is removed
+    first, as the launchd wrapper does (§2). Refused in a test process for the real cluster.
     """
     _check_port(settings)
+    pg_ctl = settings.require_pg_bin("pg_ctl")
     if is_running(settings):
         return "already running"
+    _refuse_in_tests(settings, "start")
     conflict = port_conflict(settings)
     if conflict:
         raise ClusterError(conflict)
@@ -354,12 +408,13 @@ def start(settings: Settings, *, timeout: int = 60) -> str:
         raise ClusterError(
             "The launchd postgres agent did not start the cluster; see postgres.log."
         )
+    remove_stale_pid_file(settings)
     log_file = settings.logs_dir / "postgres.log"
     if not log_file.exists():
         os.close(os.open(log_file, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600))
     _run(
         [
-            settings.pg_bin("pg_ctl"),
+            pg_ctl,
             "-D",
             str(settings.pg_data_dir),
             "-l",
@@ -376,15 +431,45 @@ def start(settings: Settings, *, timeout: int = 60) -> str:
     return "started"
 
 
+def remove_stale_pid_file(settings: Settings) -> bool:
+    """Delete ``postmaster.pid`` when its PID is not a postgres of our data directory.
+
+    After an unclean shutdown macOS may give that PID to another of the user's processes; then
+    ``pg_ctl start`` refuses ("lock file already exists") and ``pg_ctl stop`` would signal the
+    stranger. Returns ``True`` when a stale file was removed.
+    """
+    pid = postmaster_pid(settings)
+    if pid is None:
+        return False
+    if _pid_alive(pid):
+        command = process_command(pid)
+        if command is None or _is_our_command(command, settings):
+            return False  # our server, or we cannot tell: never delete a live server's lock file
+    path = settings.pg_data_dir / "postmaster.pid"
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    log.warning("removed a stale postmaster.pid (pid %s is not our postgres)", pid)
+    return True
+
+
 def stop(settings: Settings, *, mode: str = "fast", timeout: int = 60) -> str:
-    """Stop the cluster with ``pg_ctl stop -m fast`` (exit 0: launchd's KeepAlive won't restart)."""
+    """Stop the cluster with ``pg_ctl stop -m fast`` (exit 0: launchd's KeepAlive won't restart).
+
+    Never signals a process that is not our postgres: with a stale ``postmaster.pid`` it reports
+    "not running (stale postmaster.pid)". Refused in a test process for the real cluster.
+    """
     _check_port(settings)
+    _refuse_in_tests(settings, "stop")
     pid = postmaster_pid(settings)
     if not is_initialized(settings) or pid is None or not _pid_alive(pid):
         return "not running"
+    if not is_our_postgres(pid, settings):
+        return "not running (stale postmaster.pid)"
     _run(
         [
-            settings.pg_bin("pg_ctl"),
+            settings.require_pg_bin("pg_ctl"),
             "-D",
             str(settings.pg_data_dir),
             "-m",
@@ -401,13 +486,29 @@ def stop(settings: Settings, *, mode: str = "fast", timeout: int = 60) -> str:
 
 def reload(settings: Settings) -> None:
     """Reload the configuration (``pg_hba.conf``/``pg_ident.conf`` changes take effect)."""
-    _run([settings.pg_bin("pg_ctl"), "-D", str(settings.pg_data_dir), "reload"], timeout=30)
+    _refuse_in_tests(settings, "reload")
+    _run([settings.require_pg_bin("pg_ctl"), "-D", str(settings.pg_data_dir), "reload"], timeout=30)
 
 
 def server_version(settings: Settings) -> str | None:
-    """``SHOW server_version`` via the admin connection (``None`` when unavailable)."""
+    """``SHOW server_version`` (``None`` when unavailable).
+
+    Uses the admin connection (``./run db status``), but connects as the non-superuser
+    ``budgetapp_test`` in a test process: test code never gets a superuser connection.
+    """
     try:
-        with admin_connect(settings) as conn:
+        if in_test_process(settings):
+            conn = psycopg.connect(
+                host=str(settings.pg_socket_dir),
+                port=settings.pg_port,
+                dbname="postgres",
+                user=TEST_ROLE,
+                autocommit=True,
+                connect_timeout=10,
+            )
+        else:
+            conn = admin_connect(settings)
+        with conn:
             row = conn.execute("SHOW server_version").fetchone()
     except Exception:
         return None
@@ -455,7 +556,10 @@ def ensure_roles_and_databases(
     * ``budgetapp_test``: LOGIN CREATEDB, not superuser, no password (peer-mapped).
     * ``budgetapp_sandbox`` owned by ``budgetapp_dev`` and ``budgetapp`` owned by
       ``budgetapp_live``, with ``CONNECT`` revoked from ``PUBLIC``.
+
+    Superuser work: refused in a test process (``ConfigError``).
     """
+    refuse_superuser_in_tests(settings)
     actions: list[str] = []
     attributes = "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
     with admin_connect(settings) as conn:

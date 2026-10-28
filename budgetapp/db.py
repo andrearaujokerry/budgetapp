@@ -6,7 +6,11 @@ Connection rules (ARCHITECTURE §2):
   ``budgetapp_live``) with the password from Keychain and ``require_auth=scram-sha-256``.
 * test: the private Unix socket with peer authentication as ``budgetapp_test`` (non-superuser).
 * admin (``setup`` and ``./run db`` only): the private socket with peer auth as the macOS user,
-  who is the cluster superuser.
+  who is the cluster superuser. Refused in test processes (:func:`refuse_superuser_in_tests`).
+
+JSON columns: engines serialize ``Decimal`` (Plaid JSON is parsed with ``parse_float=Decimal``,
+e.g. ``location.lat``) as a JSON number and read JSON numbers back as ``Decimal``. Money is never
+stored as a JSON number (``userstate.to_json`` writes exact strings).
 
 Locks (ARCHITECTURE §6 "Locks"):
 
@@ -19,19 +23,23 @@ Locks (ARCHITECTURE §6 "Locks"):
 
 from __future__ import annotations
 
+import functools
+import json
 import logging
 import subprocess
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 from sqlalchemy import URL, Connection, Engine, create_engine, func, select, text
+from sqlalchemy import exc as sa_exc
 from sqlalchemy.orm import Session, sessionmaker
 
 from budgetapp import secrets
-from budgetapp.config import Settings
+from budgetapp.config import ConfigError, Settings, in_test_process
 
 if TYPE_CHECKING:
     from alembic.config import Config
@@ -50,7 +58,11 @@ MIGRATIONS_LOCATION = "budgetapp:migrations"
 
 
 class SchemaMismatch(Exception):
-    """The database's Alembic revision differs from the code's head revision."""
+    """The database's Alembic revision differs from the code's head revision.
+
+    Raised only when the revision was read and differs (``db_revision`` is ``None`` for an empty
+    database). A database that cannot be reached raises :class:`DatabaseUnavailable` instead.
+    """
 
     def __init__(self, db_revision: str | None, code_revision: str | None) -> None:
         self.db_revision = db_revision
@@ -61,7 +73,45 @@ class SchemaMismatch(Exception):
         )
 
 
+class DatabaseUnavailable(Exception):
+    """The database could not be reached or read (server down, refused, auth failure, missing).
+
+    Not a schema problem: callers treat it as "try later" (sync) or an error page (web), never as
+    "upgrade needed".
+    """
+
+
+# --------------------------------------------------------------------------- JSON columns
+
+
+def _json_default(value: Any) -> Any:
+    """``json.dumps`` fallback: Decimal (Plaid's parsed numbers) becomes a JSON number."""
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise TypeError(f"cannot store the non-finite number {value!r} as JSON")
+        return float(value)  # display-only values (coordinates); money is stored as strings
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+#: Serializer/deserializer for JSON/JSONB columns (see the module docstring).
+json_dumps = functools.partial(json.dumps, default=_json_default)
+json_loads = functools.partial(json.loads, parse_float=Decimal)
+
+
 # --------------------------------------------------------------------------- URLs and engines
+
+
+def refuse_superuser_in_tests(settings: Settings | None = None) -> None:
+    """Raise :class:`ConfigError` in a test process: test code never connects as the superuser.
+
+    The cluster superuser is used only by ``setup`` and ``./run db`` admin commands (§2); database
+    roles are the boundary between test code and real data (§12, SEC-5).
+    """
+    if in_test_process(settings):
+        raise ConfigError(
+            "Refusing a superuser connection from the test environment; tests connect as "
+            "budgetapp_test only."
+        )
 
 
 def database_url(
@@ -74,11 +124,13 @@ def database_url(
     """The SQLAlchemy URL for ``settings`` (the password is hidden when the URL is printed).
 
     ``admin=True`` connects over the socket as the macOS user (cluster superuser) to ``dbname``
-    (default ``postgres``). Otherwise sandbox/production use TCP + scram with the role password
-    from Keychain (or ``password``), and test uses the socket + peer as ``budgetapp_test``.
+    (default ``postgres``); it raises :class:`ConfigError` in a test process. Otherwise
+    sandbox/production use TCP + scram with the role password from Keychain (or ``password``),
+    and test uses the socket + peer as ``budgetapp_test``.
     """
     socket_query = {"host": str(settings.pg_socket_dir), "port": str(settings.pg_port)}
     if admin:
+        refuse_superuser_in_tests(settings)
         return URL.create(
             DRIVER,
             username=settings.os_user,
@@ -116,10 +168,19 @@ def make_engine(
     password: str | None = None,
     **kwargs: object,
 ) -> Engine:
-    """An engine for the environment's database (see :func:`database_url`)."""
+    """An engine for the environment's database (see :func:`database_url`).
+
+    JSON columns use :data:`json_dumps` / :data:`json_loads` (``Decimal``-aware) unless
+    ``json_serializer`` / ``json_deserializer`` are passed.
+    """
     connect_args = {"connect_timeout": 10, "application_name": f"budgetapp-{settings.env}"}
     connect_args.update(kwargs.pop("connect_args", {}) or {})  # type: ignore[arg-type]
-    options: dict[str, object] = {"pool_pre_ping": True, "connect_args": connect_args}
+    options: dict[str, object] = {
+        "pool_pre_ping": True,
+        "connect_args": connect_args,
+        "json_serializer": json_dumps,
+        "json_deserializer": json_loads,
+    }
     options.update(kwargs)
     return create_engine(
         database_url(settings, admin=admin, dbname=dbname, password=password), **options
@@ -134,8 +195,10 @@ def make_session_factory(engine: Engine | Connection) -> sessionmaker[Session]:
 def admin_connect(settings: Settings, dbname: str = "postgres") -> psycopg.Connection:
     """An autocommit psycopg connection as the cluster superuser over the private socket.
 
-    Only ``setup`` and ``./run db`` admin operations use this.
+    Only ``setup`` and ``./run db`` admin operations use this; a test process gets
+    :class:`ConfigError` (:func:`refuse_superuser_in_tests`).
     """
+    refuse_superuser_in_tests(settings)
     return psycopg.connect(
         host=str(settings.pg_socket_dir),
         port=settings.pg_port,
@@ -150,7 +213,8 @@ def admin_connect(settings: Settings, dbname: str = "postgres") -> psycopg.Conne
 def wait_for_db(settings: Settings, timeout: float = 120.0, *, interval: float = 1.0) -> bool:
     """Wait until the cluster accepts connections (``pg_isready``), up to ``timeout`` seconds.
 
-    Returns ``False`` on timeout: "not ready" means "try later", never an alert.
+    Returns ``False`` on timeout: "not ready" means "try later", never an alert. A missing
+    ``pg_isready`` raises :class:`~budgetapp.config.PostgresNotFound` at once instead.
     """
     deadline = time.monotonic() + timeout
     delay = interval
@@ -165,11 +229,16 @@ def wait_for_db(settings: Settings, timeout: float = 120.0, *, interval: float =
 
 
 def is_ready(settings: Settings) -> bool:
-    """True when ``pg_isready`` reports the cluster is accepting connections."""
+    """True when ``pg_isready`` reports the cluster is accepting connections.
+
+    Raises :class:`~budgetapp.config.PostgresNotFound` when ``pg_isready`` itself is missing (a
+    missing program is not a stopped cluster).
+    """
+    program = settings.require_pg_bin("pg_isready")
     try:
         result = subprocess.run(
             [
-                settings.pg_bin("pg_isready"),
+                program,
                 "-q",
                 "-h",
                 str(settings.pg_socket_dir),
@@ -193,14 +262,16 @@ def is_ready(settings: Settings) -> bool:
 
 
 @contextmanager
-def sync_lock(engine: Engine, item_id: int) -> Iterator[bool]:
+def sync_lock(bind: Engine | Connection, item_id: int) -> Iterator[bool]:
     """Hold the per-Item sync lock for the duration of the ``with`` block.
 
     Yields ``True`` when acquired, ``False`` when another process holds it (record the run as
-    ``skipped``). The lock lives on a dedicated autocommit connection that stays checked out for
-    the whole block and is unlocked in ``finally``; if unlocking fails the connection is discarded,
-    which also releases the lock.
+    ``skipped``). The lock lives on a dedicated autocommit connection, opened from ``bind`` (an
+    Engine, or a Connection's engine, e.g. ``session_factory.kw["bind"]`` in tests), that stays
+    checked out for the whole block and is unlocked in ``finally``; if unlocking fails the
+    connection is discarded, which also releases the lock.
     """
+    engine = bind.engine if isinstance(bind, Connection) else bind
     conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
     acquired = False
     try:
@@ -315,12 +386,20 @@ def schema_guard(engine: Engine) -> str:
 
     Every entry point calls this. In production nothing migrates automatically: the web app shows
     an "upgrade needed" page and sync exits quietly; sandbox ``./run`` migrates first.
+
+    A database that cannot be reached or read (down, refused, wrong password, missing database,
+    no permission) raises :class:`DatabaseUnavailable`, never :class:`SchemaMismatch`.
     """
     head = code_head()
     try:
         current = current_revision(engine)
-    except Exception as exc:
-        raise SchemaMismatch(None, head) from exc
+    except sa_exc.DBAPIError as exc:
+        cause = exc.orig or exc
+        detail = str(cause).strip()
+        raise DatabaseUnavailable(
+            f"Could not read the database's schema version ({type(cause).__name__}): "
+            f"{detail.splitlines()[0] if detail else 'no detail'}"
+        ) from exc
     if current != head:
         raise SchemaMismatch(current, head)
     return head

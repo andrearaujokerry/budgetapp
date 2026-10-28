@@ -280,3 +280,108 @@ class TestOtherEndpoints:
         production = FakePlaidGateway(plaid_env="production")
         with pytest.raises(Exception, match="Sandbox-only"):
             production.sandbox_create_public_token("ins_109508")
+
+
+class TestScriptedScenarios:
+    """What the SYNC package needs without patching the shared fake."""
+
+    def test_a_transport_error_on_page_two(self, fake, item):
+        fake.page_size = 1
+        fake.add_transaction(item, transaction_id="a")
+        fake.add_transaction(item, transaction_id="b")
+        fake.script_sync(item, 2, error=fake.transport_error())
+        first = fake.transactions_sync(item.access_token, None)
+        assert ids(first["added"]) == ["a"] and first["has_more"]
+        with pytest.raises(PlaidTransportError) as info:
+            fake.transactions_sync(item.access_token, first["next_cursor"])
+        assert info.value.restart_pagination
+        pages, _ = sync_all(fake, item)  # the restart from the original cursor sees everything
+        assert [i for p in pages for i in ids(p["added"])] == ["a", "b"]
+
+    def test_an_item_error_on_page_two(self, fake, item):
+        fake.page_size = 1
+        fake.add_transaction(item, transaction_id="a")
+        fake.add_transaction(item, transaction_id="b")
+        fake.script_sync(item, 2, error=fake.plaid_error("ITEM_LOGIN_REQUIRED"))
+        first = fake.transactions_sync(item.access_token, None)
+        with pytest.raises(PlaidError) as info:
+            fake.transactions_sync(item.access_token, first["next_cursor"])
+        assert info.value.needs_reconnect
+
+    def test_history_becomes_ready_after_some_calls(self, fake):
+        item = fake.add_item(update_status="NOT_READY")
+        fake.add_transaction(item, transaction_id="old")
+        fake.script_sync(item, 2, update_status="INITIAL_UPDATE_COMPLETE")
+        fake.script_sync(item, 3, update_status="HISTORICAL_UPDATE_COMPLETE")
+        statuses = [
+            fake.transactions_sync(item.access_token, None)["transactions_update_status"]
+            for _ in range(4)
+        ]
+        assert statuses == [
+            "NOT_READY",
+            "INITIAL_UPDATE_COMPLETE",
+            "HISTORICAL_UPDATE_COMPLETE",
+            "HISTORICAL_UPDATE_COMPLETE",
+        ]
+
+    def test_events_without_an_error_mean_a_mutation(self, fake, item):
+        late = Event("added", plaid_txn(transaction_id="late", account_id=item.default_account_id))
+        fake.script_sync(item, 1, events=[late])
+        with pytest.raises(PlaidError) as info:
+            fake.transactions_sync(item.access_token, None)
+        assert info.value.is_mutation_during_pagination and info.value.restart_pagination
+
+    def test_account_churn_redelivers_history_under_new_ids(self, fake, item):
+        old_account = item.default_account_id
+        fake.add_transaction(item, transaction_id="t1", amount="10.00")
+        _, cursor = sync_all(fake, item)
+        new_account = fake.churn_account(item, old_account)
+        assert item.default_account_id == new_account != old_account
+        churned = fake.get_accounts(item.access_token)["accounts"][0]
+        assert churned["account_id"] == new_account and churned["mask"] is not None
+        page = fake.transactions_sync(item.access_token, cursor)
+        assert page["removed"] == [{"transaction_id": "t1", "account_id": old_account}]
+        [again] = page["added"]
+        assert again["account_id"] == new_account and again["transaction_id"] != "t1"
+        assert again["amount"] == Decimal("10")
+
+
+class TestPlaidErrorLabels:
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "TRANSACTIONS_SYNC_LIMIT",
+            "TRANSACTIONS_REFRESH_LIMIT",
+            "TRANSACTIONS_LIMIT",
+            "ITEM_GET_LIMIT",
+            "ACCOUNTS_LIMIT",
+            "INSTITUTION_RATE_LIMIT",
+            "TRIAL_CONNECTION_LIMIT",
+        ],
+    )
+    def test_rate_limits_are_429(self, code):
+        error = FakePlaidGateway.plaid_error(code)
+        assert (error.error_type, error.status) == ("RATE_LIMIT_EXCEEDED", 429)
+        assert error.retryable is (code != "TRIAL_CONNECTION_LIMIT")
+
+    @pytest.mark.parametrize(
+        "code", ["INVALID_ACCESS_TOKEN", "ADDITIONAL_CONSENT_REQUIRED", "INVALID_PUBLIC_TOKEN"]
+    )
+    def test_invalid_input(self, code):
+        error = FakePlaidGateway.plaid_error(code)
+        assert error.error_type == "INVALID_INPUT" and error.status == 400 and not error.retryable
+
+
+def test_sandbox_items_can_include_liabilities(fake):
+    token = fake.sandbox_create_public_token(
+        "ins_109508", initial_products=("transactions", "liabilities")
+    )
+    item = fake.items[fake.exchange_public_token(token).item_id]
+    assert item.products == ["transactions", "liabilities"]
+    assert fake.get_liabilities(item.access_token)["liabilities"]["credit"]
+
+
+def test_default_locations_carry_decimal_coordinates(fake, item):
+    fake.add_transaction(item)
+    location = fake.transactions_sync(item.access_token, None)["added"][0]["location"]
+    assert isinstance(location["lat"], Decimal) and isinstance(location["lon"], Decimal)

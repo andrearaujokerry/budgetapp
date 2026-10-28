@@ -3,15 +3,18 @@ import argparse
 import pytest
 
 from budgetapp import cli
+from budgetapp import secrets as sec
 from budgetapp.commands import NOT_BUILT, setup
 from budgetapp.commands import db as db_command
+from budgetapp.commands import migrate as migrate_command
 from budgetapp.commands import test as test_command
-from budgetapp.config import load_settings
+from budgetapp.config import ConfigError, load_settings
 from budgetapp.plaid_gateway import PlaidError
 
 ALL_COMMANDS = {
     "start",
     "serve",
+    "demo",
     "setup",
     "db",
     "migrate",
@@ -31,7 +34,8 @@ ALL_COMMANDS = {
 }
 STUBS = {
     "start": [],
-    "serve": [],
+    "serve": ["--demo", "probe", "--port", "8801"],
+    "demo": ["create", "probe", "--seed", "3"],
     "sync": ["--if-due", "--unattended", "--item", "3"],
     "sandbox-link": ["--user", "custom", "--institution", "ins_109508"],
     "sandbox-refresh": [],
@@ -96,12 +100,15 @@ def test_db_url_hides_the_password(capsys, secrets, monkeypatch):
     assert "very-secret-password" not in out and "budgetapp_dev" in out and "***" in out
 
 
-def test_db_psql_passes_the_password_in_the_environment_only(secrets):
+def test_db_psql_passes_the_password_in_the_environment_only(secrets, monkeypatch):
     secrets.values["db.password.budgetapp_live"] = "live-password-123"
     argv, env = db_command.psql_command(load_settings("production"))
     assert "live-password-123" not in " ".join(argv)
     assert env == {"PGPASSWORD": "live-password-123"}
     assert "require_auth=scram-sha-256" in argv[-1] and "user=budgetapp_live" in argv[-1]
+    with pytest.raises(ConfigError, match="superuser"):
+        db_command.psql_command(load_settings("sandbox"), admin=True)
+    monkeypatch.setenv("BUDGETAPP_ENV", "sandbox")  # as ./run db psql --admin runs it
     admin_argv, admin_env = db_command.psql_command(load_settings("sandbox"), admin=True)
     assert admin_env == {} and "dbname=postgres" in admin_argv[-1]
 
@@ -109,7 +116,57 @@ def test_db_psql_passes_the_password_in_the_environment_only(secrets):
 def test_db_status_reports_the_running_cluster(capsys):
     assert cli.main(["db", "status"]) == 0
     out = capsys.readouterr().out
-    assert "running" in out and "5434" in out
+    assert "running" in out and "5434" in out and "server version : 18" in out
+
+
+def test_demo_stub_keeps_its_documented_options(capsys):
+    for argv in (["demo", "list"], ["demo", "drop", "probe"]):
+        assert cli.main(argv) == 2
+    with pytest.raises(SystemExit):
+        cli.main(["demo", "explode"])
+
+
+class TestSetupNeverUpgradesProduction:
+    def _fake_env(self, monkeypatch, current):
+        migrated = []
+        monkeypatch.setattr(setup, "make_engine", lambda settings: _Disposable())
+        monkeypatch.setattr(setup, "current_revision", lambda engine: current)
+        monkeypatch.setattr(
+            setup, "migrate_env", lambda settings: migrated.append(settings.env) or (None, "x")
+        )
+        return migrated
+
+    def test_an_existing_production_database_is_only_reported(self, monkeypatch):
+        migrated = self._fake_env(monkeypatch, current="0002_seed_defaults")
+        line = setup.migrate_database(load_settings("production"))
+        assert migrated == [] and "never upgrades production" in line
+        assert "0002_seed_defaults" in line
+
+    def test_the_first_setup_creates_the_production_schema(self, monkeypatch):
+        migrated = self._fake_env(monkeypatch, current=None)
+        setup.migrate_database(load_settings("production"))
+        assert migrated == ["production"]
+
+    def test_sandbox_is_always_migrated(self, monkeypatch):
+        migrated = self._fake_env(monkeypatch, current="0001_initial")
+        setup.migrate_database(load_settings("sandbox"))
+        assert migrated == ["sandbox"]
+
+
+class _Disposable:
+    def dispose(self):
+        pass
+
+
+def test_migrate_refuses_production_from_a_checkout(capsys, monkeypatch):
+    monkeypatch.setattr(
+        migrate_command, "migrate_env", lambda *a: pytest.fail("migrated production")
+    )
+    settings = load_settings("production")
+    assert settings.repo_dir is not None
+    args = argparse.Namespace(revision="head")
+    assert migrate_command.run(args, settings) == 2
+    assert "installed copy" in capsys.readouterr().out
 
 
 class TestPlaidKeyPrompts:
@@ -179,6 +236,22 @@ class TestAccessTokenReentry:
             )
             == 0
         )
+
+    def test_reentering_a_token_from_a_recovery_file_unblocks_linking(
+        self, tmp_path, secrets, capsys
+    ):
+        settings = self._settings(tmp_path)
+        secrets.fail_on[("set", "plaid.access_token.production")] = RuntimeError("Keychain")
+        with pytest.raises(sec.TokenNotSavedError):
+            sec.store_access_token(settings, "item-prod-1", self.TOKEN)
+        assert sec.production_link_blockers(settings)
+        del secrets.fail_on[("set", "plaid.access_token.production")]
+        rc = setup.enter_access_token(
+            settings, input_fn=lambda _: self.TOKEN, gateway=FakeItemGateway(), store=secrets
+        )
+        assert rc == 0 and sec.unsaved_production_tokens(settings) == []
+        assert "Marked the recovery file as saved" in capsys.readouterr().out
+        assert [("re-attach" in r) for r in sec.production_link_blockers(settings)] == [True]
 
     def test_rejected_or_conflicting_tokens_are_not_saved(self, tmp_path, secrets):
         settings = self._settings(tmp_path)

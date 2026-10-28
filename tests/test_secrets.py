@@ -1,8 +1,10 @@
 import datetime as dt
 import io
 import logging
+import os
 import stat
 import sys
+import threading
 
 import keyring.errors
 import pytest
@@ -12,6 +14,7 @@ from budgetapp import secrets as sec
 from budgetapp.config import load_settings
 from budgetapp.secrets import (
     PRODUCTION_ACCESS_TOKEN,
+    SANDBOX_ITEM_INDEX,
     AccessTokenConflict,
     KeychainApprovalNeeded,
     KeychainStore,
@@ -132,6 +135,108 @@ class TestAccessTokens:
         assert first != second
         assert first.read_text() == "one" and second.read_text() == "two"
 
+    @pytest.mark.parametrize("interrupt", [KeyboardInterrupt(), SystemExit(1)])
+    def test_ctrl_c_during_the_keychain_write_still_saves_the_token(self, prod, secrets, interrupt):
+        secrets.fail_on[("set", PRODUCTION_ACCESS_TOKEN)] = interrupt
+        with pytest.raises(type(interrupt)):
+            sec.store_access_token(prod, "item-1", PROD_TOKEN)
+        [path] = sec.unsaved_production_tokens(prod)
+        assert PROD_TOKEN in path.read_text() and _mode(path) == 0o600
+
+    def test_unwritable_state_dir_falls_back_to_the_temp_folder(
+        self, prod, secrets, monkeypatch, tmp_path
+    ):
+        fallback = tmp_path / "fallback"
+        monkeypatch.setattr(sec, "fallback_recovery_dir", lambda: fallback)
+        prod.state_dir.mkdir(parents=True)
+        prod.state_dir.chmod(0o500)  # read-only: the recovery folder cannot be created
+        secrets.fail_on[("set", None)] = RuntimeError("disk full")
+        try:
+            with pytest.raises(TokenNotSavedError) as info:
+                sec.store_access_token(prod, "item-1", PROD_TOKEN)
+        finally:
+            prod.state_dir.chmod(0o700)
+        path = info.value.recovery_path
+        assert path.parent == fallback / "recovery" and PROD_TOKEN in path.read_text()
+        assert sec.unsaved_production_tokens(prod) == [path]
+
+    def test_no_recovery_file_at_all_keeps_the_token_out_of_the_message(
+        self, prod, secrets, monkeypatch, tmp_path
+    ):
+        def refuse(*args, **kwargs):
+            raise PermissionError("read-only volume")
+
+        monkeypatch.setattr(sec, "write_access_token_recovery_file", refuse)
+        secrets.fail_on[("set", None)] = RuntimeError("disk full")
+        with pytest.raises(TokenNotSavedError) as info:
+            sec.store_access_token(prod, "item-1", PROD_TOKEN)
+        assert info.value.recovery_path is None
+        assert PROD_TOKEN not in str(info.value) and "only in this process" in str(info.value)
+
+    def test_sandbox_index_is_written_before_the_token(self, sandbox, secrets):
+        order = []
+        original = secrets.set
+
+        def recording_set(account, value):
+            order.append(account)
+            original(account, value)
+
+        secrets.set = recording_set
+        sec.store_access_token(sandbox, "item-a", SANDBOX_TOKEN)
+        assert order == [SANDBOX_ITEM_INDEX, "plaid.access_token.sandbox.item-a"]
+
+    def test_failed_index_write_never_leaves_an_unfindable_token(self, sandbox, secrets):
+        secrets.fail_on[("set", SANDBOX_ITEM_INDEX)] = RuntimeError("index write failed")
+        with pytest.raises(TokenNotSavedError) as info:
+            sec.store_access_token(sandbox, "item-a", SANDBOX_TOKEN)
+        assert "plaid.access_token.sandbox.item-a" not in secrets.values
+        assert SANDBOX_TOKEN in info.value.recovery_path.read_text()
+
+
+class TestProductionLinkGuard:
+    def test_nothing_blocks_a_first_link(self, prod):
+        assert sec.production_link_blockers(prod) == []
+
+    def test_a_saved_token_or_a_live_marker_blocks(self, prod, secrets, freeze_today):
+        start = dt.datetime(2026, 10, 15, 12, 0, tzinfo=dt.UTC)
+        freeze_today(now=start)
+        sec.set_link_in_progress()
+        assert ["started" in r for r in sec.production_link_blockers(prod)] == [True]
+        freeze_today(now=start + dt.timedelta(hours=4, minutes=1))
+        assert sec.production_link_blockers(prod) == []
+        secrets.values[PRODUCTION_ACCESS_TOKEN] = PROD_TOKEN
+        assert ["re-attach" in r for r in sec.production_link_blockers(prod)] == [True]
+
+    def test_a_token_stuck_in_a_recovery_file_blocks_after_the_marker_expires(
+        self, prod, secrets, freeze_today
+    ):
+        start = dt.datetime(2026, 10, 15, 12, 0, tzinfo=dt.UTC)
+        freeze_today(now=start)
+        sec.set_link_in_progress()
+        secrets.fail_on[("set", PRODUCTION_ACCESS_TOKEN)] = RuntimeError("Keychain refused")
+        with pytest.raises(TokenNotSavedError):
+            sec.store_access_token(prod, "item-1", PROD_TOKEN)
+        freeze_today(now=start + dt.timedelta(hours=4, minutes=1))
+        assert sec.get_link_in_progress() is None and sec.get_access_token("production") is None
+        [reason] = sec.production_link_blockers(prod)
+        assert "recovery file" in reason and PROD_TOKEN not in reason
+
+        del secrets.fail_on[("set", PRODUCTION_ACCESS_TOKEN)]
+        sec.store_access_token(prod, "item-1", PROD_TOKEN)
+        [saved] = sec.mark_recovery_saved(prod, PROD_TOKEN)
+        assert saved.suffix == ".saved" and _mode(saved) == 0o600
+        assert sec.unsaved_production_tokens(prod) == []
+        assert ["re-attach" in r for r in sec.production_link_blockers(prod)] == [True]
+
+    def test_only_files_holding_that_token_are_marked_saved(self, prod, secrets):
+        secrets.fail_on[("set", PRODUCTION_ACCESS_TOKEN)] = RuntimeError("Keychain refused")
+        for token in (PROD_TOKEN, OTHER_TOKEN):
+            with pytest.raises(TokenNotSavedError):
+                sec.store_access_token(prod, "item-1", token)
+        assert len(sec.mark_recovery_saved(prod, PROD_TOKEN)) == 1
+        [left] = sec.unsaved_production_tokens(prod)
+        assert OTHER_TOKEN in left.read_text()
+
 
 class TestLinkMarker:
     def test_expires_after_four_hours(self, freeze_today):
@@ -225,6 +330,24 @@ class TestKeychainErrorMapping:
         with pytest.raises(SecretStoreError, match="real Keychain"):
             KeychainStore().get("plaid.client_id")
 
+    @pytest.mark.parametrize(
+        "account",
+        [PRODUCTION_ACCESS_TOKEN, "plaid.secret.production", "db.password.budgetapp_live"],
+    )
+    def test_live_sandbox_tests_cannot_touch_production_items(self, monkeypatch, account):
+        monkeypatch.setenv("BUDGETAPP_LIVE_SANDBOX", "1")
+        store = KeychainStore()
+        for call in (lambda: store.get(account), lambda: store.set(account, "value-1234")):
+            with pytest.raises(SecretStoreError, match="Sandbox Keychain items"):
+                call()
+        assert store._backend is None  # refused before the Keychain was opened
+
+    def test_sandbox_accounts(self):
+        assert sec.is_sandbox_account("plaid.client_id")
+        assert sec.is_sandbox_account("plaid.access_token.sandbox.item-1")
+        assert sec.is_sandbox_account(SANDBOX_ITEM_INDEX)
+        assert not sec.is_sandbox_account("plaid.link_in_progress.production")
+
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
     def test_unattended_mode_binds_the_security_framework(self):
         assert sec.enable_unattended_mode() is True
@@ -285,6 +408,25 @@ class TestRedaction:
             sys.excepthook = previous
         assert "0123456789abcdef01234567" not in capsys.readouterr().err
 
+    def test_uncaught_errors_in_other_threads_are_redacted(self, capsys, secrets):
+        secrets.values["db.password.budgetapp_live"] = "kN3v9-xQ2_Zr8LmW4tYp6"
+        password = sec.get_secret("db.password.budgetapp_live")
+        previous = (sys.excepthook, threading.excepthook, sys.unraisablehook)
+
+        def worker():
+            raise ValueError(f"worker failed for {PROD_TOKEN} pw={password}")
+
+        try:
+            logsetup.install_excepthook()
+            thread = threading.Thread(target=worker, name="sync-worker")
+            thread.start()
+            thread.join()
+        finally:
+            sys.excepthook, threading.excepthook, sys.unraisablehook = previous
+        err = capsys.readouterr().err
+        assert "sync-worker" in err and "ValueError" in err
+        assert password not in err and "11111111-2222" not in err
+
     def test_setup_logging_writes_a_private_file(self, tmp_path):
         settings = load_settings("sandbox", logs_dir=tmp_path / "logs")
         root = logging.getLogger()
@@ -315,6 +457,35 @@ class TestDailyMarker:
         assert sec.claim_daily_marker(tmp_path, "keychain:production", today=day + dt.timedelta(1))
         marker = next((tmp_path / "markers").iterdir())
         assert _mode(marker) == 0o600
+
+    def test_concurrent_claims_notify_once(self, tmp_path):
+        day = dt.date(2026, 10, 28)
+        for round_ in range(20):
+            barrier = threading.Barrier(8)
+            results = []
+
+            def claim(key=f"keychain-{round_}", barrier=barrier, results=results):
+                barrier.wait()
+                results.append(sec.claim_daily_marker(tmp_path, key, today=day))
+
+            threads = [threading.Thread(target=claim) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            assert results.count(True) == 1
+
+    def test_a_marker_another_process_created_counts_and_old_days_are_pruned(self, tmp_path):
+        markers = tmp_path / "markers"
+        markers.mkdir()
+        (markers / "keychain.2026-10-27").touch()
+        (markers / "keychain.extra.2026-10-27").touch()  # another key: kept
+        fd = os.open(markers / "keychain.2026-10-28", os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+        assert not sec.claim_daily_marker(tmp_path, "keychain", today=dt.date(2026, 10, 28))
+        assert sec.claim_daily_marker(tmp_path, "keychain", today=dt.date(2026, 10, 29))
+        names = sorted(p.name for p in markers.iterdir())
+        assert names == ["keychain.2026-10-29", "keychain.extra.2026-10-27"]
 
     def test_uses_the_clock(self, tmp_path, freeze_today):
         freeze_today("2026-10-15")

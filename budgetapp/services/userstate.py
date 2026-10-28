@@ -207,19 +207,58 @@ def capture(txn: Transaction) -> UserState | None:
     return None if state.is_empty else state
 
 
+def _payment_reason(lost_category: bool, lost_splits: bool) -> str:
+    start = "This looks like a card payment, so it is in Card Payments: "
+    if lost_category and lost_splits:
+        return (
+            f"{start}the category you chose and the splits of the earlier version of this charge "
+            "were not carried over (payments are never split). Change the category if that is "
+            "wrong."
+        )
+    if lost_category:
+        return (
+            f"{start}the category you chose for the earlier version of this charge was not "
+            "carried over. Change it if that is wrong."
+        )
+    return (
+        f"{start}the splits of the earlier version of this charge were not carried over "
+        "(payments are never split)."
+    )
+
+
 def apply(txn: Transaction, state: UserState | None, *, include_category: bool = True) -> bool:
     """Move ``state`` onto ``txn``. Returns ``True`` when the row was flagged ``needs_review``.
 
+    The result does not depend on whether ``txn`` was categorized before or after (prefer
+    ``categorize.apply_carried_state``, which does both):
+
     * category: set with ``category_source = 'user'`` (unless ``include_category=False``);
+    * splits: land on the target, rescaled when the amounts differ (see module docs). A pending
+      target cannot be split: it takes the largest split's category instead;
+    * a target with its own categorization (a user-set category, or splits) keeps it: the
+      carried category and splits are not applied;
+    * a card payment (``category_source = 'system'``, or step 0 of categorization says so)
+      never takes a carried category or splits; the row is flagged when one was dropped;
     * notes: set; if the target already has different notes, both are kept (carried notes first);
-    * tags: union (case-insensitive de-duplication);
-    * splits: replace the target's splits, rescaled when the amounts differ (see module docs). A
-      pending target cannot be split: it takes the largest split's category instead.
+    * tags: union (case-insensitive de-duplication).
     """
     if state is None or state.is_empty:
         return False
-    if include_category and state.category_id is not None:
-        txn.category_id = state.category_id
+    from budgetapp.services.categorize import is_payment  # categorize imports this module
+
+    category_id = state.category_id if include_category else None
+    splits = state.splits
+    payment_reason = None
+    own_choice = txn.category_source == "user" and txn.category_id != state.category_id
+    if own_choice or txn.splits:
+        category_id, splits = None, ()
+    elif txn.category_source == "system" or is_payment(txn):
+        lost_category = category_id is not None and category_id != txn.category_id
+        if lost_category or splits:
+            payment_reason = _payment_reason(lost_category, bool(splits))
+        category_id, splits = None, ()
+    if category_id is not None:
+        txn.category_id = category_id
         txn.category_source = "user"
         txn.rule_id = None
     if state.notes:
@@ -230,7 +269,10 @@ def apply(txn: Transaction, state: UserState | None, *, include_category: bool =
             txn.notes = f"{state.notes}\n\n{txn.notes}"
     if state.tags:
         txn.tags = normalize_tags(txn.tags, state.tags)
-    flagged = _land_splits(txn, state.splits) if state.splits else False
+    flagged = _land_splits(txn, splits) if splits else False
+    if payment_reason is not None:
+        _flag(txn, payment_reason)
+        flagged = True
     stamps = [t for t in (txn.user_edited_at, state.user_edited_at) if t is not None]
     txn.user_edited_at = max(stamps) if stamps else clock.now()
     return flagged

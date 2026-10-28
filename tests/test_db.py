@@ -1,18 +1,22 @@
 import threading
 import time
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import exc, func, select, text
 
 from budgetapp import db as dbmod
-from budgetapp.config import load_settings
+from budgetapp.config import ConfigError, PostgresNotFound, load_settings
 from budgetapp.db import (
     LEDGER_KEY,
     LOCK_NS_GLOBAL,
     LOCK_NS_SYNC,
+    DatabaseUnavailable,
     SchemaMismatch,
+    admin_connect,
     code_head,
     database_url,
+    is_ready,
     ledger_lock,
     link_lock,
     make_engine,
@@ -21,13 +25,20 @@ from budgetapp.db import (
     sync_lock,
     wait_for_db,
 )
+from budgetapp.models import Transaction
+from budgetapp.plaid_gateway import parse_json
 from tests.conftest import create_scratch_database, drop_scratch_database
+from tests.factories import make_account, make_transaction
 
 
 def _advisory_locks(engine, ns):
+    """Advisory locks of namespace ``ns`` in THIS database (other suites share the cluster)."""
     with engine.connect() as conn:
         return conn.execute(
-            text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = :ns"),
+            text(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = :ns "
+                "AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+            ),
             {"ns": ns},
         ).scalar()
 
@@ -59,6 +70,30 @@ class TestSyncLock:
                 conn.execute(text("SELECT 1"))
             with sync_lock(engine, 44) as second:
                 assert second is False
+
+    def test_accepts_a_connection_bind(self, engine, connection, session_factory):
+        """SYNC gets a session factory; in tests its bind is the test Connection."""
+        bind = session_factory.kw["bind"]
+        assert bind is connection
+        with sync_lock(bind, 45) as acquired:
+            assert acquired
+            with sync_lock(engine, 45) as second:
+                assert second is False
+        assert _advisory_locks(engine, LOCK_NS_SYNC) == 0
+
+    def test_counts_only_this_database(self, engine, settings):
+        """A sync lock held in another database (another suite) is not ours to count."""
+        other = f"{settings.db_name}_lockcount"
+        create_scratch_database(settings, other)
+        holder_engine = make_engine(settings, dbname=other)
+        try:
+            with holder_engine.connect() as holder:
+                holder.execute(select(func.pg_advisory_lock(LOCK_NS_SYNC, 999)))
+                assert _advisory_locks(engine, LOCK_NS_SYNC) == 0
+                holder.execute(select(func.pg_advisory_unlock(LOCK_NS_SYNC, 999)))
+        finally:
+            holder_engine.dispose()
+            drop_scratch_database(settings, other)
 
 
 class TestLedgerLock:
@@ -114,6 +149,19 @@ class TestSchemaGuard:
     def test_passes_at_head(self, engine):
         assert schema_guard(engine) == code_head()
 
+    def test_an_unreachable_database_is_not_an_upgrade_problem(self, settings, tmp_path):
+        missing = make_engine(settings, dbname=f"{settings.db_name}_does_not_exist")
+        nowhere = make_engine(settings.replace(pg_socket_dir=tmp_path / "nosock"))
+        try:
+            for engine in (missing, nowhere):
+                with pytest.raises(DatabaseUnavailable) as info:
+                    schema_guard(engine)
+                assert not isinstance(info.value, SchemaMismatch)
+                assert "Upgrade needed" not in str(info.value)
+        finally:
+            missing.dispose()
+            nowhere.dispose()
+
     def test_detects_an_empty_or_old_database(self, settings):
         name = f"{settings.db_name}_guard"
         create_scratch_database(settings, name)
@@ -155,10 +203,47 @@ class TestUrls:
         assert url.password is None
         assert url.query["host"] == str(settings.pg_socket_dir)
 
-    def test_admin_is_the_os_user_over_the_socket(self, settings):
+    def test_admin_is_the_os_user_over_the_socket(self, monkeypatch):
+        monkeypatch.setenv("BUDGETAPP_ENV", "sandbox")  # as ./run db would run it
+        settings = load_settings("sandbox")
         url = database_url(settings, admin=True)
         assert url.username == settings.os_user and url.database == "postgres"
-        assert url.host is None
+        assert url.host is None and url.query["host"] == str(settings.pg_socket_dir)
+
+    def test_test_code_never_gets_a_superuser_connection(self, settings):
+        for candidate in (settings, load_settings("sandbox")):
+            with pytest.raises(ConfigError, match="superuser"):
+                database_url(candidate, admin=True)
+            with pytest.raises(ConfigError, match="superuser"):
+                make_engine(candidate, admin=True)
+            with pytest.raises(ConfigError, match="superuser"):
+                admin_connect(candidate)
+
+
+class TestJsonColumns:
+    def test_decimal_coordinates_from_the_gateway_are_stored(self, db):
+        """Plaid JSON parsed with parse_float=Decimal (location.lat/lon) fits a JSONB column."""
+        body = parse_json(
+            b'{"location": {"address": "1 Main St", "city": "New York", '
+            b'"lat": 40.7411, "lon": -73.9897}}'
+        )
+        assert isinstance(body["location"]["lat"], Decimal)
+        txn = make_transaction(db, make_account(db), location=body["location"])
+        db.expire_all()
+        stored = db.get(Transaction, txn.id).location
+        assert stored == {
+            "address": "1 Main St",
+            "city": "New York",
+            "lat": Decimal("40.7411"),
+            "lon": Decimal("-73.9897"),
+        }
+        assert isinstance(stored["lat"], Decimal)  # read back exactly, never a float
+
+    def test_values_json_cannot_express_are_refused(self):
+        with pytest.raises(TypeError):
+            dbmod.json_dumps({"x": Decimal("NaN")})
+        with pytest.raises(TypeError):
+            dbmod.json_dumps({"x": object()})
 
 
 def test_wait_for_db(settings, tmp_path):
@@ -167,6 +252,16 @@ def test_wait_for_db(settings, tmp_path):
     started = time.monotonic()
     assert wait_for_db(nowhere, timeout=1, interval=0.2) is False
     assert time.monotonic() - started < 15
+
+
+def test_a_missing_pg_isready_is_not_a_stopped_cluster(settings, tmp_path):
+    no_postgres = settings.replace(pg_bin_dir=tmp_path / "bin")
+    with pytest.raises(PostgresNotFound, match="brew install postgresql@18"):
+        is_ready(no_postgres)
+    started = time.monotonic()
+    with pytest.raises(PostgresNotFound):
+        wait_for_db(no_postgres, timeout=30)
+    assert time.monotonic() - started < 5  # fails at once, no 120 s wait
 
 
 def test_transaction_helper_commits_and_rolls_back(session_factory):

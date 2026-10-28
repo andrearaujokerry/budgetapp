@@ -347,7 +347,12 @@ def plaid_txn(
     location: dict[str, Any] | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
-    """A /transactions/sync ``added``/``modified`` entry with every field Plaid always sends."""
+    """A /transactions/sync ``added``/``modified`` entry with every field Plaid always sends.
+
+    The default ``location`` is a physical store with ``Decimal`` coordinates, exactly what
+    ``json.loads(parse_float=Decimal)`` gives for Plaid's ``lat``/``lon`` (RESEARCH T1.5), so code
+    that stores ``location`` in JSONB is exercised with them.
+    """
     iso = lambda d: d.isoformat() if isinstance(d, dt.date) else d  # noqa: E731
     pfc = None
     if pfc_primary or pfc_detailed:
@@ -388,13 +393,13 @@ def plaid_txn(
         },
         "location": location
         or {
-            "address": None,
-            "city": None,
-            "region": None,
-            "postal_code": None,
-            "country": None,
-            "lat": None,
-            "lon": None,
+            "address": "1 Ferry Building",
+            "city": "San Francisco",
+            "region": "CA",
+            "postal_code": "94111",
+            "country": "US",
+            "lat": Decimal("37.7955"),
+            "lon": Decimal("-122.3937"),
             "store_number": None,
         },
         "account_owner": account_owner,
