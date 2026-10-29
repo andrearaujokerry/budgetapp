@@ -134,8 +134,9 @@
   }
 }
 
-/* Phones: the amount columns scroll out of view, so each row says its state under the name,
-   and the overall tiles sit two by two. */
+/* Phones: the amount columns scroll out of view and the Used meter is hidden
+   (.col-optional-sm), so each row says its state under the name; the overall tiles sit two
+   by two. */
 .budget-phone {
   display: none;
 }

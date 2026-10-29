@@ -22,5 +22,5 @@
 </td>
 <td class="num">{% if entry %}<a class="budget-spent" id="annual-spent-{{ cid }}" href="{{ spent_href(cid, year_start, annual.as_of) }}" aria-label="{{ ui.money_text(entry.spent) }} spent on {{ category.name }} in {{ annual.year }}: see the transactions">{{ ui.money(entry.spent) }}</a>{% else %}{{ ui.money(none) }}{% endif %}</td>
 <td class="num">{% if entry %}{{ ui.money(entry.remaining, tone='over' if entry.remaining < 0 else 'neutral') }}{% else %}{{ ui.money(none) }}{% endif %}</td>
-<td class="budget-table__meter">{% if entry %}{{ bud.meter(entry.percent_used, entry.status, entry.pace_percent, category.name ~ ' annual budget', entry.remaining) }}{% else %}{{ ui.progress(none, name=category.name ~ ' annual budget', size='sm') }}{% endif %}</td>
+<td class="budget-table__meter col-optional-sm">{% if entry %}{{ bud.meter(entry.percent_used, entry.status, entry.pace_percent, category.name ~ ' annual budget', entry.remaining) }}{% else %}{{ ui.progress(none, name=category.name ~ ' annual budget', size='sm') }}{% endif %}</td>
 </tr>

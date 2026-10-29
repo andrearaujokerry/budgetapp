@@ -38,6 +38,23 @@ available amount (``remaining < 0``), ``none`` without a budget. ``percent_used`
 ``spent / available × 100`` (``None`` when ``available <= 0``), rounded to 0.01 toward the status
 so it never shows a threshold the status hasn't reached. ``pace_percent`` is the share of the
 period elapsed, counting today, for periods in progress (``None`` for past and future ones).
+
+**Public API** (the Budgets page, DASH and ALR; every function takes the session first, reads
+"today" from :mod:`budgetapp.clock` unless ``today`` is given, and never commits):
+
+* :func:`current_period`, :func:`period_for`, :func:`previous_period`, :func:`next_period` and
+  :func:`period_settings`: the budget periods.
+* :func:`overview` → :class:`BudgetOverview` for one period: ``lines`` (monthly budgets; categories
+  without one are in ``unbudgeted``, so a line's status is never ``none``), ``overall``,
+  ``totals``, ``notice``, ``days_left``, ``pace_percent``. Budget alerts read ``lines`` (and
+  ``overall``) of the current period.
+* :func:`annual_overview` → :class:`AnnualOverview` for a calendar year.
+* :func:`suggestions` / :func:`suggest`: the "Suggest" amounts.
+* :func:`set_budget` / :func:`set_rollover` → :class:`BudgetChange`; the caller commits.
+  :func:`parse_amount` / :func:`check_amount` validate amounts; :class:`BudgetError` messages are
+  written for the user.
+* :func:`usage` and :func:`pace_percent`: the status and pace rules, for widgets that show a
+  budget-like meter of their own.
 """
 
 from __future__ import annotations

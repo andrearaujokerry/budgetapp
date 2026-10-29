@@ -21,7 +21,7 @@
 </td>
 <td class="num"><a class="budget-spent" id="spent-{{ cid }}" href="{{ spent_href(cid) }}" aria-label="{{ ui.money_text(spent) }} spent on {{ category.name }}: see the transactions">{{ ui.money(spent) }}</a></td>
 <td class="num">{% if line %}{{ ui.money(line.remaining, tone='over' if line.remaining < 0 else 'neutral') }}{% else %}{{ ui.money(none) }}{% endif %}</td>
-<td class="budget-table__meter">{% if line %}{{ bud.meter(line.percent_used, line.status, line.pace_percent, category.name ~ ' budget', line.remaining) }}{% else %}{{ ui.progress(none, name=category.name ~ ' budget', size='sm') }}{% endif %}</td>
+<td class="budget-table__meter col-optional-sm">{% if line %}{{ bud.meter(line.percent_used, line.status, line.pace_percent, category.name ~ ' budget', line.remaining) }}{% else %}{{ ui.progress(none, name=category.name ~ ' budget', size='sm') }}{% endif %}</td>
 <td class="center">
 {%- if line %}
 <form class="budget-rollover" method="post" action="/budgets/category/{{ cid }}/rollover" hx-post="/budgets/category/{{ cid }}/rollover" hx-trigger="change" hx-target="closest tr" hx-swap="outerHTML">
