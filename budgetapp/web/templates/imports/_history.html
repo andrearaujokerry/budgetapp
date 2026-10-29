@@ -8,9 +8,9 @@
 {% call ui.card("Past imports", flush=true, id="history", footer=footer if reference_dates.compared else none) %}
 {%- if history %}
 <div class="table-wrap">
-<table class="table">
+<table class="table table--compact">
 <thead><tr>
-<th scope="col">Imported</th>
+<th scope="col" class="col-optional-sm">Imported</th>
 <th scope="col" class="col-grow">File</th>
 <th scope="col" class="col-optional-md">Dates</th>
 <th scope="col" class="num">Added</th>
@@ -21,10 +21,10 @@
 <tbody>
 {%- for h in history %}
 <tr>
-<td class="table__date">{{ h.imported_at|date_long }}</td>
-<td class="col-grow"><span class="table__primary">{{ h.filename }}</span><span class="table__secondary">{{ h.account_label }} · {{ h.row_count|pluralize("row") }}</span></td>
+<td class="table__date col-optional-sm nowrap">{{ h.imported_at|date_long }}</td>
+<td class="col-grow"><span class="table__primary">{{ h.filename }}</span><span class="table__secondary"><span class="import-phone">{{ h.imported_at|date_long }} · </span>{{ h.account_label }} · {{ h.row_count|pluralize("row") }}</span></td>
 <td class="col-optional-md nowrap">{% if h.date_min %}{{ h.date_min|date_long }} – {{ h.date_max|date_long }}{% else %}—{% endif %}</td>
-<td class="num">{{ "{:,}".format(h.inserted_count) }}{% if h.suspects %} {{ ui.badge(h.suspects ~ " held", tone="warn", title="Held for review: see above") }}{% endif %}</td>
+<td class="num nowrap">{{ "{:,}".format(h.inserted_count) }}{% if h.suspects %} {{ ui.badge(h.suspects ~ " held", tone="warn", title="Held for review: see above") }}{% endif %}</td>
 <td class="num col-optional-sm">{{ "{:,}".format(h.matched_plaid_count) }}</td>
 <td class="num col-optional-sm">{{ "{:,}".format(h.duplicate_count) }}</td>
 <td class="num col-optional-md">{% if h.error_count %}<span class="text-over">{{ "{:,}".format(h.error_count) }}</span>{% else %}0{% endif %}</td>

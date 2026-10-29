@@ -12,7 +12,7 @@
 <div class="table-wrap">
 <table class="table table--compact">
 <thead><tr>
-<th scope="col" class="shrink">Row</th>
+<th scope="col" class="shrink col-optional-sm">Row</th>
 <th scope="col" class="shrink">Date</th>
 <th scope="col" class="col-grow">Description</th>
 {%- if group.key == "matched" %}<th scope="col" class="col-optional-sm">Plaid transaction</th>{% endif %}
@@ -24,14 +24,14 @@
 <tbody>
 {%- for row in group.sample %}
 <tr>
-<td class="shrink tabular muted">{{ row.row_number }}</td>
-<td class="table__date">{{ row.date|date_long }}</td>
+<td class="shrink tabular muted col-optional-sm">{{ row.row_number }}</td>
+<td class="table__date nowrap">{{ row.date|date_long }}</td>
 <td class="col-grow"><span class="table__primary">{{ row.name }}</span>
 {%- if row.other_account %}<span class="table__secondary">Already in {{ row.other_account }}</span>
 {%- elif row.original_description and row.original_description != row.name %}<span class="table__secondary">{{ row.original_description }}</span>{% endif %}</td>
 {%- if group.key == "matched" %}<td class="col-optional-sm"><span class="table__primary">{{ row.plaid_name or "—" }}</span><span class="table__secondary">{{ row.plaid_date|date_long }}</span></td>{% endif %}
 {%- if group.key == "changed" %}<td class="col-optional-sm">{{ ui.money(row.earlier_amount) }} <span class="muted">on {{ row.earlier_date|date_long }}</span></td>{% endif %}
-<td class="col-optional-md">{{ row.account_owner or "—" }}</td>
+<td class="col-optional-md nowrap">{{ row.account_owner or "—" }}</td>
 <td class="col-optional-lg">{{ row.external_category or "—" }}</td>
 <td class="num">{{ ui.money(row.amount) }}</td>
 </tr>

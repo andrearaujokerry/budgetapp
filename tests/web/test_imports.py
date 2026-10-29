@@ -269,7 +269,10 @@ def test_held_rows_are_listed(client, db):
     html = page.text
     assert '<section class="card card--flush" id="suspects"' in html
     assert "ACE HOTEL" in html
-    assert 'hx-post="/import/suspects/' in html and 'data-confirm="Delete this CSV row?' in html
+    assert (
+        'hx-post="/import/suspects/' in html
+        and 'data-confirm="Delete this CSV row (ACE HOTEL, ' in html
+    )
     assert_clean(page)
 
 

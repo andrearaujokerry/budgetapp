@@ -1164,14 +1164,16 @@ def list_suspects(session: Session) -> list[SuspectRow]:
         if txn.account_id not in labels:
             account = session.get(Account, txn.account_id)
             labels[txn.account_id] = account_label(account) if account else "—"
+        name = clean_text(txn.name) or txn.name
+        statement_as = clean_text(txn.original_description)
         out.append(
             SuspectRow(
                 id=txn.id,
                 account_label=labels[txn.account_id],
                 date=txn.date,
                 posted_date=txn.posted_date,
-                name=txn.name,
-                original_description=txn.original_description,
+                name=name,
+                original_description=statement_as if statement_as != name else None,
                 external_category=txn.external_category,
                 account_owner=txn.account_owner,
                 amount=txn.amount,

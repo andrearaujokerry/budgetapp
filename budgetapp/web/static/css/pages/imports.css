@@ -111,3 +111,24 @@
 .suspect-actions {
   flex-wrap: nowrap;
 }
+
+/* Phones: the date column is hidden and shown in the description's second line instead, and
+   the Keep / Delete buttons keep only their icons (their aria-label names the row). */
+.import-phone {
+  display: none;
+}
+
+@media (max-width: 599.98px) {
+  .import-phone {
+    display: inline;
+  }
+
+  .suspect-actions .btn {
+    width: var(--btn-h);
+    padding: 0;
+  }
+
+  .suspect-actions .btn > span {
+    display: none;
+  }
+}
