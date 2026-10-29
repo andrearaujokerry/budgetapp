@@ -1,0 +1,33 @@
+{#- One group of external categories (a Plaid primary code or an Amex group), swapped after a
+    row's mapping changes. Needs `group`, `categories`, `category_by_id`, `show`. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+<tbody class="mapping-group">
+<tr class="mapping-group__head">
+<th scope="rowgroup" colspan="3"><span class="mapping-group__label">{{ group.label }}</span><span class="mapping-group__count">{{ group.transaction_count|pluralize("transaction") }}</span></th>
+</tr>
+{%- for r in group.rows %}
+{%- set effective = category_by_id.get(r.effective_category_id) if r.effective_category_id is not none else none %}
+<tr>
+<td class="col-grow">
+<span class="table__primary">{{ r.label }}
+{%- if r.for_credits %} {{ ui.badge("Credits", tone="info", title="Tried first for credits (negative amounts), e.g. cash back. Fee reversals use the main mapping.") }}{% endif -%}
+</span>
+<span class="table__secondary"><code>{{ r.code }}</code></span>
+</td>
+<td class="num">{{ '{:,}'.format(r.transaction_count) }}</td>
+<td class="mapping-target">
+<form class="mapping-form" method="post" action="/categories/mappings" hx-post="/categories/mappings" hx-trigger="change" hx-target="closest tbody" hx-swap="outerHTML">
+<input type="hidden" name="source" value="{{ r.source }}">
+<input type="hidden" name="key" value="{{ r.key }}">
+<input type="hidden" name="show" value="{{ show }}">
+{{ form.category_select("category_id", categories, value=r.category_id, inline=true, label=group.label ~ ": " ~ r.label ~ (" (credits)" if r.for_credits else "") ~ " goes to", placeholder=("Not mapped" if not r.is_mapped else none)) }}
+<noscript>{{ ui.button("Save", size="sm", type="submit") }}</noscript>
+</form>
+{%- if not r.is_mapped %}
+<span class="table__secondary mapping-fallback">{% if effective %}Uses {{ effective.name }}{{ " (from its group)" if not r.for_credits }}{% else %}{{ ui.icon("alert", size="xs") }} Goes to Uncategorized{% endif %}</span>
+{%- endif %}
+</td>
+</tr>
+{%- endfor %}
+</tbody>

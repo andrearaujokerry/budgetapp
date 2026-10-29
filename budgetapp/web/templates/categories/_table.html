@@ -1,0 +1,33 @@
+{#- The categories table card (swapped after adding or editing a category). -#}
+{%- import "components/ui.html" as ui -%}
+{%- set actions -%}
+{{ ui.button("Add category", icon="plus", variant="primary", size="sm", href="/categories/new", hx_get="/categories/new", hx_target="#dialog-slot") }}
+{%- endset -%}
+{%- set hidden = overview.hidden_count -%}
+{% call ui.card("Your categories", subtitle=(overview.categories|length) ~ " categories" ~ (" · " ~ hidden ~ " hidden" if hidden else ""), actions=actions, flush=true, id="categories-table-card") %}
+<div class="table-wrap">
+<table class="table categories-table">
+<thead><tr>
+<th scope="col" class="col-grow">Category</th>
+<th scope="col" class="col-optional-sm">Kind</th>
+<th scope="col" class="num col-optional-sm">Transactions</th>
+<th scope="col" class="num">Spent · {{ overview.period.label }}</th>
+<th scope="col" class="center">Hidden</th>
+<th scope="col" class="shrink"><span class="sr-only">Actions</span></th>
+</tr></thead>
+<tbody>
+{%- for c in overview.categories %}
+{% include "categories/_row.html" %}
+{%- endfor %}
+</tbody>
+<tfoot><tr>
+<td>Total spending</td>
+<td class="col-optional-sm"></td>
+<td class="col-optional-sm"></td>
+<td class="num">{{ ui.money(overview.period_total, tone="neutral") }}</td>
+<td></td>
+<td></td>
+</tr></tfoot>
+</table>
+</div>
+{% endcall %}

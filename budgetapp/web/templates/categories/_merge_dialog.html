@@ -1,0 +1,5 @@
+{#- The merge form in a dialog that opens as soon as HTMX puts it in #dialog-slot. -#}
+{%- import "components/ui.html" as ui -%}
+{% call ui.dialog("category-dialog", "Merge “" ~ m.source.name ~ "”", autoopen=true) %}
+{% include "categories/_merge_form.html" %}
+{% endcall %}

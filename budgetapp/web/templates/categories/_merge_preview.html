@@ -1,0 +1,30 @@
+{#- What merging `m.source` into `m.preview.target` moves (swapped when the target changes). -#}
+{%- import "components/ui.html" as ui -%}
+{%- if m.preview %}
+{%- set p = m.preview -%}
+{%- set n = p.counts -%}
+<div class="stack stack--sm">
+{%- if n.is_empty %}
+<p>Nothing uses “{{ p.source.name }}”, so it is simply deleted.</p>
+{%- else %}
+<p>Moves to {{ ui.category_badge(p.target) }}:</p>
+<ul class="merge-counts">
+{%- if n.transactions %}<li>{{ n.transactions|pluralize("transaction") }}</li>{% endif %}
+{%- if n.splits %}<li>{{ n.splits|pluralize("split part") }}</li>{% endif %}
+{%- if n.rules %}<li>{{ n.rules|pluralize("rule") }}</li>{% endif %}
+{%- if n.mappings %}<li>{{ n.mappings|pluralize("Plaid or Amex mapping") }}</li>{% endif %}
+{%- if n.budgets_moved %}<li>{{ n.budgets_moved|pluralize("budget entry", "budget entries") }}</li>{% endif %}
+{%- if n.alerts %}<li>{{ n.alerts|pluralize("alert") }}</li>{% endif %}
+{%- if n.tombstones %}<li>{{ n.tombstones|pluralize("saved edit") }} of removed charges</li>{% endif %}
+</ul>
+{%- endif %}
+{%- if n.budgets_dropped %}
+<p class="text-sm text-secondary">“{{ p.target.name }}” keeps its own budget, so {{ n.budgets_dropped|pluralize("budget entry", "budget entries") }} of “{{ p.source.name }}” {{ "is" if n.budgets_dropped == 1 else "are" }} dropped.</p>
+{%- endif %}
+{%- if p.kind_changes %}
+{{ ui.banner("warn", "Its transactions will count as " ~ p.target.kind_label ~ ("." if p.target.kind == "expense" else ", which isn't spending."), title="“" ~ p.target.name ~ "” is a different kind.") }}
+{%- endif %}
+</div>
+{%- else %}
+<p class="muted text-sm">Choose a category to see what moves.</p>
+{%- endif %}

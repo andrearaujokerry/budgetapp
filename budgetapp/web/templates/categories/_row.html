@@ -1,0 +1,33 @@
+{#- One category row (swapped after the hidden switch changes). Needs `c` (CategoryUsage). -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+{%- set kind_tones = {'expense': 'neutral', 'income': 'ok', 'transfer': 'muted'} -%}
+<tr id="category-row-{{ c.id }}"{% if c.is_hidden %} class="is-muted"{% endif %}>
+<td class="col-grow">
+<span class="table__primary category-name">{{ ui.category_badge(c) }}
+{%- if c.icon %}<span class="category-name__icon" aria-hidden="true">{{ c.icon }}</span>{% endif %}
+{%- if c.is_system %} {{ ui.badge("Built in", tone="muted", icon="lock", title="Built-in categories can be renamed, but not hidden, merged away or given another kind.") }}{% endif -%}
+</span>
+</td>
+<td class="col-optional-sm">{{ ui.badge(c.kind_label, tone=kind_tones[c.kind]) }}</td>
+<td class="num col-optional-sm">
+{%- if c.transaction_count %}<a href="/transactions?category={{ c.id }}" aria-label="{{ c.transaction_count|pluralize('transaction') }} in {{ c.name }}">{{ '{:,}'.format(c.transaction_count) }}</a>
+{%- else %}<span class="muted">0</span>{% endif -%}
+</td>
+<td class="num">
+{%- if c.counts_as_spending %}{{ ui.money(c.period_amount, tone="neutral") }}
+{%- else %}<span class="muted text-sm">Not spending</span>{% endif -%}
+</td>
+<td class="center">
+{%- if c.is_system %}
+{{ form.switch_field("hidden", c.name ~ " is built in and always shown", checked=false, id="hide-" ~ c.id, disabled=true, wrapper_class="check--bare") }}
+{%- else %}
+{{ form.switch_field("hidden", "Hide " ~ c.name, checked=c.is_hidden, id="hide-" ~ c.id, wrapper_class="check--bare", hx_post="/categories/" ~ c.id ~ "/hidden", hx_target="closest tr", hx_swap="outerHTML") }}
+{%- endif -%}
+</td>
+<td class="table__actions">
+{{- ui.button("Edit " ~ c.name, icon="pencil", icon_only=true, variant="ghost", size="sm", href="/categories/" ~ c.id ~ "/edit", hx_get="/categories/" ~ c.id ~ "/edit", hx_target="#dialog-slot") -}}
+{%- if c.is_system %}<span class="btn btn--ghost btn--icon btn--sm btn-placeholder" aria-hidden="true"></span>
+{%- else %}{{ ui.button("Merge " ~ c.name ~ " into another category", icon="merge", icon_only=true, variant="ghost", size="sm", href="/categories/" ~ c.id ~ "/merge", hx_get="/categories/" ~ c.id ~ "/merge", hx_target="#dialog-slot") }}{% endif -%}
+</td>
+</tr>

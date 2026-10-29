@@ -1,10 +1,11 @@
-{#- Placeholder from the web shell; the CAT package replaces this file. -#}
+{#- Categories (CAT-1) with the "Plaid & Amex categories" tab (CAT-2). Edit, add and merge
+    dialogs are fetched into #dialog-slot. -#}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
 {% block title %}Categories{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/categories.css">{% endblock %}
 {% block content %}
-{{ ui.page_header("Categories", "The categories your spending is grouped into.") }}
-<div class="card">
-{{ ui.empty_state("Coming soon", "This page is being built.", icon="tag") }}
-</div>
+{{ ui.page_header("Categories", "How your spending is grouped, and where Plaid’s and Amex’s own categories go.") }}
+<div id="categories-view">{% include "categories/_view.html" %}</div>
+<div id="dialog-slot"></div>
 {% endblock %}

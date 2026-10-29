@@ -76,6 +76,26 @@ KIND_HELP: dict[str, str] = {
 #: The theme-aware palette slots (``components/README.md`` §3.3) and the neutral grey.
 PALETTE: tuple[str, ...] = tuple(f"cat-{n}" for n in range(1, 17))
 NEUTRAL_COLOR = "other"
+#: What the editor's swatches are called (screen readers, tooltips); true in both themes.
+COLOR_NAMES: dict[str, str] = {
+    "cat-1": "Blue",
+    "cat-2": "Orange",
+    "cat-3": "Green",
+    "cat-4": "Amber",
+    "cat-5": "Pink",
+    "cat-6": "Forest green",
+    "cat-7": "Violet",
+    "cat-8": "Red",
+    "cat-9": "Cyan",
+    "cat-10": "Brown",
+    "cat-11": "Magenta",
+    "cat-12": "Olive",
+    "cat-13": "Indigo",
+    "cat-14": "Rose",
+    "cat-15": "Gold",
+    "cat-16": "Teal",
+    NEUTRAL_COLOR: "Grey",
+}
 MAX_NAME_LENGTH = 60
 MAX_ICON_LENGTH = 16
 _HEX_COLOR = re.compile(r"#(?:[0-9a-f]{3}|[0-9a-f]{6})")

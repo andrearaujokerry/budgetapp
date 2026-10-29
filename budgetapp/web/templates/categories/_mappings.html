@@ -1,0 +1,11 @@
+{#- "Plaid & Amex categories" tab (CAT-2): where each external category goes. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+<section class="section mappings-panel" aria-label="Plaid and Amex categories">
+<p class="text-secondary mappings-intro">When Plaid (or an Amex CSV file) gives a charge one of these categories, it goes to the category you choose here, unless one of your <a href="/rules">rules</a> matched it first. Card payments are always Card Payments.</p>
+{% call form.filter_bar("/categories/mappings", target="#mappings-results", label="Which categories to show") %}
+{{ form.segmented("source", [("plaid_pfc", "Plaid"), ("amex_csv", "Amex CSV")], value=source, label="Source") }}
+{{ form.segmented("show", [("used", "In your transactions"), ("all", "All")], value=show, label="Show") }}
+{% endcall %}
+<div id="mappings-results">{% include "categories/_mappings_results.html" %}</div>
+</section>

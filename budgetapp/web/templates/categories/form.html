@@ -1,0 +1,11 @@
+{#- The add/edit form as a page of its own (links opened without JavaScript or in a new tab). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% block title %}{{ "Edit category" if f.category else "Add category" }}{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/categories.css">{% endblock %}
+{% block content %}
+{{ ui.page_header(("Edit “" ~ f.category.name ~ "”") if f.category else "Add category", back_href="/categories", back_label="Categories") }}
+<div class="category-form-page">
+{% call ui.card() %}{% include "categories/_form.html" %}{% endcall %}
+</div>
+{% endblock %}

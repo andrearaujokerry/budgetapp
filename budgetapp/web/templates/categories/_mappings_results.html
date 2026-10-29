@@ -1,0 +1,31 @@
+{#- The mapping table for one source (swapped when the filters change). -#}
+{%- import "components/ui.html" as ui -%}
+<div class="stack">
+{%- if listing.unmapped_in_use %}
+{{ ui.banner("info", "Pick a category for each, or leave them to use their group’s category. Then re-apply rules to update past transactions.", title=listing.unmapped_in_use|pluralize(listing.source_label ~ " category", listing.source_label ~ " categories") ~ " in your transactions " ~ ("has" if listing.unmapped_in_use == 1 else "have") ~ " no mapping of " ~ ("its" if listing.unmapped_in_use == 1 else "their") ~ " own.") }}
+{%- endif %}
+{%- if listing.groups %}
+{% call ui.card(flush=true) %}
+<div class="table-wrap">
+<table class="table mapping-table">
+<caption class="sr-only">{{ listing.source_label }} categories and the categories they go to</caption>
+<thead><tr>
+<th scope="col" class="col-grow">{{ listing.source_label }} category</th>
+<th scope="col" class="num">Transactions</th>
+<th scope="col">Goes to</th>
+</tr></thead>
+{%- for group in listing.groups %}
+{% include "categories/_mapping_group.html" %}
+{%- endfor %}
+</table>
+</div>
+{% endcall %}
+{%- else %}
+<div class="card">
+{% call ui.empty_state("No " ~ listing.source_label ~ " categories in your transactions yet", ("They appear here when Plaid syncs transactions." if source == "plaid_pfc" else "They appear here after you import an Amex CSV file."), icon="tag") %}
+<a class="btn" href="/categories/mappings?source={{ source }}&amp;show=all">Show all {{ listing.source_label }} categories</a>
+{% endcall %}
+</div>
+{%- endif %}
+<p class="muted text-sm">Changes apply to new transactions. To update past ones, <a href="/rules#reapply">re-apply rules</a>: categories you set yourself never change.</p>
+</div>

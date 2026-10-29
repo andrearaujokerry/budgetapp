@@ -1,0 +1,12 @@
+{#- "Your categories" tab: what the kinds mean, then the table. -#}
+{%- import "components/ui.html" as ui -%}
+{%- set kind_tones = {'expense': 'neutral', 'income': 'ok', 'transfer': 'muted'} -%}
+<section class="section categories-panel" aria-label="Your categories">
+<ul class="kind-legend">
+{%- for k in kinds %}
+<li>{{ ui.badge(k.label, tone=kind_tones[k.key]) }}<span>{{ k.help }}</span></li>
+{%- endfor %}
+<li>{{ ui.icon("eye-off", size="sm") }}<span>Hidden categories leave pickers and budget lists; their money still counts everywhere.</span></li>
+</ul>
+{% include "categories/_table.html" %}
+</section>

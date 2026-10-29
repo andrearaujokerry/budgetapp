@@ -1,0 +1,22 @@
+{#- Merge `m.source` into a category the user picks; the preview below the picker shows what
+    moves. Needs `m` (routes/categories._merge_context). -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+{%- set sid = m.source.id -%}
+<form class="form" id="merge-form-{{ sid }}" method="post" action="/categories/{{ sid }}/merge"
+{%- if m.in_dialog %} hx-post="/categories/{{ sid }}/merge" hx-target="this" hx-swap="outerHTML"{% endif %}>
+<p class="merge-intro">Everything in {{ ui.category_badge(m.source) }} moves to the category you choose: transactions, split parts, rules, Plaid and Amex mappings, budgets and alerts. Then “{{ m.source.name }}” is deleted.</p>
+{{ form.category_select("target_id", m.targets, value=m.target_id, label="Merge into", include_hidden=true, placeholder="Choose a category…", required=true, id="merge-target-" ~ sid, error=m.errors.get("target_id"), hx_get="/categories/" ~ sid ~ "/merge/preview", hx_trigger="change", hx_target="#merge-preview-" ~ sid) }}
+<div class="merge-preview" id="merge-preview-{{ sid }}" aria-live="polite">{% include "categories/_merge_preview.html" %}</div>
+{%- if m.in_dialog %}
+<div class="dialog__footer">
+{{ ui.button("Cancel", variant="ghost", data_dialog_close=true) }}
+{{ ui.button("Merge and delete", icon="merge", variant="danger", type="submit", data_confirm="Merge “" ~ m.source.name ~ "” into the chosen category and delete it? This can’t be undone.") }}
+</div>
+{%- else %}
+<div class="form-actions">
+{{ ui.button("Merge and delete", icon="merge", variant="danger", type="submit", data_confirm="Merge “" ~ m.source.name ~ "” into the chosen category and delete it? This can’t be undone.") }}
+<a class="btn btn--ghost" href="/categories">Cancel</a>
+</div>
+{%- endif %}
+</form>

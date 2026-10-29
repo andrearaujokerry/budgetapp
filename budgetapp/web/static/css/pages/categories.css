@@ -1,0 +1,203 @@
+/* Categories page (CAT-1, CAT-2): what the design system has no component for.
+   Tokens only (components/README.md section 10). */
+
+/* A switch alone in a table cell: its label text stays for screen readers only. */
+.check--bare {
+  vertical-align: middle;
+}
+
+.check--bare .check__text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Keeps the actions column aligned on rows without a Merge button. */
+.btn-placeholder {
+  visibility: hidden;
+}
+
+/* What the three kinds mean, above the table. */
+.kind-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-6);
+  margin: 0 0 var(--sp-4);
+  padding: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  list-style: none;
+}
+
+.kind-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.kind-legend .icon {
+  color: var(--text-muted);
+}
+
+.category-name {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.category-name__icon {
+  flex: none;
+  font-size: var(--fs-sm);
+  line-height: 1;
+}
+
+/* Colour picker: the palette slots as round radio swatches. */
+.swatch-field {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.swatch-field > .field__label {
+  margin-bottom: var(--sp-2);
+  padding: 0;
+}
+
+.swatch-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.swatch-option {
+  position: relative;
+  display: inline-flex;
+  cursor: pointer;
+}
+
+.swatch-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.swatch-option__dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-pill);
+  background: var(--swatch, var(--chart-other));
+  box-shadow: inset 0 0 0 1px var(--border);
+  color: var(--surface);
+  forced-color-adjust: none;
+  transition: box-shadow var(--dur-fast) var(--ease);
+}
+
+.swatch-option__dot .icon {
+  stroke-width: 3;
+  opacity: 0;
+}
+
+.swatch-option:hover .swatch-option__dot {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--border-strong);
+}
+
+.swatch-option input:checked + .swatch-option__dot {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--text);
+}
+
+.swatch-option input:checked + .swatch-option__dot .icon {
+  opacity: 1;
+}
+
+.swatch-option input:focus-visible + .swatch-option__dot {
+  outline: 2px solid var(--focus);
+  outline-offset: 4px;
+}
+
+.category-form-page {
+  max-width: 560px;
+}
+
+/* Merge dialog. */
+.merge-intro {
+  margin: 0;
+  line-height: var(--lh-normal);
+}
+
+.merge-intro .cat {
+  vertical-align: middle;
+}
+
+.merge-preview {
+  min-height: 3rem;
+}
+
+.merge-preview p {
+  margin: 0;
+}
+
+.merge-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-4);
+  margin: 0;
+  padding-left: var(--sp-5);
+}
+
+/* Plaid & Amex categories: one tbody per group, with a header row. */
+.mappings-intro {
+  max-width: 72ch;
+  margin: 0;
+}
+
+.mapping-table .mapping-group__head th {
+  padding-top: var(--sp-3);
+  padding-bottom: var(--sp-2);
+  border-bottom-color: var(--border);
+  background: var(--surface-sunken);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+}
+
+.mapping-table tbody tr.mapping-group__head:hover > * {
+  background: var(--surface-sunken);
+}
+
+.mapping-group__count {
+  margin-left: var(--sp-2);
+  color: var(--text-muted);
+  font-weight: var(--fw-medium);
+}
+
+.mapping-table tbody:not(:last-child) tr:last-child > * {
+  border-bottom: 1px solid var(--border);
+}
+
+.mapping-table code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.mapping-form {
+  margin: 0;
+}
+
+.mapping-fallback {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-top: 2px;
+  white-space: normal;
+}
