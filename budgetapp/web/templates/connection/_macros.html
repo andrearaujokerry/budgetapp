@@ -1,0 +1,73 @@
+{#- ==========================================================================
+    Small macros for the Connection page. Import with
+      {% import "connection/_macros.html" as cx %}
+    stamp(value, now)       "Oct 29, 2026, 6:15 AM (4 h ago)"; "Never" for None
+    clock_time(value)       "6:15 AM" in the Mac's time zone
+    item_pill(item)         status pill for one connection (ItemView)
+    consent_text(s)         "Renew by Nov 23, 2026 (25 days left)" (ItemStatus)
+    trigger_label(t)        sync_runs.trigger in words
+    run_badge(run)          sync_runs.status as a badge
+    ========================================================================== -#}
+{%- import "components/ui.html" as ui -%}
+
+{%- macro clock_time(value) -%}
+{{ value.astimezone().strftime('%-I:%M %p') }}
+{%- endmacro -%}
+
+{%- macro stamp(value, now, empty="Never") -%}
+{%- if value -%}
+{%- set local = value.astimezone() -%}
+<time datetime="{{ value.isoformat() }}">{{ local|date_long }}, {{ clock_time(value) }}</time>
+{%- if (now - value).days < 7 %} <span class="muted">({{ value|relative_time }})</span>{% endif -%}
+{%- else -%}
+{{ empty }}
+{%- endif -%}
+{%- endmacro -%}
+
+{%- macro item_pill(item) -%}
+{%- set s = item.status -%}
+{%- if s.syncing -%}
+{{ ui.status_pill('syncing', 'Syncing…') }}
+{%- elif s.state == 'needs_reconnect' -%}
+{{ ui.status_pill('needs_reconnect', 'Reconnect needed') }}
+{%- elif s.state == 'error' -%}
+{{ ui.status_pill('error', 'Sync problem') }}
+{%- elif s.state == 'stale' -%}
+{{ ui.status_pill('stale', ('Synced ' ~ (s.last_sync_success_at|relative_time)) if s.last_sync_success_at else 'Not synced yet') }}
+{%- else -%}
+{{ ui.status_pill('healthy', ('Synced ' ~ (s.last_sync_success_at|relative_time)) if s.last_sync_success_at else 'Connected') }}
+{%- endif -%}
+{%- endmacro -%}
+
+{%- macro consent_text(s) -%}
+{%- set due = s.consent_due_at.astimezone().date() -%}
+{%- if s.consent_days_left < 0 -%}
+Expired on {{ due|date_long }}
+{%- elif s.consent_days_left == 0 -%}
+Expires today ({{ due|date_long }})
+{%- else -%}
+Renew by {{ due|date_long }} ({{ s.consent_days_left|pluralize('day') }} left)
+{%- endif -%}
+{%- endmacro -%}
+
+{%- macro trigger_label(trigger) -%}
+{{ {'schedule': 'Scheduled', 'manual': 'Sync now', 'link': 'After linking', 'update': 'After reconnecting', 'cli': 'Terminal'}.get(trigger, trigger) }}
+{%- endmacro -%}
+
+{%- macro run_badge(run) -%}
+{%- if run.status == 'success' -%}
+{{ ui.badge('Synced', 'ok', icon='check') }}
+{%- elif run.status == 'error' -%}
+{{ ui.badge('Failed', 'over', icon='x-circle') }}
+{%- elif run.status == 'running' -%}
+{{ ui.badge('Running', 'info', icon='refresh') }}
+{%- elif run.status == 'interrupted' -%}
+{{ ui.badge('Interrupted', 'warn', icon='alert') }}
+{%- else -%}
+{{ ui.badge('Skipped', 'muted') }}
+{%- endif -%}
+{%- endmacro -%}
+
+{%- macro update_status_text(code) -%}
+{{ {'HISTORICAL_UPDATE_COMPLETE': 'Full history', 'INITIAL_UPDATE_COMPLETE': 'Recent history; older on the way', 'NOT_READY': 'Plaid was still preparing'}.get(code, code or '') }}
+{%- endmacro -%}

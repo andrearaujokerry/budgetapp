@@ -1,0 +1,43 @@
+{#- The last 20 sync runs (SYNC-5), newest first. Included by connection/_live.html. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "connection/_macros.html" as cx -%}
+{%- set runs = overview.runs -%}
+{%- set several = overview.items|length > 1 -%}
+{% call ui.card("Recent syncs", subtitle=("The last " ~ (runs|length|pluralize("sync")) ~ ", newest first") if runs else none, flush=true, id="sync-runs") %}
+{%- if runs %}
+<div class="table-wrap">
+<table class="table runs-table">
+<thead><tr>
+<th scope="col">Started</th>
+<th scope="col" class="col-optional-sm">How</th>
+<th scope="col">Result</th>
+<th scope="col" class="num">New</th>
+<th scope="col" class="num">Changed</th>
+<th scope="col" class="num">Removed</th>
+<th scope="col" class="num col-optional-sm">Time</th>
+<th scope="col" class="col-grow col-optional-md">Details</th>
+</tr></thead>
+<tbody>
+{%- for r in runs %}
+<tr>
+<td class="table__date"><time datetime="{{ r.started_at.isoformat() }}">{{ r.started_at|date_short }}, {{ cx.clock_time(r.started_at) }}</time>
+{%- if several %}<span class="table__secondary">{{ r.institution_name or ("Item " ~ r.item_id) }}</span>{% endif %}</td>
+<td class="col-optional-sm">{{ cx.trigger_label(r.trigger) }}</td>
+<td>{{ cx.run_badge(r) }}{% if r.error_code %}<span class="table__secondary">{{ r.error_code }}</span>{% endif %}</td>
+<td class="num">{{ r.added if r.status == "success" else "—" }}</td>
+<td class="num">{{ r.modified if r.status == "success" else "—" }}</td>
+<td class="num">{{ r.removed if r.status == "success" else "—" }}</td>
+<td class="num col-optional-sm">{% if r.seconds is not none %}{{ "%.1f"|format(r.seconds) }} s{% else %}—{% endif %}</td>
+<td class="col-grow col-optional-md"><span class="table__secondary">
+{%- if r.status == "success" %}{{ cx.update_status_text(r.update_status) }}
+{%- else %}{{ r.error_message or "" }}{% endif -%}
+</span></td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{%- else %}
+{{ ui.empty_state("No syncs yet", "The first sync starts right after linking.", icon="refresh", compact=true) }}
+{%- endif %}
+{% endcall %}

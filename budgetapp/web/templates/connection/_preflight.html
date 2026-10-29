@@ -1,0 +1,11 @@
+{#- The production pre-flight's live check (ARCHITECTURE §7): /institutions/search for American
+    Express with Liabilities. Context: check (linking.InstitutionCheck or None). Loaded by
+    hx-get="/connection/preflight" after the page; best effort, never blocks linking. -#}
+{%- import "components/ui.html" as ui -%}
+<div id="preflight" class="preflight">
+{%- if check is not none %}
+{%- set tone = {"ok": "text-ok", "missing": "text-warn"}.get(check.status, "text-secondary") %}
+{%- set glyph = {"ok": "check-circle", "missing": "alert"}.get(check.status, "info") %}
+<p class="preflight__result {{ tone }}">{{ ui.icon(glyph) }}<span>{{ check.message }}</span></p>
+{%- endif %}
+</div>

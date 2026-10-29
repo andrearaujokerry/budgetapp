@@ -1,10 +1,58 @@
-{#- Placeholder from the web shell; the SYNC package replaces this file. -#}
+{#- ==========================================================================
+    Connection page (SYNC-1 … SYNC-7). Route: web/routes/connection.py.
+    Context: overview (linking.ConnectionOverview), demo, plaid_problem,
+    link_enabled, plaid_script, busy, poll, checklist, sandbox_users, now,
+    today; conn = overview.status (the layout reuses it).
+    Not linked: what linking does, the production checklist and confirm
+    dialog, re-attach / recover. Linked: the live region (_live.html: status,
+    update-mode actions, cards, recent syncs), edits that couldn't be carried
+    over, the CSV-attach choice, and the Sandbox tools.
+    Plaid Link runs from static/js/link.js (buttons with data-link-mode).
+    ========================================================================== -#}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
 {% block title %}Connection{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/connection.css">{% endblock %}
+
 {% block content %}
-{{ ui.page_header("Connection", "Your link to American Express through Plaid.") }}
-<div class="card">
-{{ ui.empty_state("Coming soon", "This page is being built.", icon="link") }}
+{%- set o = overview %}
+{%- set lost_edits = o.lost_edits %}
+{% call ui.page_header("Connection", "American Express through Plaid, read-only: nothing here can move money.") %}
+{%- if o.linked %}
+<form method="post" action="/connection/sync">
+{{ ui.button("Sync now", icon="refresh", type="submit", disabled=(not link_enabled or o.syncing)) }}
+</form>
+{%- endif %}
+{% endcall %}
+
+{%- if demo %}
+{{ ui.banner("info", "Linking, syncing and renewing are turned off here: this server shows made-up data and never calls Plaid.", title="Demo data.") }}
+{%- elif plaid_problem %}
+{{ ui.banner("warn", plaid_problem, title="Plaid can't be reached yet.") }}
+{%- endif %}
+
+<div class="banner banner--over" id="link-error" role="alert" tabindex="-1" hidden>
+{{ ui.icon("alert", class="banner__icon") }}
+<div class="banner__body"><strong class="banner__title">Plaid Link didn't finish.</strong><span class="banner__text" data-link-error-text></span></div>
 </div>
+
+{%- if o.linked %}
+{% include "connection/_live.html" %}
+{% include "connection/_lost_edits.html" %}
+{%- if o.attach %}
+{% include "connection/_attach.html" %}
+{%- endif %}
+{%- if not o.production %}
+{% include "connection/_sandbox_tools.html" %}
+{%- endif %}
+{%- else %}
+{% include "connection/_not_linked.html" %}
+{%- endif %}
+{% endblock %}
+
+{% block scripts %}
+{%- if plaid_script %}
+<script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js" nonce="{{ csp_nonce }}" defer></script>
+{%- endif %}
+<script src="/static/js/link.js" defer></script>
 {% endblock %}

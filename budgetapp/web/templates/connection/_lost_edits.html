@@ -1,0 +1,43 @@
+{#- "Edits we couldn't carry over" (ARCHITECTURE §5 transaction_tombstones): charges Plaid removed
+    whose category, notes, tags or splits found no replacement. Context: lost_edits (a list of
+    linking.LostEdit). Renders nothing when the list is empty, so the HTMX answer to the last
+    Dismiss removes the card. -#}
+{%- import "components/ui.html" as ui -%}
+{%- if lost_edits %}
+<div id="lost-edits">
+{% call ui.card("Edits we couldn't carry over", subtitle="Plaid removed these charges and no replacement matched them. They are kept here for 90 days in case the charge comes back.", flush=true) %}
+<div class="table-wrap">
+<table class="table">
+<thead><tr>
+<th scope="col">Date</th>
+<th scope="col" class="col-grow">Charge</th>
+<th scope="col" class="num">Amount</th>
+<th scope="col">Your edits</th>
+<th scope="col" class="col-optional-sm">Kept until</th>
+<th scope="col" class="shrink"><span class="sr-only">Actions</span></th>
+</tr></thead>
+<tbody>
+{%- for e in lost_edits %}
+{%- set url = "/connection/lost-edits/" ~ (e.plaid_transaction_id|urlencode) ~ "/dismiss" %}
+<tr>
+<td class="table__date">{{ e.date|date_short }}</td>
+<td class="col-grow"><span class="table__primary">{{ e.merchant_name or e.name or "Charge" }}</span><span class="table__secondary">{{ e.account_name }}{% if e.pending %} · was pending{% endif %}</span></td>
+<td class="num">{{ ui.money(e.amount) }}</td>
+<td class="lost-edit">
+{%- set parts = [] %}
+{%- if e.category_name %}{% set _ = parts.append("Category " ~ e.category_name) %}{% endif %}
+{%- if e.split_count %}{% set _ = parts.append(e.split_count ~ "-way split") %}{% endif %}
+{%- if e.tags %}{% set _ = parts.append("Tags " ~ (e.tags|join(", "))) %}{% endif %}
+{{ parts|join(" · ") }}
+{%- if e.notes %}<span class="table__secondary">“{{ e.notes }}”</span>{% endif -%}
+</td>
+<td class="col-optional-sm">{{ e.expires_on|date_short }}</td>
+<td class="table__actions"><form method="post" action="{{ url }}">{{ ui.button("Dismiss", size="sm", variant="ghost", type="submit", hx_post=url, hx_target="#lost-edits", hx_swap="outerHTML", data_confirm="Forget these edits? The removed charge stays removed.") }}</form></td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{% endcall %}
+</div>
+{%- endif %}
