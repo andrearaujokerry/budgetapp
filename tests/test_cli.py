@@ -62,6 +62,14 @@ def test_help_lists_every_command(capsys):
 
 @pytest.mark.parametrize(("command", "options"), STUBS.items())
 def test_stubs_print_not_built_and_return_2(capsys, command, options):
+    from budgetapp.commands import not_built
+
+    try:  # a command its feature package has built is tested there (its options may differ)
+        handler = cli.build_parser().parse_known_args([command, *options])[0].handler
+    except SystemExit:
+        handler = None
+    if handler is not not_built:
+        pytest.skip("built by its feature package")
     assert cli.main([command, *options]) == 2
     assert capsys.readouterr().out.strip() == NOT_BUILT
 

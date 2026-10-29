@@ -643,7 +643,9 @@ def check_postgres_versions(ctx: DoctorContext) -> Iterable[Check]:
         yield Check(
             section,
             FAIL,
-            "pg_dump is older than the server, so backups would fail",
+            "pg_dump can't be run, so backups would fail"
+            if dump is None
+            else "pg_dump is older than the server, so backups would fail",
             fix="Check BUDGETAPP_PG_BIN: it must be the PostgreSQL 18 bin folder "
             f"({ctx.settings.pg_bin_dir}).",
         )

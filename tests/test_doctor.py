@@ -644,6 +644,14 @@ class TestVersions:
         assert [c.status for c in checks] == [FAIL, FAIL]
         assert checks[1].title == "pg_dump is older than the server, so backups would fail"
 
+    def test_a_missing_pg_dump(self, dr):
+        dr.mac.answers["pg_dump --version"] = FileNotFoundError(2, "No such file")
+        checks = dr.run(doctor.check_postgres_versions)
+        assert [(c.status, c.title) for c in checks][1] == (
+            FAIL,
+            "pg_dump can't be run, so backups would fail",
+        )
+
 
 class TestStalePid:
     def test_nothing_stale(self, dr):

@@ -25,7 +25,7 @@ from sqlalchemy.exc import OperationalError
 
 from budgetapp import clock, secrets
 from budgetapp.commands import add_command
-from budgetapp.config import Settings
+from budgetapp.config import ConfigError, Settings
 from budgetapp.db import wait_for_db
 from budgetapp.services import agents
 from budgetapp.services import backup as backups
@@ -105,6 +105,18 @@ def _alert_if_stale(settings: Settings) -> None:
         )
 
 
+def _failed(settings: Settings, unattended: bool, exc: Exception) -> int:
+    """Report a failed backup; under launchd also notify (once a day)."""
+    _say(unattended, f"error: the {settings.env} backup failed: {exc}", error=True)
+    if unattended:
+        backups.notify_backup_problem(
+            settings,
+            get_notifier(settings),
+            f"The {settings.env} backup failed: {exc} Run ./run doctor --env {settings.env}.",
+        )
+    return 1
+
+
 def run_backup(args: argparse.Namespace, settings: Settings) -> int:
     unattended = bool(args.unattended)
     if args.keep < 1:
@@ -112,7 +124,11 @@ def run_backup(args: argparse.Namespace, settings: Settings) -> int:
         return 2
     if unattended:
         secrets.enable_unattended_mode()
-    if not wait_for_db(settings, timeout=agents.DB_WAIT if unattended else 15):
+    try:
+        ready = wait_for_db(settings, timeout=agents.DB_WAIT if unattended else 15)
+    except ConfigError as exc:  # PostgresNotFound: the PostgreSQL 18 programs are missing
+        return _failed(settings, unattended, exc)
+    if not ready:
         if not unattended:
             _say(
                 unattended,
@@ -141,15 +157,8 @@ def _backup_now(args: argparse.Namespace, settings: Settings, unattended: bool) 
         if unattended:
             _notify_keychain(settings)
         return EXIT_KEYCHAIN
-    except (backups.BackupError, secrets.SecretStoreError) as exc:
-        _say(unattended, f"error: the {settings.env} backup failed: {exc}", error=True)
-        if unattended:
-            backups.notify_backup_problem(
-                settings,
-                get_notifier(settings),
-                f"The {settings.env} backup failed: {exc} Run ./run doctor --env {settings.env}.",
-            )
-        return 1
+    except (backups.BackupError, secrets.SecretStoreError, ConfigError) as exc:
+        return _failed(settings, unattended, exc)  # ConfigError: PostgresNotFound
     if not result.created:
         assert result.newest is not None
         _say(

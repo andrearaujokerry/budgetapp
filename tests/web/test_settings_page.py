@@ -155,17 +155,15 @@ class TestAbout:
         assert "Keychain approval needed" in html
         assert "<code>./run doctor --env production</code>" in html
 
-    def test_the_newest_backup(self, client, settings, freeze_today):
+    def test_the_newest_backup(self, make_app, make_client, settings, tmp_path, freeze_today):
         freeze_today(now=dt.datetime(2026, 10, 29, 15, 0, tzinfo=dt.UTC))
+        own = settings.replace(backups_dir=tmp_path / "backups")
+        client = make_client(make_app(own))
         assert "No backup yet: <code>./run backup</code>" in client.get("/settings").text
-        folder = settings.backups_dir
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / f"{settings.db_name}-20261029T120000Z.dump").write_bytes(b"PGDMP")
-        try:
-            html = client.get("/settings").text
-            assert "Newest Oct 29, 2026 (3 h ago)" in html
-        finally:
-            (folder / f"{settings.db_name}-20261029T120000Z.dump").unlink()
+        own.backups_dir.mkdir()
+        (own.backups_dir / f"{own.db_name}-20261029T120000Z.dump").write_bytes(b"PGDMP")
+        html = client.get("/settings").text
+        assert "Newest Oct 29, 2026 (3 h ago)" in html
 
     def test_production_shows_live_and_the_install(self, make_app, make_client, tmp_path):
         prod = load_settings(

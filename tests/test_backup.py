@@ -332,6 +332,17 @@ class TestBackupCommand:
         err = capsys.readouterr().err
         assert "error: the test backup failed" in err and err[:4].isdigit()  # timestamped
 
+    def test_unattended_missing_postgres_programs_notify(self, bk, notifier, monkeypatch):
+        missing = bk.replace(pg_bin_dir=bk.backups_dir / "no-such-bin")
+        assert backup_command.run_backup(args(unattended=True), missing) == 1
+        assert len(notifier.sent) == 1
+        assert "PostgreSQL 18 not found" in notifier.sent[0].message
+        monkeypatch.setattr(backup_command, "wait_for_db", lambda settings, timeout: True)
+        assert backup_command.run_backup(args(unattended=True), missing) == 1  # pg_dump too
+        assert len(notifier.sent) == 1  # once a day
+        assert backup_command.run_backup(args(), missing) == 1  # in Terminal: printed only
+        assert len(notifier.sent) == 1
+
     def test_unattended_keychain_approval_exits_75_and_notifies_once(
         self, bk, notifier, monkeypatch
     ):
