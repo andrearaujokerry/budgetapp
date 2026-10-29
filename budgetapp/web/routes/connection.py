@@ -278,7 +278,8 @@ def connection_page(
     jobs: JobsDep,
 ) -> Response:
     context = page_context(request, session, settings, store, jobs)
-    if is_htmx(request):  # the live region polling for news
+    if is_htmx(request):  # the live region polling for news (and the header's Sync now)
+        context["partial"] = True
         return render(request, "connection/_live.html", context, active_nav=NAV)
     return render(request, "connection/index.html", context, active_nav=NAV)
 

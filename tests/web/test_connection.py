@@ -494,6 +494,16 @@ def test_htmx_gets_only_the_live_region(db, client):
     assert response.template.name == "connection/_live.html"
     assert response.text.lstrip().startswith('<div id="connection-live"')
     assert "<html" not in response.text and csp_problems(response.text, rendered=True) == []
+    # the header's Sync now comes along out of band, enabled again once a sync has finished
+    oob = '<form id="page-sync" method="post" action="/connection/sync" hx-swap-oob="true">'
+    assert oob in response.text
+    assert re.search(
+        r'id="page-sync"[^>]*hx-swap-oob="true">\s*<button class="btn" type="submit">',
+        response.text,
+    )
+    full = client.get("/connection").text
+    assert '<form id="page-sync" method="post" action="/connection/sync">' in full
+    assert full.count('id="page-sync"') == 1
 
 
 def test_the_live_region_polls_while_a_sync_runs(db, client):

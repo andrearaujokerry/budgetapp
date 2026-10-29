@@ -19,9 +19,7 @@
 {%- set lost_edits = o.lost_edits %}
 {% call ui.page_header("Connection", "American Express through Plaid, read-only: nothing here can move money.") %}
 {%- if o.linked %}
-<form method="post" action="/connection/sync">
-{{ ui.button("Sync now", icon="refresh", type="submit", disabled=(not link_enabled or o.syncing)) }}
-</form>
+{% include "connection/_sync_button.html" %}
 {%- endif %}
 {% endcall %}
 

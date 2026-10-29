@@ -100,3 +100,7 @@
 
 {% include "connection/_runs.html" %}
 </div>
+{%- if partial|default(false) and o.linked %}
+{%- set oob = true %}
+{% include "connection/_sync_button.html" %}
+{%- endif %}
