@@ -399,6 +399,7 @@ class TestPreview:
         assert preview.skipped_user_count == 1
         assert preview.payment_count == 1
         assert preview.earlier_rule_count == 1
+        assert preview.unchanged_count == 1  # "there" is already in Transportation
         result = rules.create(db, d)
         assert preview.would_change_count == result.applied.changed == 2
         assert preview.skipped_user_count == result.applied.skipped_user
@@ -435,6 +436,30 @@ class TestPreview:
         preview = rules.preview(db, draft(travel, merchant_pattern="delta"), limit=2)
         assert preview.match_count == 3
         assert [i.transaction_id for i in preview.sample] == [rows[1].id, rows[2].id]
+
+    def test_changes_can_lead_the_sample(self, db):
+        travel = get_category(db, "Travel")
+        account = make_account(db)
+        old = make_transaction(db, account, name="DELTA", date=dt.date(2026, 1, 1))
+        recent = [
+            make_transaction(
+                db,
+                account,
+                name="DELTA",
+                date=dt.date(2026, 10, day),
+                category=travel,
+                category_source="plaid",
+            )
+            for day in (1, 2)
+        ]
+        d = draft(travel, merchant_pattern="delta", apply_to_existing=True)
+        newest = rules.preview(db, d, limit=2)
+        assert [i.transaction_id for i in newest.sample] == [recent[1].id, recent[0].id]
+        assert not newest.changes_first
+        first = rules.preview(db, d, limit=2, changes_first=True)
+        assert [i.transaction_id for i in first.sample] == [old.id, recent[1].id]
+        assert first.changes_first
+        assert (first.would_change_count, first.unchanged_count) == (1, 2)
 
     def test_an_inactive_new_rule_would_change_nothing(self, db, uber_world):
         w = uber_world

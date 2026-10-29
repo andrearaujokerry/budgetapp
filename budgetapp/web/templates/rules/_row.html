@@ -2,7 +2,7 @@
 {%- import "components/ui.html" as ui -%}
 {%- import "components/forms.html" as form -%}
 <tr id="rule-row-{{ r.id }}"{% if not r.is_active %} class="is-muted"{% endif %}>
-<td class="shrink rule-order">{{ r.position }}</td>
+<td class="shrink rule-order col-optional-sm">{{ r.position }}</td>
 <td class="col-grow">
 <span class="table__primary">{{ r.title }}</span>
 {%- if r.name or not r.is_active %}

@@ -10,12 +10,13 @@
 {%- set effective = category_by_id.get(r.effective_category_id) if r.effective_category_id is not none else none %}
 <tr>
 <td class="col-grow">
-<span class="table__primary">{{ r.label }}
-{%- if r.for_credits %} {{ ui.badge("Credits", tone="info", title="Tried first for credits (negative amounts), e.g. cash back. Fee reversals use the main mapping.") }}{% endif -%}
-</span>
+{#- The Credits badge comes first so a truncated label (phones) never hides it. -#}
+<span class="table__primary">
+{%- if r.for_credits %}{{ ui.badge("Credits", tone="info", title="Tried first for credits (negative amounts), e.g. cash back. Fee reversals use the main mapping.") }} {% endif -%}
+{{ r.label }}</span>
 <span class="table__secondary"><code>{{ r.code }}</code></span>
 </td>
-<td class="num">{{ '{:,}'.format(r.transaction_count) }}</td>
+<td class="num col-optional-sm">{{ '{:,}'.format(r.transaction_count) }}</td>
 <td class="mapping-target">
 <form class="mapping-form" method="post" action="/categories/mappings" hx-post="/categories/mappings" hx-trigger="change" hx-target="closest tbody" hx-swap="outerHTML">
 <input type="hidden" name="source" value="{{ r.source }}">

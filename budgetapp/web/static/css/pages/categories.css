@@ -21,6 +21,17 @@
   visibility: hidden;
 }
 
+.categories-table .table__actions > * {
+  vertical-align: middle;
+}
+
+/* The panel under the tabs (the tabs are not a direct child of the page, so they get no
+   rhythm of their own). */
+.categories-panel,
+.mappings-panel {
+  margin-top: var(--sp-5);
+}
+
 /* What the three kinds mean, above the table. */
 .kind-legend {
   display: flex;
@@ -53,6 +64,12 @@
   flex: none;
   font-size: var(--fs-sm);
   line-height: 1;
+}
+
+/* "Built in" sits in the name line without making its row taller than the others. */
+.category-name .badge {
+  flex: none;
+  margin-block: -2px;
 }
 
 /* Colour picker: the palette slots as round radio swatches. */
@@ -161,6 +178,12 @@
   margin: 0;
 }
 
+/* Both labelled switches keep their options on one line (a field in the filter bar would
+   otherwise get 180px and stack "In your transactions" over "All"). */
+.mappings-panel .filter-bar > .segmented-field {
+  flex: 0 0 auto;
+}
+
 .mapping-table .mapping-group__head th {
   padding-top: var(--sp-3);
   padding-bottom: var(--sp-2);
@@ -200,4 +223,40 @@
   gap: var(--sp-1);
   margin-top: 2px;
   white-space: normal;
+}
+
+/* Phones: these two tables fit the screen instead of scrolling sideways, so the amount spent
+   and the "Goes to" picker stay in view (Kind and the transaction counts are hidden there;
+   each mapping group's header still shows its count). Names truncate instead. */
+@media (max-width: 599.98px) {
+  .table-wrap > .categories-table,
+  .table-wrap > .mapping-table {
+    min-width: 0;
+  }
+
+  .categories-table,
+  .mapping-table {
+    --grow-min: 5.5rem;
+  }
+
+  .categories-table :is(th, td):not(:first-child):not(:last-child),
+  .mapping-table :is(th, td):not(:first-child):not(:last-child) {
+    padding-inline: 8px;
+  }
+
+  /* The name gets the room: the period in the Spent header wraps, the emoji and the
+     "Built in" badge go (built-in rows still show a disabled switch and no Merge). */
+  .categories-table th.spent-col,
+  .categories-table td.num .muted {
+    white-space: normal;
+  }
+
+  .categories-table .category-name__icon,
+  .categories-table .category-name .badge {
+    display: none;
+  }
+
+  .mapping-table .inline-cat .inline-control {
+    max-width: 10rem;
+  }
 }

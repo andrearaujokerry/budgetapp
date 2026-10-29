@@ -26,6 +26,9 @@
 <ul class="preview-outcomes">
 {%- if shows %}
 <li class="preview-outcomes__main">{{ ui.icon("check-circle", size="sm") }}<span>{{ p.would_change_count|pluralize("transaction") }} change{{ "s" if p.would_change_count == 1 }} category when you save</span></li>
+{%- if p.unchanged_count %}
+<li>{{ ui.icon("check", size="sm") }}<span>{{ p.unchanged_count|pluralize("transaction") }} {{ "is" if p.unchanged_count == 1 else "are" }} already in {{ pv.category.name }}</span></li>
+{%- endif %}
 {%- endif %}
 {%- if p.skipped_user_count %}
 <li>{{ ui.icon("lock", size="sm") }}<span>{{ p.skipped_user_count|pluralize("transaction") }} you categorized yourself stay{{ "s" if p.skipped_user_count == 1 }} as {{ "it is" if p.skipped_user_count == 1 else "they are" }}</span></li>
@@ -43,7 +46,7 @@
 {%- endif %}
 </div>
 {%- if p.sample %}
-<ul class="preview-list" aria-label="Matching transactions, newest first">
+<ul class="preview-list" aria-label="{{ 'Matching transactions: the ones that change first, then the newest' if p.changes_first else 'Matching transactions, newest first' }}">
 {%- for item in p.sample %}
 <li class="preview-item">
 <div class="preview-item__main">
@@ -58,7 +61,8 @@
 {{ ui.category_badge(item.proposed) }}
 {%- endif %}
 </div>
-{%- if item.note and (pv.category_chosen or item.status != "same") %}
+{#- "same" says nothing new: the summary counts those, and no arrow means no change. -#}
+{%- if item.note and item.status != "same" %}
 <p class="preview-item__note">{{ item.note }}</p>
 {%- endif %}
 </li>
@@ -66,7 +70,7 @@
 </ul>
 {%- set listed = p.match_count + p.released_count -%}
 {%- if listed > p.sample|length %}
-<p class="preview-more muted text-sm">Showing the {{ p.sample|length }} most recent of {{ '{:,}'.format(listed) }}.</p>
+<p class="preview-more muted text-sm">Showing {{ p.sample|length }} of {{ '{:,}'.format(listed) }}: {{ "the ones that change first, then the most recent" if p.changes_first else "the most recent" }}.</p>
 {%- endif %}
 {%- endif %}
 {%- endif %}

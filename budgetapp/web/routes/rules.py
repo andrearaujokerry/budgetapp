@@ -170,19 +170,21 @@ def _preview_state(session: Session, draft: RuleDraft, rule_id: int | None) -> d
     if not chosen:
         placeholder = system_category(session, "uncategorized").id
         probe = dataclasses.replace(draft, category_id=str(placeholder))
+    # Saving changes past rows only with a category, "apply" ticked, and a rule that is on or an
+    # edit (a new rule that is off is saved without touching past rows: categorize.create_rule).
+    shows = chosen and draft.apply_to_existing and (draft.is_active or rule_id is not None)
     try:
-        preview = rules.preview(session, probe, rule_id=rule_id)
+        preview = rules.preview(session, probe, rule_id=rule_id, changes_first=shows)
     except RuleValidationError as err:
         return {"state": "invalid", "errors": err.errors}
+    category = categories.get_category(session, int(probe.category_id))  # valid: it previewed
     return {
         "state": "ready",
         "preview": preview,
         "category_chosen": chosen,
+        "category": CategoryRef.of(category) if chosen else None,
         "apply": draft.apply_to_existing,
-        # A new rule that is off is saved without touching past rows (categorize.create_rule).
-        "shows_changes": chosen
-        and draft.apply_to_existing
-        and (preview.is_active or not preview.is_new),
+        "shows_changes": shows,
     }
 
 

@@ -284,6 +284,8 @@ class TestPreview:
         # the ride (→ Transportation), the payment (→ Card Payments, step 0) and Uber Eats
         # (→ Dining: "Food delivery" runs first); the row you categorized stays.
         assert (p.match_count, p.would_change_count) == (4, 3)
+        assert p.changes_first  # the rows that change lead the list
+        assert [item.proposed is not None for item in p.sample] == [True, True, True, False]
         status = re.search(
             r'<div hx-swap-oob="innerHTML:#rule-preview-status">([^<]*)</div>', response.text
         )

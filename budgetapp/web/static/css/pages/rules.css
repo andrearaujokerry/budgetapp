@@ -29,12 +29,21 @@
   margin-left: 2px;
 }
 
+/* The Edit link and the buttons inside forms line up on one middle line. */
+.rules-table .table__actions > * {
+  vertical-align: middle;
+}
+
 .rule-order {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
 
-/* The rule form. */
+/* The rule form and its preview: each card as tall as its own content. */
+.rule-editor {
+  align-items: start;
+}
+
 .rule-form__rule {
   width: 100%;
   margin: var(--sp-1) 0;
@@ -166,10 +175,22 @@
   margin: var(--sp-2) 0 0;
 }
 
-/* Re-apply: the date matters only for "Transactions since a date". Browsers without :has()
-   drop this rule and simply show the field. */
+/* Re-apply: two fields side by side at most, not stretched across the whole card. */
+.reapply-form .form-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-width: 640px;
+}
+
+/* The date matters only for "Transactions since a date". Browsers without :has() drop this
+   rule and simply show the field. */
 .reapply-form:not(:has(option[value="since"]:checked)) .reapply-since {
   display: none;
+}
+
+@media (max-width: 599.98px) {
+  .reapply-form .form-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .reapply-result {

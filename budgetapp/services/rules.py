@@ -548,14 +548,27 @@ class RulePreview:
     released_count: int
     is_active: bool
     is_new: bool
+    #: Up to ``limit`` rows, newest first; with ``changes_first`` the ones that change lead.
     sample: tuple[PreviewItem, ...]
+    #: Matches already in the rule's category (status ``same``): saving leaves them as they are.
+    unchanged_count: int
+    changes_first: bool
 
 
 def preview(
-    session: Session, draft: RuleDraft, *, rule_id: int | None = None, limit: int = PREVIEW_LIMIT
+    session: Session,
+    draft: RuleDraft,
+    *,
+    rule_id: int | None = None,
+    limit: int = PREVIEW_LIMIT,
+    changes_first: bool = False,
 ) -> RulePreview:
     """What saving ``draft`` (a new rule, or rule ``rule_id`` edited) and applying it to past
-    transactions would change, without saving. Raises ``RuleValidationError`` like saving."""
+    transactions would change, without saving. Raises ``RuleValidationError`` like saving.
+
+    ``changes_first`` puts the rows whose category would change at the top of the sample (each
+    group newest first), so they show even when older than the newest matches.
+    """
     current = get_rule(session, rule_id) if rule_id is not None else None
     clean = clean_rule(session, draft, current=current)
     candidate = _Candidate(
@@ -582,8 +595,9 @@ def preview(
     # with "apply" re-decides what it matches and what it categorized before, active or not.
     applies = rule_id is not None or candidate.is_active
 
-    matched = changed = user = payments = earlier = released = 0
-    sample: list[PreviewItem] = []
+    matched = changed = user = payments = earlier = released = same = 0
+    changing: list[PreviewItem] = []
+    others: list[PreviewItem] = []
     for row in _rows(session, candidate, also_rule_id=rule_id):
         matches = rule_matches(candidate, row)
         before = rule_id is not None and row.rule_id == rule_id
@@ -615,9 +629,11 @@ def preview(
             elif proposed is not None:
                 status, note = "change", ""
             else:
+                same += 1
                 status, note = "same", "Already in this category."
-        if len(sample) < limit:
-            sample.append(
+        bucket = changing if changes_first and proposed is not None else others
+        if len(bucket) < limit:
+            bucket.append(
                 PreviewItem(
                     transaction_id=row.id,
                     date=row.authorized_date or row.date,
@@ -640,7 +656,9 @@ def preview(
         released_count=released,
         is_active=candidate.is_active,
         is_new=rule_id is None,
-        sample=tuple(sample),
+        sample=tuple((changing + others)[:limit]),
+        unchanged_count=same,
+        changes_first=changes_first,
     )
 
 
