@@ -31,9 +31,9 @@
 {%- elif check.state == "open" -%}
 <span class="muted text-sm">Still open</span>
 {%- elif check.missing == "new_balance" -%}
-<span class="muted text-sm" title="Type the statement's New Balance to check it">Not checked</span>
+<span class="muted text-sm" title="Type the statement's New Balance to check this period">No New Balance</span>
 {%- else -%}
-<span class="muted text-sm" title="Type the statement's Previous Balance to check it">Not checked</span>
+<span class="muted text-sm" title="Type the statement's Previous Balance to check this period">No Previous Balance</span>
 {%- endif -%}
 {%- endmacro -%}
 

@@ -128,7 +128,8 @@
 {%- elif name == "payments_credits" %}{% set help = "As printed, with or without the minus." %}
 {%- elif name == "new_balance" and cycle.reported.new_balance_source == "liabilities" %}{% set help = "From Amex through Plaid." %}
 {%- else %}{% set help = none %}{% endif %}
-{{ form.money_field(name, label, value=form_values.get(name), allow_negative=name in ["previous_balance", "payments_credits", "new_balance"], error=errors.get(name), help=help, id="f-" ~ name|replace("_", "-")) }}
+{#- No "0.00" placeholder: an empty box means "not typed", never $0.00. -#}
+{{ form.money_field(name, label, value=form_values.get(name), placeholder="", allow_negative=name in ["previous_balance", "payments_credits", "new_balance"], error=errors.get(name), help=help, id="f-" ~ name|replace("_", "-")) }}
 {%- endfor %}
 </div>
 {{ form.textarea_field("notes", "Notes", value=form_values.get("notes"), rows=2, optional=true, error=errors.get("notes"), id="f-notes") }}

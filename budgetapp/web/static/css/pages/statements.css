@@ -226,6 +226,11 @@
     display: block;
   }
 
+  /* "All statements" is a link back into the app, meaningless on paper. */
+  .page-header__eyebrow {
+    display: none;
+  }
+
   .stmt-lines thead {
     display: table-header-group;
   }

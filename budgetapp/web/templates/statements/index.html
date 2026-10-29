@@ -70,7 +70,7 @@
 <tr>
 <td class="col-grow">
 <a class="table__primary" href="/statements/{{ account.id }}/{{ c.key }}"><span class="stmt-wide">{{ c.label }}</span><span class="stmt-narrow">{{ c.closing_date|date_long }}</span></a>
-<span class="table__secondary"><span class="stmt-narrow">{{ c.status_label }} · </span>{{ c.days }} days · {{ stmt.source_text(c) }}</span>
+<span class="table__secondary"><span class="stmt-narrow">{{ c.status_label }} · </span>{{ c.days }} days{% if c.flagged %}<span class="stmt-narrow"> {{ ui.icon("alert", label="Unusually long or short: a statement may be missing", size="xs") }}</span>{% endif %}<span class="stmt-wide"> · {{ stmt.source_text(c) }}</span></span>
 </td>
 <td class="col-optional-sm"><span class="cluster stmt-badges">{{ stmt.status_badge(c) }}{% if c.flagged %}{{ ui.badge(c.days ~ " days", tone="warn", icon="alert", title="Unusually long or short: a statement may be missing") }}{% endif %}{% if c.checked_at %}{{ ui.badge("Checked", tone="muted", icon="check", title="Checked " ~ (c.checked_at|date_long)) }}{% endif %}</span></td>
 <td class="num col-optional-md">{{ ui.money(row.new_charges, tone="neutral") }}</td>

@@ -91,6 +91,8 @@ class TestList:
             D(2026, 8, 27),
         ]
         assert [r.cycle.status for r in rows] == ["open", "settling", "final", "final"]
+        assert [r.check.state for r in rows] == ["open", "unavailable", "pass", "unavailable"]
+        assert [r.check.missing for r in rows] == [None, "new_balance", None, "previous_balance"]
         assert response.context["current"].cycle.closing_date == D(2026, 11, 27)
         assert response.context["latest"].cycle.closing_date == D(2026, 10, 27)
         page = response.text
@@ -98,6 +100,8 @@ class TestList:
         assert "Sep 28 – Oct 27, 2026" in page
         text = text_of(page)
         assert "Statements that match 1 of 1 All to the cent" in text
+        assert "Still open" in text and "Matches so far" not in text
+        assert "No New Balance" in text and "No Previous Balance" in text
         assert "doesn't match" not in text
         assert csp_problems(page, rendered=True) == []
 
