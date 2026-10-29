@@ -207,3 +207,33 @@
 .reapply-result p {
   margin: 0;
 }
+
+/* Old › new category in one cell: side by side, or two lines in a narrow column. */
+.reapply-change {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+  max-width: 100%;
+}
+
+.reapply-change__arrow {
+  display: inline-flex;
+  color: var(--text-muted);
+}
+
+/* Phones: the examples fit the screen (Amount stays in view); long names truncate. */
+@media (max-width: 599.98px) {
+  .reapply-table {
+    --grow-min-compact: 5rem;
+  }
+
+  .reapply-table td:not(:last-child),
+  .reapply-table th:not(:last-child) {
+    padding-right: 8px;
+  }
+
+  .reapply-table .cat {
+    max-width: 6.5rem;
+  }
+}

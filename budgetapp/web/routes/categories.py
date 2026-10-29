@@ -212,10 +212,11 @@ def _mapping_message(change: categories.MappingChange, names: dict[int, str]) ->
         text = f"{what} is no longer mapped: it uses its group's category."
     else:
         text = f"{what} now goes to {names.get(change.new_category_id, 'the new category')}."
-    if change.transaction_count:
-        count = f"{change.transaction_count:,} past transaction"
-        count += "s keep" if change.transaction_count != 1 else " keeps"
-        text += f" {count} its category until you re-apply rules."
+    n = change.transaction_count
+    if n == 1:
+        text += " 1 past transaction keeps its category until you re-apply rules."
+    elif n:
+        text += f" {n:,} past transactions keep their category until you re-apply rules."
     return text
 
 

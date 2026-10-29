@@ -417,7 +417,7 @@ class TestMappingsTab:
         assert response.template.name == "categories/_mapping_group.html"
         assert response.text.lstrip().startswith('<tbody class="mapping-group">')
         assert toasts(response.text) == [
-            "Charities now goes to Gifts & Donations. 2 past transactions keep its category"
+            "Charities now goes to Gifts & Donations. 2 past transactions keep their category"
             " until you re-apply rules."
         ]
         mapping = db.scalars(

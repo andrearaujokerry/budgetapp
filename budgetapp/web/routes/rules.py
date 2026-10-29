@@ -199,7 +199,7 @@ def _preview_status(pv: dict[str, Any]) -> str:
     text = f"{n:,} past transaction{'s' if n != 1 else ''} match{'es' if n == 1 else ''}."
     if pv["shows_changes"]:
         k = p.would_change_count
-        text += f" Saving changes the category of {k:,}."
+        text += f" Saving changes the category of {k:,}." if k else " Saving changes none of them."
     return text
 
 

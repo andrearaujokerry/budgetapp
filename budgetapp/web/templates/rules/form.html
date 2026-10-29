@@ -12,7 +12,10 @@
 {{ ui.page_header("New rule" if f.is_new else "Edit rule", "Every condition you fill in must match. The first rule that matches a charge sets its category.", back_href="/rules", back_label="Rules") }}
 <div class="grid grid--sidebar rule-editor">
 {% call ui.card("When a transaction matches", id="rule-form-card") %}
-<form class="form" id="rule-form" method="post" action="{{ f.action }}" hx-get="/rules/preview" hx-trigger="input delay:400ms, change" hx-target="#rule-preview" hx-swap="innerHTML" hx-sync="this:replace">
+{#- novalidate: htmx checks a form's constraints before every request it sends, so the required
+    category would silence the preview until one is chosen. The server validates every field
+    and shows each message next to its field. -#}
+<form class="form" id="rule-form" method="post" action="{{ f.action }}" novalidate hx-get="/rules/preview" hx-trigger="input delay:400ms, change" hx-target="#rule-preview" hx-swap="innerHTML" hx-sync="this:replace">
 {%- if not f.is_new %}
 <input type="hidden" name="rule_id" value="{{ f.rule_id }}">
 {%- endif %}

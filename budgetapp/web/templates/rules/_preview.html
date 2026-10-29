@@ -25,7 +25,10 @@
 {%- if shows or p.skipped_user_count or p.released_count %}
 <ul class="preview-outcomes">
 {%- if shows %}
-<li class="preview-outcomes__main">{{ ui.icon("check-circle", size="sm") }}<span>{{ p.would_change_count|pluralize("transaction") }} change{{ "s" if p.would_change_count == 1 }} category when you save</span></li>
+<li class="preview-outcomes__main">{{ ui.icon("check-circle", size="sm") }}<span>
+{%- if p.would_change_count %}{{ p.would_change_count|pluralize("transaction") }} change{{ "s" if p.would_change_count == 1 }} category when you save
+{%- else %}No past transaction changes category when you save{% endif -%}
+</span></li>
 {%- if p.unchanged_count %}
 <li>{{ ui.icon("check", size="sm") }}<span>{{ p.unchanged_count|pluralize("transaction") }} {{ "is" if p.unchanged_count == 1 else "are" }} already in {{ pv.category.name }}</span></li>
 {%- endif %}

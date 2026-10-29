@@ -236,7 +236,11 @@ class TestForm:
         assert f["draft"].is_active and f["draft"].apply_to_existing
         assert response.context["pv"] == {"state": "blank"}
         assert "Nothing to match yet" in response.text
-        assert 'hx-get="/rules/preview"' in response.text
+        form = re.search(r'<form[^>]*id="rule-form"[^>]*>', response.text).group(0)
+        assert 'hx-get="/rules/preview"' in form
+        # htmx checks a form's constraints before each request: without novalidate the
+        # required category would silence the preview until a category is chosen.
+        assert " novalidate" in form
         assert csp_problems(response.text, rendered=True) == []
 
     def test_query_fields_prefill_the_form_and_the_preview(self, client, world):

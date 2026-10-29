@@ -165,9 +165,8 @@
 }
 
 .merge-counts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-1) var(--sp-4);
+  display: grid;
+  gap: 2px;
   margin: 0;
   padding-left: var(--sp-5);
 }
