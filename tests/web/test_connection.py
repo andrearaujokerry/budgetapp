@@ -434,7 +434,7 @@ def test_edits_that_found_no_replacement_are_listed(db, client):
     words = text(lost)
     assert "Edits we couldn't carry over" in words
     assert "Whole Foods" in words and "$54.17" in words
-    assert "Category Groceries · Tags party" in words and "“Party supplies”" in words
+    assert "Groceries · tags: party · “Party supplies”" in words
     assert 'hx-post="/connection/lost-edits/gone-1/dismiss"' in lost
 
 

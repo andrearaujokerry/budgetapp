@@ -30,7 +30,7 @@
 <li>{{ ui.icon("home") }}<span><strong>Stays on this Mac.</strong> Your data goes only between Plaid and this app.</span></li>
 </ul>
 {%- if o.production %}
-{{ ui.banner("warn", "Each new link permanently uses one of your 10 Plaid Trial connections, and linking American Express twice can break the first link. Finish the checklist first.", title="This uses 1 of your 10 Plaid connections.") }}
+{{ ui.banner("warn", "It stays used even if the connection is removed later, and linking American Express a second time can break the first link. Finish the checklist first.", title="This uses 1 of your 10 Plaid connections.") }}
 {%- endif %}
 <div class="cluster">
 {%- if o.production %}
@@ -69,7 +69,7 @@
 {%- if o.production %}
 {% call ui.dialog("confirm-link", "Link American Express?", size="sm") %}
 <div class="stack">
-<p><strong>This uses 1 of your 10 Plaid connections, permanently.</strong> Make sure the checklist is done: a link that fails it uses no connection, but it has to be started again.</p>
+<p><strong>This uses 1 of your 10 Plaid connections, permanently.</strong> Tick each item once it is done in Plaid's Dashboard. If Plaid stops the link because one is missing, no connection is used, but you start over.</p>
 <fieldset class="stack stack--sm link-confirm" data-link-checklist>
 <legend class="sr-only">Checklist</legend>
 {%- for c in checklist %}

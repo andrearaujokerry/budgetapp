@@ -260,8 +260,8 @@ def page_context(
 
 
 SANDBOX_USER_OPTIONS = [
-    ("custom", "Amex-like card with known totals (custom user)"),
-    ("user_transactions_dynamic", "Changing test data: pending charges post on refresh"),
+    ("custom", "Amex-like card, known totals"),
+    ("user_transactions_dynamic", "Dynamic: pending charges post"),
     ("user_good", "Plaid's standard test user"),
 ]
 

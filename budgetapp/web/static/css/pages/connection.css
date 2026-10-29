@@ -98,8 +98,20 @@
   margin-top: 16px;
 }
 
-.lost-edit .table__secondary {
-  max-width: 28ch;
+/* Phones hide the Date column; the date then leads the charge's second line. */
+@media (min-width: 600px) {
+  .lost-edit__date {
+    display: none;
+  }
+}
+
+/* The edits a removed charge carried: wraps (the merchant lines above it truncate). */
+.lost-edit {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
   white-space: normal;
 }
 
