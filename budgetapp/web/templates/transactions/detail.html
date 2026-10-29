@@ -1,0 +1,38 @@
+{#- One transaction as a full page (a details link opened directly or without JavaScript).
+    Context: d, t, in_dialog (false), next. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% block title %}Transaction details{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/transactions.css">{% endblock %}
+
+{% block content %}
+{%- set merchant = t.merchant_name or t.name -%}
+{%- set here = '/transactions/' ~ t.id -%}
+{%- set back = '?' ~ {'next': here}|urlencode -%}
+{% call ui.page_header("Transaction details", t.title ~ " · " ~ (t.spend_date|date_long), back_href=next, back_label="Transactions") %}
+{{ ui.button("Notes and tags", icon="pencil", href=here ~ "/edit" ~ back) }}
+{%- if t.can_split %}
+{{ ui.button("Edit split" if t.splits else "Split", icon="split", href=here ~ "/split" ~ back) }}
+{%- endif %}
+{%- if t.category_source != 'system' %}
+{{ ui.button("Always categorize like this", icon="wand", href=here ~ "/rule" ~ back) }}
+{%- endif %}
+{% endcall %}
+
+{% call ui.card(class="txn-detail-card") %}
+{% include "transactions/_detail_body.html" %}
+{% endcall %}
+
+<div class="cluster">
+<a class="btn btn--ghost" href="/transactions?{{ {'merchant': merchant}|urlencode }}">{{ ui.icon('filter') }}<span>All from this merchant</span></a>
+<a class="btn btn--ghost" href="{{ here }}/category{{ back }}">{{ ui.icon('tag') }}<span>Change category</span></a>
+{%- if t.is_user_category %}
+<form method="post" action="{{ here }}/reset"><input type="hidden" name="next" value="{{ here }}">{{ ui.button("Reset to automatic", icon="refresh", variant="ghost", type="submit") }}</form>
+{%- endif %}
+{%- if t.needs_review %}
+<form method="post" action="{{ here }}/reviewed"><input type="hidden" name="next" value="{{ here }}">{{ ui.button("Mark as reviewed", icon="check", variant="ghost", type="submit") }}</form>
+{%- endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}<script src="/static/js/transactions.js" defer></script>{% endblock %}

@@ -1,0 +1,19 @@
+{#- The details dialog (HTMX). Context: d, t, in_dialog, next. -#}
+{% import "components/ui.html" as ui %}
+{%- set merchant = t.merchant_name or t.name -%}
+{% call ui.dialog("txn-detail-dialog", "Transaction details", size="lg", autoopen=true) %}
+{% include "transactions/_detail_body.html" %}
+<div class="dialog__footer dialog__footer--split">
+<a class="btn btn--ghost btn--sm" href="/transactions?{{ {'merchant': merchant}|urlencode }}">{{ ui.icon('filter') }}<span>All from this merchant</span></a>
+<div class="cluster">
+{{ ui.button("Notes and tags", icon="pencil", size="sm", hx_get="/transactions/" ~ t.id ~ "/edit", hx_target="#txn-dialog") }}
+{%- if t.can_split %}
+{{ ui.button("Edit split" if t.splits else "Split", icon="split", size="sm", hx_get="/transactions/" ~ t.id ~ "/split", hx_target="#txn-dialog") }}
+{%- endif %}
+{%- if t.category_source != 'system' %}
+{{ ui.button("Always categorize like this", icon="wand", size="sm", hx_get="/transactions/" ~ t.id ~ "/rule", hx_target="#txn-dialog") }}
+{%- endif %}
+{{ ui.button("Close", variant="primary", size="sm", data_dialog_close=true) }}
+</div>
+</div>
+{% endcall %}

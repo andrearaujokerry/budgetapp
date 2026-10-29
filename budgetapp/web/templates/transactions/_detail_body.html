@@ -1,0 +1,138 @@
+{#- Everything about one transaction: the details dialog and page share it. Context: d
+    (TransactionDetail), t (its row), in_dialog. -#}
+{% import "components/ui.html" as ui %}
+{%- set h = 'h3' if in_dialog else 'h2' -%}
+{%- set from_csv = t.source == 'csv' -%}
+<div class="txn-detail">
+<div class="txn-detail__head">
+<div class="txn-detail__who">
+<p class="txn-detail__title">{{ t.title }}</p>
+{%- if t.subtitle %}<p class="txn-detail__sub">{{ t.subtitle }}</p>{% endif %}
+<p class="txn-detail__badges">
+{%- if t.pending %}{{ ui.badge('Pending', icon='clock') }}{% endif %}
+{%- if t.is_payment %}{{ ui.badge('Payment', tone='muted') }}{% elif t.is_refund %}{{ ui.badge('Refund', tone='ok') }}{% endif %}
+{%- if t.is_split %}{{ ui.badge('Split', tone='info', icon='split') }}{% elif t.splits_mismatch %}{{ ui.badge("Split doesn't add up", tone='warn', icon='alert') }}{% endif %}
+{%- if t.needs_review %}{{ ui.badge('Needs review', tone='warn', icon='alert') }}{% endif %}
+{%- if t.is_duplicate %}{{ ui.badge('Possible duplicate', tone='warn') }}{% endif %}
+</p>
+</div>
+<p class="txn-detail__amount">{{ ui.money(t.amount, pending=t.pending, tone='muted' if t.is_payment else none) }}</p>
+</div>
+{%- if t.needs_review %}
+{{ ui.banner('warn', t.review_reason or 'Something changed after you edited this transaction.', title='Needs review.') }}
+{%- endif %}
+{%- if t.is_duplicate %}
+{{ ui.banner('warn', "This row came from an Amex CSV file and looks like a charge Plaid already sent, so it is left out of every total until you review it.", title='Possible duplicate.', action_href='/import', action_label='Review on Import') }}
+{%- endif %}
+
+{#- Category -#}
+{%- set category_value -%}
+{%- if t.is_split -%}
+<ul class="txn-splits txn-splits--detail">
+{%- for s in t.splits %}<li>{{ ui.category_badge(s.category) }}<span class="txn-splits__amount">{{ ui.money_text(s.amount) }}</span>{% if s.note %}<span class="txn-splits__note">{{ s.note }}</span>{% endif %}</li>{% endfor -%}
+</ul>
+{%- else -%}
+{{ ui.category_badge(t.category) }}
+{%- endif -%}
+{%- endset -%}
+{%- set source_value -%}
+{%- if t.category_source == 'rule' and d.rule -%}
+Rule <a href="/rules">“{{ d.rule.label }}”</a>{% if not d.rule.is_active %} (now inactive){% endif %}
+{%- elif t.category_source == 'user' -%}
+You{% if t.user_edited_at %}, {{ t.user_edited_at|relative_time }}{% endif %}
+{%- elif t.category_source == 'plaid' -%}
+Plaid's category {{ d.pfc_detailed or d.pfc_primary or '' }}
+{%- elif t.category_source == 'amex' -%}
+The Amex category “{{ d.external_category or '' }}”
+{%- elif t.category_source == 'system' -%}
+Card payment (always Card Payments; rules don't change it)
+{%- else -%}
+Automatic: no rule or category mapping matched
+{%- endif -%}
+{%- endset -%}
+{%- set counts_as = {'expense': 'Spending' ~ (' (a credit here lowers ' ~ t.category.name ~ ' spending)' if t.amount < 0 and not t.is_split else ''), 'income': 'A credit, not spending', 'transfer': 'A card payment, not spending'}.get(t.category.kind, t.category.kind) -%}
+{%- set made_here -%}{% for r in d.rules_made_here %}<a href="/rules">“{{ r.label }}”</a>{{ ', ' if not loop.last }}{% endfor %}{%- endset -%}
+<section class="txn-detail__section">
+<{{ h }} class="txn-detail__heading">Category</{{ h }}>
+{{ ui.kv([
+  ('Category', category_value),
+  ('Set by', source_value),
+  ('Counts as', 'Split across categories' if t.is_split else counts_as),
+] + ([('Rules made from it', made_here)] if d.rules_made_here else [])) }}
+</section>
+
+<section class="txn-detail__section">
+<{{ h }} class="txn-detail__heading">Notes and tags</{{ h }}>
+{%- set tags_value %}{% if t.tags %}<span class="chips">{% for tag in t.tags %}<span class="chip">{{ tag }}</span>{% endfor %}</span>{% endif %}{% endset %}
+{%- set notes_value %}{% if t.notes %}<span class="txn-detail__notes">{{ t.notes }}</span>{% endif %}{% endset %}
+{{ ui.kv([
+  ('Notes', notes_value),
+  ('Tags', tags_value),
+  ('Last edited by you', t.user_edited_at|relative_time if t.user_edited_at else none),
+]) }}
+</section>
+
+<section class="txn-detail__section">
+<{{ h }} class="txn-detail__heading">Dates</{{ h }}>
+{%- set posted_value %}{% if t.posted_date %}{{ t.posted_date|date_long }}{% elif t.pending %}Not yet: pending{% endif %}{% endset %}
+{%- set replaced_value -%}
+{%- if d.replaced_pending -%}
+{%- if d.replaced_pending.amount is not none -%}
+A pending charge of {{ ui.money_text(d.replaced_pending.amount) }} on {{ d.replaced_pending.date|date_long }}; your edits moved with it.
+{%- else -%}
+A pending charge Plaid sent earlier; your edits moved with it.
+{%- endif -%}
+{%- endif -%}
+{%- endset -%}
+{%- set inherited_value -%}
+{%- for i in d.inherited_from %}{{ ui.money_text(i.amount) }} on {{ i.date|date_long }}{% if i.name %} ({{ i.name }}){% endif %}{{ '; ' if not loop.last }}{% endfor -%}
+{%- endset -%}
+{{ ui.kv([
+  ('Date shown', t.spend_date|date_long),
+  ('Authorized', t.authorized_date|date_long if t.authorized_date else none),
+  ('Posted', posted_value),
+  ('Date in the Amex file' if from_csv else 'Date sent by Plaid', t.date|date_long),
+] + ([('Replaced', replaced_value)] if d.replaced_pending else []) + ([('Kept your edits from', inherited_value)] if d.inherited_from else [])) }}
+</section>
+
+<section class="txn-detail__section">
+<{{ h }} class="txn-detail__heading">{{ 'From your Amex CSV file' if from_csv else 'From Plaid' }}</{{ h }}>
+{%- set pfc_value %}{% if d.pfc_primary or d.pfc_detailed %}{{ d.pfc_detailed or d.pfc_primary }}{% if d.pfc_detailed and d.pfc_primary %} (in {{ d.pfc_primary }}){% endif %}{% if d.pfc_confidence %} · confidence {{ d.pfc_confidence|lower|replace('_', ' ') }}{% endif %}{% if d.pfc_version %} · {{ d.pfc_version }}{% endif %}{% endif %}{% endset %}
+{%- set location_value %}{% if d.location_text %}{{ d.location_text }}{% endif %}{% if d.location and d.location.get('lat') is not none and d.location.get('lon') is not none %}{{ ' · ' if d.location_text }}{{ d.location.get('lat') }}, {{ d.location.get('lon') }}{% endif %}{% endset %}
+{%- set amount_value %}{{ ui.money(t.amount) }}{% if d.iso_currency_code and d.iso_currency_code != 'USD' %} {{ d.iso_currency_code }}{% endif %}{% endset %}
+{{ ui.kv([
+  ('Description', t.name),
+  ('Merchant', t.merchant_name),
+  ('On the statement as', t.original_description),
+  ('Amount', amount_value),
+  ('Currency', d.iso_currency_code),
+  ('Card', d.account_name ~ (' (from CSV files only)' if d.account_is_manual else '')),
+  ('Card member', t.account_owner),
+  ('Plaid category', pfc_value),
+  ('Amex category', d.external_category),
+  ('Transaction code', t.transaction_code),
+  ('Merchant category code', d.merchant_category_code),
+  ('Merchant ID', d.merchant_entity_id),
+  ('Channel', d.payment_channel),
+  ('Website', d.website),
+  ('Logo address', d.logo_url),
+  ('Location', location_value),
+]) }}
+</section>
+
+<section class="txn-detail__section">
+<{{ h }} class="txn-detail__heading">Record</{{ h }}>
+{%- set imported_value %}{% if d.csv_import_filename %}{{ d.csv_import_filename }}{% if d.csv_imported_at %}, {{ d.csv_imported_at|date_long }}{% endif %}{% endif %}{% endset %}
+{{ ui.kv([
+  ('Source', 'Amex CSV import' if from_csv else 'Plaid'),
+  ('Plaid transaction ID', d.plaid_transaction_id),
+  ('Pending transaction ID', d.pending_transaction_id),
+  ('Amex reference', d.csv_reference),
+  ('Imported from', imported_value),
+  ('Duplicate check', {'suspect': 'Possible duplicate: not counted', 'kept': 'Kept: you confirmed it is real'}.get(t.duplicate_status, 'Not a duplicate')),
+  ('Added', d.created_at|relative_time),
+  ('Last changed', d.updated_at|relative_time),
+  ('Number in this app', t.id),
+]) }}
+</section>
+</div>

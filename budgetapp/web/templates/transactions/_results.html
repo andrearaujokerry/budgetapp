@@ -1,0 +1,80 @@
+{#- #results: problems, the view tabs, the summary with sums and Export, the table and the
+    pagination. The full page includes it; HTMX filter, sort and page requests get it alone.
+    Context: filt, sort, page, categories, category_names, show_members, attention,
+    any_transactions, today, urls. -#}
+{% import "components/ui.html" as ui %}
+{%- set sort_labels = {'-date': 'newest first', 'date': 'oldest first', '-amount': 'largest amount first', 'amount': 'smallest amount first'} -%}
+<div class="txn-results__body" data-results data-sort="{{ '' if sort == '-date' else sort }}">
+{%- for problem in filt.problems %}
+{{ ui.banner('warn', problem) }}
+{%- endfor %}
+
+{%- if attention.needs_review or attention.duplicates or filt.show != 'all' %}
+{%- set tabs = namespace(items=[{'key': 'all', 'label': 'All transactions', 'href': urls.show['all']}]) %}
+{%- if attention.needs_review or filt.show == 'review' %}{% set tabs.items = tabs.items + [{'key': 'review', 'label': 'Needs review', 'href': urls.show['review'], 'count': attention.needs_review}] %}{% endif %}
+{%- if attention.duplicates or filt.show == 'duplicates' %}{% set tabs.items = tabs.items + [{'key': 'duplicates', 'label': 'Possible duplicates', 'href': urls.show['duplicates'], 'count': attention.duplicates}] %}{% endif %}
+{{ ui.tabs(tabs.items, filt.show, label="Which transactions") }}
+{%- endif %}
+
+{%- if filt.show == 'duplicates' %}
+{{ ui.banner('warn', "These rows came from an Amex CSV file and look like charges Plaid already sent. They are left out of every total, budget and export until you review them: keep the real ones and delete the copies on the Import page.", title="Possible duplicates.", action_href="/import", action_label="Review on Import") }}
+{%- elif filt.show == 'review' %}
+{{ ui.banner('info', "Something changed after you edited these, for example Plaid changed the amount of a split charge. Fix the category or the split, or choose Mark as reviewed in the row's menu.", title="Needs review.") }}
+{%- endif %}
+
+{%- if page.total_count == 0 %}
+<div class="card">
+{%- if not any_transactions %}
+{% call ui.empty_state("No transactions yet", "Link your Amex card to sync charges automatically, or import a CSV download from americanexpress.com for older history.", icon="credit-card") %}
+<a class="btn btn--primary" href="/connection">{{ ui.icon('link') }}<span>Link account</span></a>
+<a class="btn" href="/import">{{ ui.icon('upload') }}<span>Import CSV</span></a>
+{% endcall %}
+{%- elif filt.show == 'duplicates' %}
+{{ ui.empty_state("No possible duplicates", "Every row from your CSV files matches what Plaid sent, or you have reviewed it.", icon="check-circle", compact=true, tone="ok") }}
+{%- elif filt.show == 'review' and filt.is_default %}
+{{ ui.empty_state("Nothing needs review", "Every transaction you edited still adds up.", icon="check-circle", compact=true, tone="ok") }}
+{%- else %}
+{% call ui.empty_state("No matches", "Nothing matches these filters. Try a wider date range or clear the search.", icon="search", compact=true) %}
+<a class="btn" href="{{ urls.reset }}">Clear filters</a>
+{% endcall %}
+{%- endif %}
+</div>
+{%- else %}
+<div class="txn-summary">
+<p class="txn-summary__count"><strong>{{ '{:,}'.format(page.total_count) }}</strong> {{ 'transaction' if page.total_count == 1 else 'transactions' }}<span class="txn-summary__range"> · {{ page.dates.label }}{% if filt.show == 'duplicates' %} · not counted in any total{% endif %}</span></p>
+<dl class="txn-sums">
+<div class="txn-sums__item"><dt>Charges</dt><dd>{{ ui.money(page.sums.charges, tone='neutral') }}</dd></div>
+<div class="txn-sums__item"><dt>Credits &amp; payments</dt><dd>{{ ui.money(page.sums.credits) }}</dd></div>
+<div class="txn-sums__item"><dt>Net</dt><dd>{{ ui.money(page.sums.net, tone='neutral') }}</dd></div>
+<div class="txn-sums__tip">{{ ui.tip("Raw sums of the full amounts of every transaction listed, on all pages (not only this one). Charges are positive amounts; credits are refunds, statement credits and card payments. A split charge counts in full here. Spending by category is on Budgets and Trends.", pos="bottom-end") }}</div>
+</dl>
+<div class="txn-summary__actions">{{ ui.button("Export CSV", icon="download", size="sm", href=urls.export, download=true) }}</div>
+</div>
+
+{% call ui.card(flush=true, class="txn-card") %}
+<div class="table-wrap">
+<table class="table txn-table">
+<caption class="sr-only">Transactions, {{ sort_labels[sort] }}{% if page.pages > 1 %}, page {{ page.page }} of {{ page.pages }}{% endif %}</caption>
+<thead><tr>
+{{ ui.sort_th("Date", "date", sort, urls.sort, target="#results") }}
+<th scope="col" class="col-grow">Description</th>
+<th scope="col" class="col-optional-sm">Category</th>
+{%- if show_members %}
+<th scope="col" class="col-optional-md">Card member</th>
+{%- endif %}
+<th scope="col" class="col-optional-lg">Tags</th>
+{{ ui.sort_th("Amount", "amount", sort, urls.sort, num=true, target="#results") }}
+<th scope="col" class="shrink"><span class="sr-only">Actions</span></th>
+</tr></thead>
+<tbody>
+{%- for t in page.rows %}
+{% include "transactions/_row.html" %}
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{% endcall %}
+
+{{ ui.pagination(page.page, page.pages, urls.page, total=page.total_count, target="#results", label="Transaction pages") }}
+{%- endif %}
+</div>

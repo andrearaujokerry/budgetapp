@@ -1,0 +1,81 @@
+{#- The filter bar (full page only; it swaps #results). Context: filt, sort, options,
+    uncategorized_id. Every control submits on change (typing and dates are debounced); the
+    server answers with HX-Replace-Url so the address bar holds only the filters in use. -#}
+{% import "components/ui.html" as ui %}
+{% import "components/forms.html" as form %}
+{%- set ns = namespace(names=[]) -%}
+{%- for c in options.categories -%}
+{%- set value = 'uncategorized' if c.id == uncategorized_id else c.id|string -%}
+{%- if value in filt.categories or c.id|string in filt.categories %}{% set ns.names = ns.names + [c.name] %}{% endif -%}
+{%- endfor -%}
+{%- set category_summary = 'All categories' if not ns.names else (ns.names[0] if ns.names|length == 1 else ns.names[0] ~ ' +' ~ (ns.names|length - 1)) -%}
+{%- set range_options = [
+  ('all', 'All dates'),
+  ('period', options.period_label),
+  ('last_month', 'Last month'),
+  ('90d', 'Last 90 days'),
+  ('year', 'This year'),
+  ('custom', 'Custom range'),
+] -%}
+
+{% call form.filter_bar("/transactions", target="#results", label="Filter transactions", id="txn-filters") %}
+{{ form.search_field("q", value=filt.q, label="Search transactions", placeholder="Search description, merchant, notes or tags", id="f-q") }}
+{{ form.select_field("range", "Dates", range_options, value=filt.range, compact=true, id="f-range") }}
+<div class="txn-dates">
+{{ form.date_field("from", "From", value=filt.date_from, compact=true, id="f-from") }}
+{{ form.date_field("to", "To", value=filt.date_to, compact=true, id="f-to") }}
+</div>
+
+<div class="field field--compact txn-catpick">
+<span class="field__label" id="f-category-label">Categories</span>
+<button type="button" class="select select--sm txn-catpick__button" popovertarget="txn-catpick" aria-labelledby="f-category-label f-category-summary" data-popover-anchor>
+<span id="f-category-summary" class="txn-catpick__summary" data-catpick-summary>{{ category_summary }}</span>
+</button>
+<div id="txn-catpick" popover class="txn-popover txn-catpick__panel" data-catpick>
+<fieldset class="txn-catpick__list">
+<legend class="sr-only">Show only these categories</legend>
+{%- for c in options.categories %}
+{%- set value = 'uncategorized' if c.id == uncategorized_id else c.id|string %}
+{{ form.checkbox_field("category", ui.category_badge(c), checked=(value in filt.categories or c.id|string in filt.categories), value=value, id="f-cat-" ~ c.id, data_label=c.name, wrapper_class="txn-catpick__option") }}
+{%- endfor %}
+</fieldset>
+<div class="txn-popover__footer">
+<button type="button" class="btn btn--ghost btn--sm" data-catpick-clear>Clear</button>
+<button type="button" class="btn btn--sm" popovertarget="txn-catpick" popovertargetaction="hide">Done</button>
+</div>
+</div>
+</div>
+
+{{ form.select_field("status", "Status", [('all', 'Any status'), ('pending', 'Pending'), ('posted', 'Posted')], value=filt.status, compact=true, id="f-status") }}
+
+<input type="hidden" name="sort" value="{{ '' if sort == '-date' else sort }}" data-sort-input>
+{%- if filt.show != 'all' %}
+<input type="hidden" name="show" value="{{ filt.show }}">
+{%- endif %}
+
+<div class="filter-bar__actions">
+<a class="btn btn--ghost btn--sm" href="/transactions">Reset</a>
+</div>
+
+<details class="txn-more"{% if filt.advanced_count %} open{% endif %}>
+<summary class="txn-more__summary">{{ ui.icon('filter', size='sm') }}<span>More filters</span>{% if filt.advanced_count %}<span class="badge badge--accent">{{ filt.advanced_count }}</span>{% endif %}</summary>
+<div class="txn-more__fields">
+{{ form.field("merchant", "Merchant", value=filt.merchant, placeholder="Exact merchant name", compact=true, id="f-merchant", list="f-merchant-list", autocomplete="off") }}
+<datalist id="f-merchant-list">{% for m in options.merchants %}<option value="{{ m }}"></option>{% endfor %}</datalist>
+{{ form.money_field("min", "Amount from", value=filt.amount_min, placeholder="", allow_negative=true, compact=true, id="f-min") }}
+{{ form.money_field("max", "Amount to", value=filt.amount_max, placeholder="", allow_negative=true, compact=true, id="f-max") }}
+{%- if options.accounts|length > 1 %}
+{%- set accounts = namespace(options=[]) %}
+{%- for a in options.accounts %}{% set accounts.options = accounts.options + [(a.id, a.name)] %}{% endfor %}
+{{ form.select_field("account", "Card", accounts.options, value=filt.account_id, placeholder="All cards", compact=true, id="f-account") }}
+{%- endif %}
+{%- if options.members %}
+{{ form.select_field("member", "Card member", options.members, value=filt.member or none, placeholder="Everyone", compact=true, id="f-member") }}
+{%- endif %}
+{%- if options.tags %}
+{{ form.select_field("tag", "Tag", options.tags, value=filt.tag or none, placeholder="Any tag", compact=true, id="f-tag") }}
+{%- endif %}
+{{ form.checkbox_field("credits", "Credits only", checked=filt.credits_only, id="f-credits", wrapper_class="txn-more__check") }}
+</div>
+</details>
+{% endcall %}
