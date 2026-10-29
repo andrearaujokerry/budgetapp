@@ -1,0 +1,10 @@
+{#- Placeholder from the web shell; the STMT package replaces this file. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% block title %}Recurring{% endblock %}
+{% block content %}
+{{ ui.page_header("Recurring", "Subscriptions and other repeating charges.") }}
+<div class="card">
+{{ ui.empty_state("Coming soon", "This page is being built.", icon="repeat") }}
+</div>
+{% endblock %}

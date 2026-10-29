@@ -1,0 +1,578 @@
+{#- ==========================================================================
+    Display components. Import once per template:
+        {% import "components/ui.html" as ui %}
+    Full API, examples and the CSS class vocabulary: components/README.md.
+    Conventions
+    - Macros that accept **attrs turn extra keyword arguments into HTML
+      attributes, with "_" becoming "-":  hx_post="/x"  ->  hx-post="/x".
+      None/False values are skipped, True renders a bare attribute.
+    - Money values are Decimal or int (float works for literals in the UI kit;
+      strings and booleans raise). The text is identical to
+      budgetapp.money.format_money (the |money filter): half-up to the cent, a
+      U+2212 minus, thousands separators. See money_text below.
+    - Tones: one vocabulary for every macro: ok | warn | over | info, plus
+      sandbox / accent / muted / neutral where a macro lists them. Aliases:
+      success = ok, warning = warn, danger = over, error = over. An unknown
+      tone raises an error, so a typo fails the page's tests instead of
+      silently rendering the wrong colour.
+    - Nothing here needs request context; every macro is pure.
+    ========================================================================== -#}
+
+{%- set _TONE_ALIASES = {'success': 'ok', 'warning': 'warn', 'danger': 'over', 'error': 'over'} -%}
+{%- set _TONES = {
+  'banner': ['info', 'ok', 'warn', 'over', 'sandbox'],
+  'badge': ['neutral', 'accent', 'ok', 'warn', 'over', 'info', 'sandbox', 'muted'],
+  'stat': ['neutral', 'ok', 'warn', 'over', 'info'],
+  'money': ['neutral', 'ok', 'warn', 'over', 'muted'],
+  'progress': ['ok', 'warn', 'over', 'none'],
+  'empty': ['ok', 'warn', 'over', 'info'],
+} -%}
+
+{#- Internal: stop rendering with a readable message (Jinja has no "raise";
+    calling an undefined value raises UndefinedError carrying `message`). -#}
+{%- macro _fail(message) -%}{{ {}[message]() }}{%- endmacro -%}
+
+{#- Internal: the canonical tone for a macro `kind` ("" when none is given).
+    Unknown values fail loudly. -#}
+{%- macro _tone(value, kind) -%}
+{%- if value -%}
+{%- set v = value|string|lower -%}
+{%- set v = _TONE_ALIASES.get(v, v) -%}
+{%- if v in _TONES[kind] %}{{ v }}{% else %}{{ _fail('ui.' ~ kind ~ '(): unknown tone "' ~ value ~ '". Use one of: ' ~ _TONES[kind]|join(', ') ~ ' (aliases: success, warning, danger, error).') }}{% endif -%}
+{%- endif -%}
+{%- endmacro -%}
+
+{#- html_attrs(attrs, skip=())  — helper: render a dict as HTML attributes
+    (values autoescaped; "_" in keys becomes "-"; None/False skipped; True bare).
+    Used by the macros below and by forms.html. The CSP blocks inline event
+    handlers and javascript: URLs, so on*= / hx-on* attributes and javascript:
+    values fail loudly here instead of silently doing nothing in the browser. -#}
+{%- macro html_attrs(attrs, skip=()) -%}
+{%- for key, val in attrs.items() if key not in skip and val is not none and val is not false -%}
+{%- set name = key|replace('_', '-')|lower -%}
+{%- if (name[:2] == 'on' and '-' not in name) or name[:5] == 'hx-on' or name[:10] == 'data-hx-on' -%}
+{{ _fail('ui: "' ~ name ~ '" is an inline event handler, which the CSP blocks. Use data-* attributes and static/js/<page>.js.') }}
+{%- elif val is string and (val|trim|lower)[:11] == 'javascript:' -%}
+{{ _fail('ui: "' ~ name ~ '" has a javascript: URL, which the CSP blocks. Use static/js/<page>.js.') }}
+{%- endif -%}
+{{ ' ' }}{{ key|replace('_', '-') }}{% if val is not true %}="{{ val }}"{% endif %}
+{%- endfor -%}
+{%- endmacro -%}
+
+{#- color_value(value)  — helper: a category/series colour that is safe inside
+    style="" (case and surrounding spaces ignored):
+      "cat-1".."cat-16"  -> var(--cat-N)        palette slot, follows the theme
+      "other"            -> var(--chart-other)  neutral grey, follows the theme
+      "#rgb" / "#rrggbb" -> the hex, lower-cased (a custom colour, same in both themes)
+    Anything else (None, "red", "cat-17", "url(…)") renders nothing, and the dot
+    or swatch falls back to the neutral "other" grey. app.js resolveColor()
+    accepts the same three forms for charts. -#}
+{%- macro color_value(value) -%}
+{%- if value is string -%}
+{%- set v = value|trim|lower -%}
+{%- if v[:4] == 'cat-' and v[4:] in ['1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16'] -%}
+var(--{{ v }})
+{%- elif v == 'other' -%}
+var(--chart-other)
+{%- elif v|length in [4, 7] and v[:1] == '#' and (v[1:]|reject('in', '0123456789abcdef')|list|length == 0) -%}
+{{ v }}
+{%- endif -%}
+{%- endif -%}
+{%- endmacro -%}
+
+{#- decimal_text(amount, places=2)  — helper: a plain number for form inputs:
+    half-up rounding, no grouping, ASCII "-" ("1234.50", "-12.00"); "" for None. -#}
+{%- macro decimal_text(amount, places=2) -%}
+{%- if amount is not none and amount is not undefined -%}
+{%- set scale = 10 ** places -%}
+{%- set units = ((amount|abs) * scale * 2 + 1) // 2 -%}
+{{ '-' if amount < 0 and units > 0 }}{{ ('{:.' ~ places ~ 'f}').format(units / scale) }}
+{%- endif -%}
+{%- endmacro -%}
+
+{#- Internal: an icon from the sprite. -#}
+{%- macro _svg(name, cls=none) -%}
+<svg class="icon{{ ' ' ~ cls if cls }}" aria-hidden="true" focusable="false"><use href="#i-{{ name }}"/></svg>
+{%- endmacro -%}
+
+{#- Internal: append ?param=value / &param=value to a URL (str or starlette URL). -#}
+{%- macro _with_param(url, param, value) -%}
+{%- set u = url|string -%}
+{{ u }}{{ '' if u.endswith('?') or u.endswith('&') else ('&' if '?' in u else '?') }}{{ param }}={{ value|urlencode }}
+{%- endmacro -%}
+
+
+{#- icon(name, label=none, size=none, class=none)
+    An icon from components/icons.html. Decorative unless `label` is given
+    (then it is announced as an image). size: "xs" | "sm" | "lg" | "xl". -#}
+{%- macro icon(name, label=none, size=none, class=none) -%}
+<svg class="icon{{ ' icon--' ~ size if size }}{{ ' ' ~ class if class }}"
+{%- if label %} role="img" aria-label="{{ label }}"{% else %} aria-hidden="true"{% endif %} focusable="false"><use href="#i-{{ name }}"/></svg>
+{%- endmacro -%}
+
+
+{#- money_text(amount, signed=false, cents=true, symbol="$")
+    The text of an amount without markup, identical to money.format_money:
+    "$1,234.56", "−$54.99" (U+2212), "+$40.00" (signed), "—" for None, and
+    "$1,285" for cents=false. How it matches format_money exactly: the cents are
+    computed with integer arithmetic on the Decimal, floor(|amount| x 100 + 0.5),
+    which is ROUND_HALF_UP (Python's Decimal format() would round half-even);
+    whole dollars round those cents half-up again, so "$2,430.50" shows as
+    "$2,431". The sign comes from the rounded value: an amount that rounds to
+    zero has no sign and is never coloured as a credit. A string or a boolean
+    raises (format a parsed Decimal instead). For sentences, labels, tooltips. -#}
+{%- macro money_text(amount, signed=false, cents=true, symbol="$") -%}
+{%- if amount is none or amount is undefined -%}—
+{%- elif amount is boolean or amount is not number -%}
+{{ _fail('ui.money(): expected a Decimal or int amount, got ' ~ (amount|pprint|truncate(40)) ~ ' (parse strings with money.to_money first).') }}
+{%- else -%}
+{%- set c = ((amount|abs) * 200 + 1) // 2 -%}
+{%- set units = c if cents else (c + 50) // 100 -%}
+{{ '−' if amount < 0 and units > 0 else ('+' if signed and amount > 0 and units > 0 else '') }}{{ symbol }}{{ '{:,.2f}'.format(units / 100) if cents else '{:,}'.format(units|int) }}
+{%- endif -%}
+{%- endmacro -%}
+
+
+{#- money(amount, signed=false, pending=false, tone=none, cents=true, symbol="$", class=none)
+    A dollar amount in tabular figures. Plaid sign convention: positive = charge,
+    negative = credit. Text from money_text (same as format_money).
+      charges  -> "$12.34"            (plain)
+      credits  -> "−$12.34"           (green, U+2212 minus)
+      None     -> "—"                 (muted)
+    signed=true  shows "+" on positive values and turns off the automatic credit
+                 colour (use for deltas such as "+$40 from Sep").
+    pending=true italic + muted, with "(pending)" for screen readers.
+    tone         force a colour: "neutral" (never green; use for budgets, totals,
+                 remaining), "ok" | "warn" | "over" | "muted".
+    cents=false  whole dollars ("$1,285"), e.g. for stat tiles and axes. -#}
+{%- macro money(amount, signed=false, pending=false, tone=none, cents=true, symbol="$", class=none) -%}
+{%- set t = _tone(tone, 'money')|trim -%}
+{%- if amount is none or amount is undefined -%}
+<span class="amount amount--none{{ ' ' ~ class if class }}">—</span>
+{%- else -%}
+{%- set text = money_text(amount, signed=signed, cents=cents, symbol=symbol) -%}
+{%- set color = t if t and t != 'neutral' else ('credit' if not t and not signed and text.startswith('−') else '') -%}
+<span class="amount{{ ' amount--' ~ color if color }}{{ ' amount--pending' if pending }}{{ ' ' ~ class if class }}">{{ text }}{% if pending %}<span class="sr-only"> (pending)</span>{% endif %}</span>
+{%- endif -%}
+{%- endmacro -%}
+
+
+{#- category_badge(category, chip=false, href=none, class=none)
+    Colour dot + name. Reads category.name, category.color (a palette slot
+    "cat-3" — preferred, theme-aware — or a hex "#1baf7a") and category.is_hidden
+    (hidden ones are muted with an eye-off icon). category=None renders
+    "Uncategorized" with a hollow dot. chip=true draws it as a pill; href makes it
+    a link (e.g. a filtered list). -#}
+{%- macro category_badge(category, chip=false, href=none, class=none) -%}
+{%- set tag = 'a' if href else 'span' -%}
+{%- if category -%}
+{%- set color = color_value(category.color|default(none)) -%}
+{%- set hidden = category.is_hidden|default(false) -%}
+<{{ tag }}{% if href %} href="{{ href }}"{% endif %} class="cat{{ ' cat--chip' if chip }}{{ ' cat--hidden' if hidden }}{{ ' ' ~ class if class }}"
+{%- if color|trim %} style="--cat-color: {{ color|trim }}"{% endif %}>
+<span class="cat__dot" aria-hidden="true"></span><span class="cat__name">{{ category.name }}</span>
+{%- if hidden %}{{ _svg('eye-off', 'icon--xs') }}<span class="sr-only"> (hidden)</span>{% endif -%}
+</{{ tag }}>
+{%- else -%}
+<{{ tag }}{% if href %} href="{{ href }}"{% endif %} class="cat cat--none{{ ' cat--chip' if chip }}{{ ' ' ~ class if class }}"><span class="cat__dot" aria-hidden="true"></span><span class="cat__name">Uncategorized</span></{{ tag }}>
+{%- endif -%}
+{%- endmacro -%}
+
+
+{#- progress(pct, label=none, pace_pct=none, status=none, size=none, show_pct=true, name=none)
+    Budget meter. pct = percent used (Decimal/float/int, None = no budget; a
+    negative value, when refunds exceed charges, shows its text with an empty bar).
+    Status (auto unless given; ok | warn | over | none): ok < 80 <= warn <= 100 < over.
+    Over 100% the bar fills, a dark tick spanning the bar marks where the budget
+    ran out and the overspend is hatched. pace_pct (0-100, share of the period
+    elapsed) draws a small caret above the bar with a notch through it.
+    label = text on the left above the bar (e.g. "$415 of $500"); show_pct=false
+    hides the percentage on the right. name = the meter's accessible name
+    (defaults to the label's text, else "Budget used"); give each meter on a
+    page its own, e.g. "Groceries budget". size: "sm" | "lg". -#}
+{%- macro progress(pct, label=none, pace_pct=none, status=none, size=none, show_pct=true, name=none) -%}
+{%- set has = pct is not none and pct is not undefined -%}
+{%- set raw = (pct|float) if has else 0.0 -%}
+{%- set p = 0.0 if raw < 0 else raw -%}
+{%- set st = (_tone(status, 'progress')|trim) or ('none' if not has else ('over' if p > 100 else ('warn' if p >= 80 else 'ok'))) -%}
+{%- set fill = (100.0 if p > 100 else p) -%}
+{%- set limit = (10000.0 / p) if p > 100 else none -%}
+{%- set pace = none -%}
+{%- if pace_pct is not none and pace_pct is not undefined -%}
+{%- set pace = (pace_pct|float) -%}
+{%- set pace = (pace * 100.0 / p) if p > 100 else pace -%}
+{%- set pace = ([[pace, 0.0]|max, 100.0]|min) -%}
+{%- endif -%}
+{#- Whole percent, except next to a threshold, where one decimal is rounded
+    toward the status so the text never claims a threshold the bar has not
+    reached (79.96 -> "79.9%" while ok) or has already passed (100.04 -> "100.1%"
+    while over). round(6) first removes float noise (79.6 * 10 = 795.999…). -#}
+{%- set whole = raw|round(0) -%}
+{%- if not has -%}
+{%- set pct_text = '—' -%}
+{%- elif st == 'ok' and whole >= 80 -%}
+{%- set pct_text = '{:.1f}%'.format(((raw * 10)|round(6))|round(0, 'floor') / 10) -%}
+{%- elif st == 'over' and whole <= 100 -%}
+{%- set pct_text = '{:.1f}%'.format(((raw * 10)|round(6))|round(0, 'ceil') / 10) -%}
+{%- else -%}
+{%- set pct_text = '{:.0f}%'.format(raw)|replace('-', '−') -%}
+{%- endif -%}
+{%- set meter_name = (name or label or 'Budget used')|striptags -%}
+{%- set valuetext = (pct_text ~ ' used' ~ (', over budget' if st == 'over' else '') ~ ((', ' ~ '{:.0f}'.format(pace_pct|float) ~ '% of the period elapsed') if pace is not none else '')) if has else 'No budget' -%}
+<div class="progress progress--{{ st }}{{ ' progress--' ~ size if size }}" style="--value: {{ '{:.2f}'.format(fill) }}{% if limit is not none %}; --limit: {{ '{:.2f}'.format(limit) }}{% endif %}{% if pace is not none %}; --pace: {{ '{:.2f}'.format(pace) }}{% endif %}">
+{%- if label or show_pct %}
+<div class="progress__head">
+<span class="progress__label">{{ label if label else '' }}</span>
+{%- if show_pct %}
+<span class="progress__pct">{% if st in ['warn', 'over'] %}{{ _svg('alert', 'icon--xs') }}{% endif %}{{ pct_text }}{% if st == 'over' %}<span class="sr-only"> (over budget)</span>{% endif %}</span>
+{%- endif %}
+</div>
+{%- endif %}
+<div class="progress__track" role="meter" aria-label="{{ meter_name }}" aria-valuemin="0" aria-valuemax="{{ '{:.0f}'.format([p, 100.0]|max) }}" aria-valuenow="{{ '{:.0f}'.format(p) }}" aria-valuetext="{{ valuetext }}">
+<span class="progress__fill"></span>
+{%- if limit is not none %}<span class="progress__overflow"></span><span class="progress__limit" title="Budget limit"></span>{% endif %}
+{%- if pace is not none %}<span class="progress__pace" title="Pace: {{ '{:.0f}'.format(pace_pct|float) }}% of the period has passed"></span>{% endif %}
+</div>
+</div>
+{%- endmacro -%}
+
+
+{#- stat(label, value, sub=none, tone=none, icon=none, href=none, id=none)
+    Stat tile: small label, big value, optional sub line. `value` may be markup
+    (e.g. ui.money(x, cents=false)); it is never truncated: the type scales
+    down with the tile's width instead. tone = "ok" | "warn" | "over" | "info"
+    (or "neutral") colours the sub line and adds a status icon. Optional
+    {% call %} body renders under the sub line (e.g. a ui.progress). href turns
+    the tile into a link. Put tiles in a .grid (or .stack). -#}
+{%- macro stat(label, value, sub=none, tone=none, icon=none, href=none, id=none) -%}
+{%- set t = _tone(tone, 'stat')|trim -%}
+{%- set t = '' if t == 'neutral' else t -%}
+{%- set tag = 'a' if href else 'div' -%}
+<{{ tag }} class="stat{{ ' stat--' ~ t if t }}"{% if href %} href="{{ href }}"{% endif %}{% if id %} id="{{ id }}"{% endif %}>
+<div class="stat__label">{% if icon %}{{ _svg(icon, 'icon--sm') }}{% endif %}<span>{{ label }}</span></div>
+<div class="stat__value">{{ value }}</div>
+{%- if sub %}
+<div class="stat__sub">{% if t in ['warn', 'over'] %}{{ _svg('alert', 'icon--sm') }}{% elif t == 'ok' %}{{ _svg('check-circle', 'icon--sm') }}{% endif %}<span>{{ sub }}</span></div>
+{%- endif %}
+{%- if caller is defined %}
+<div class="stat__extra">{{ caller() }}</div>
+{%- endif %}
+</{{ tag }}>
+{%- endmacro -%}
+
+
+{#- page_header(title, subtitle=none, back_href=none, back_label="Back")
+    The page's <h1>. Actions (buttons/links) go in an optional {% call %} body:
+      {% call ui.page_header("Rules", "Applied in order") %}<a class="btn">…</a>{% endcall %} -#}
+{%- macro page_header(title, subtitle=none, back_href=none, back_label="Back") -%}
+<header class="page-header">
+<div class="page-header__text">
+{%- if back_href %}
+<a class="page-header__eyebrow" href="{{ back_href }}">{{ _svg('chevron-left', 'icon--sm') }}{{ back_label }}</a>
+{%- endif %}
+<h1 class="page-header__title">{{ title }}</h1>
+{%- if subtitle %}
+<p class="page-header__subtitle">{{ subtitle }}</p>
+{%- endif %}
+</div>
+{%- if caller is defined %}
+<div class="page-header__actions">{{ caller() }}</div>
+{%- endif %}
+</header>
+{%- endmacro -%}
+
+
+{#- card(title=none, subtitle=none, actions=none, flush=false, footer=none, id=none, class=none)
+    Surface container; the body comes from {% call %}. flush=true removes body
+    padding (tables, lists). `actions` and `footer` take markup, typically built
+    with {% set actions %}…{% endset %}. -#}
+{%- macro card(title=none, subtitle=none, actions=none, flush=false, footer=none, id=none, class=none) -%}
+{%- set tag = 'section' if title else 'div' -%}
+<{{ tag }} class="card{{ ' card--flush' if flush }}{{ ' ' ~ class if class }}"{% if id %} id="{{ id }}"{% endif %}{% if title and id %} aria-labelledby="{{ id }}-title"{% endif %}>
+{%- if title or actions %}
+<div class="card__header">
+<div class="card__heading">
+{%- if title %}<h2 class="card__title"{% if id %} id="{{ id }}-title"{% endif %}>{{ title }}</h2>{% endif %}
+{%- if subtitle %}<p class="card__subtitle">{{ subtitle }}</p>{% endif %}
+</div>
+{%- if actions %}<div class="card__actions">{{ actions }}</div>{% endif %}
+</div>
+{%- endif %}
+<div class="card__body">{% if caller is defined %}{{ caller() }}{% endif %}</div>
+{%- if footer %}
+<div class="card__footer">{{ footer }}</div>
+{%- endif %}
+</{{ tag }}>
+{%- endmacro -%}
+
+
+{#- pagination(page, pages, url, total=none, target=none, param="page", label="Pagination")
+    Numbered pages with Prev/Next. `url` is the current URL WITHOUT the page
+    parameter (str or starlette URL, e.g. request.url.remove_query_params("page"));
+    the macro appends page=N. With `target` (a CSS selector) links also carry
+    hx-get + hx-target + hx-push-url so only the results region reloads.
+    Renders nothing when pages <= 1. Phones show only Prev/Next. -#}
+{%- macro pagination(page, pages, url, total=none, target=none, param="page", label="Pagination") -%}
+{%- set page = page|int -%}
+{%- set pages = pages|int -%}
+{%- if pages > 1 -%}
+{%- macro _link(n, text, rel=none, aria=none, current=false, disabled=false) -%}
+{%- set href = _with_param(url, param, n) -%}
+<a class="pagination__link" href="{{ href }}"
+{%- if target and not disabled %} hx-get="{{ href }}" hx-target="{{ target }}" hx-push-url="true"{% endif %}
+{%- if rel %} rel="{{ rel }}"{% endif %}{% if aria %} aria-label="{{ aria }}"{% endif %}
+{%- if current %} aria-current="page"{% endif %}{% if disabled %} aria-disabled="true" tabindex="-1"{% endif %}>{{ text }}</a>
+{%- endmacro -%}
+<nav class="pagination" aria-label="{{ label }}">
+<span class="pagination__info">Page {{ page }} of {{ pages }}{% if total is not none %} · {{ '{:,}'.format(total) }} result{{ '' if total == 1 else 's' }}{% endif %}</span>
+<div class="pagination__nav">
+{{ _link(page - 1, _svg('chevron-left', 'icon--sm') ~ '<span>Prev</span>'|safe, rel='prev', aria='Previous page', disabled=page <= 1) }}
+<ol class="pagination__pages">
+{%- set ns = namespace(last=0) -%}
+{%- for n in range(1, pages + 1) -%}
+{%- if n == 1 or n == pages or (n >= page - 1 and n <= page + 1) or (page <= 3 and n <= 4) or (page >= pages - 2 and n >= pages - 3) -%}
+{%- if ns.last and n - ns.last > 1 %}<li><span class="pagination__gap" aria-hidden="true">…</span></li>{% endif -%}
+<li>{{ _link(n, n, aria='Page ' ~ n, current=(n == page)) }}</li>
+{%- set ns.last = n -%}
+{%- endif -%}
+{%- endfor -%}
+</ol>
+{{ _link(page + 1, '<span>Next</span>'|safe ~ _svg('chevron-right', 'icon--sm'), rel='next', aria='Next page', disabled=page >= pages) }}
+</div>
+</nav>
+{%- endif -%}
+{%- endmacro -%}
+
+
+{#- sort_th(label, key, sort, url, num=false, param="sort", target=none, first="desc")
+    A sortable <th>. `sort` is the current value ("date", "-date" = descending);
+    `url` the current URL without the sort/page parameters. A first click sorts
+    by `first` ("desc" or "asc"); clicking the active column flips it. -#}
+{%- macro sort_th(label, key, sort, url, num=false, param="sort", target=none, first="desc") -%}
+{%- set s = (sort or '')|string -%}
+{%- set active = s.lstrip('-') == key -%}
+{%- set desc = s.startswith('-') -%}
+{%- set next = (key if desc else '-' ~ key) if active else ('-' ~ key if first == 'desc' else key) -%}
+{%- set href = _with_param(url, param, next) -%}
+<th scope="col"{% if num %} class="num"{% endif %}{% if active %} aria-sort="{{ 'descending' if desc else 'ascending' }}"{% endif %}>
+<a class="th-sort" href="{{ href }}"{% if target %} hx-get="{{ href }}" hx-target="{{ target }}" hx-push-url="true"{% endif %}>{{ label }}{{ _svg(('arrow-down' if desc else 'arrow-up') if active else 'sort') }}</a>
+</th>
+{%- endmacro -%}
+
+
+{#- empty_state(title, message=none, icon="list", action_href=none, action_label=none, compact=false, heading=none, tone=none)
+    Centered icon + title + message. Extra actions via {% call %}.
+    heading  1-6 renders the title as that heading (an error page's title is
+             its only <h1>); default a <p>, for an empty card inside a page.
+    tone     icon colour: "warn" | "over" | "info" | "ok" (default: the accent);
+             error pages use warn so they never look like "Coming soon". -#}
+{%- macro empty_state(title, message=none, icon="list", action_href=none, action_label=none, compact=false, heading=none, tone=none) -%}
+{%- set t = _tone(tone, 'empty')|trim -%}
+{%- if heading is not none and (heading is boolean or heading not in [1, 2, 3, 4, 5, 6]) -%}
+{{ _fail('ui.empty_state(): heading must be 1-6 (or none for a <p>), not ' ~ (heading|pprint) ~ '.') }}
+{%- endif -%}
+{%- set tag = 'h' ~ heading if heading else 'p' -%}
+<div class="empty{{ ' empty--compact' if compact }}">
+<div class="empty__icon{{ ' empty__icon--' ~ t if t }}">{{ _svg(icon) }}</div>
+<{{ tag }} class="empty__title">{{ title }}</{{ tag }}>
+{%- if message %}
+<p class="empty__message">{{ message }}</p>
+{%- endif %}
+{%- if action_href or caller is defined %}
+<div class="empty__actions">
+{%- if action_href %}<a class="btn btn--primary" href="{{ action_href }}">{{ action_label or 'Continue' }}</a>{% endif %}
+{%- if caller is defined %}{{ caller() }}{% endif %}
+</div>
+{%- endif %}
+</div>
+{%- endmacro -%}
+
+
+{#- banner(tone, text, title=none, icon=none, action_href=none, action_label=none, id=none, role=none)
+    Full-width notice. tone: "info" | "ok" | "warn" | "over" | "sandbox"
+    ("danger"/"error" = over). title is bold and runs into text. One link action
+    via action_href/label, or any buttons via {% call %} (rendered on the right).
+    role defaults to "alert" for over, otherwise "status". -#}
+{%- macro banner(tone, text, title=none, icon=none, action_href=none, action_label=none, id=none, role=none) -%}
+{%- set t = (_tone(tone, 'banner')|trim) or 'info' -%}
+{%- set icons = {'info': 'info', 'ok': 'check-circle', 'warn': 'alert', 'over': 'alert', 'sandbox': 'info'} -%}
+<div class="banner banner--{{ t }}" role="{{ role or ('alert' if t == 'over' else 'status') }}"{% if id %} id="{{ id }}"{% endif %}>
+{{ _svg(icon or icons[t], 'banner__icon') }}
+<div class="banner__body">
+{%- if title %}<strong class="banner__title">{{ title }}</strong>{% endif %}
+{%- if text %}<span class="banner__text">{{ text }}</span>{% endif %}
+</div>
+{%- if action_href or caller is defined %}
+<div class="banner__actions">
+{%- if action_href %}<a class="btn btn--sm{{ ' btn--danger' if t == 'over' }}" href="{{ action_href }}">{{ action_label or 'Open' }}</a>{% endif %}
+{%- if caller is defined %}{{ caller() }}{% endif %}
+</div>
+{%- endif %}
+</div>
+{%- endmacro -%}
+
+
+{#- flash_message(level, text)
+    One toast for the #flash stack. level: "success"/"ok", "info",
+    "warning"/"warn", "error"/"danger"/"over"; anything else shows as info
+    (levels come from Python code, so this one is lenient). app.js dismisses
+    ok/info/warn toasts after 6 s (paused while hovered or focused); error toasts
+    stay until closed. Every toast has a close button. -#}
+{%- macro flash_message(level, text) -%}
+{%- set lv = level|string|lower -%}
+{%- set tone = _TONE_ALIASES.get(lv, lv) -%}
+{%- set tone = tone if tone in ['ok', 'info', 'warn', 'over'] else 'info' -%}
+{%- set glyph = {'ok': 'check-circle', 'info': 'info', 'warn': 'alert', 'over': 'x-circle'}[tone] -%}
+<div class="toast toast--{{ tone }}"{% if tone == 'over' %} role="alert" data-persist{% endif %} data-toast>
+{{ _svg(glyph, 'toast__icon') }}
+<div class="toast__text">{{ text }}</div>
+<button type="button" class="btn btn--ghost btn--icon btn--sm toast__close" data-dismiss aria-label="Dismiss">{{ _svg('x') }}</button>
+</div>
+{%- endmacro -%}
+
+
+{#- flash_oob(level, text)
+    The same toast wrapped for an HTMX out-of-band swap: append it to any
+    partial response and htmx adds it to the #flash stack. -#}
+{%- macro flash_oob(level, text) -%}
+<div hx-swap-oob="beforeend:#flash">{{ flash_message(level, text) }}</div>
+{%- endmacro -%}
+
+
+{#- status_pill(state, text=none, detail=none, href=none)
+    Connection/sync state. state: "healthy" | "syncing" | "needs_reconnect" |
+    "error" | "stale" | "not_linked". text defaults per state; detail is shown as a
+    tooltip and read by screen readers. -#}
+{%- macro status_pill(state, text=none, detail=none, href=none) -%}
+{%- set defaults = {'healthy': 'Up to date', 'syncing': 'Syncing…', 'needs_reconnect': 'Reconnect needed', 'error': 'Sync problem', 'stale': 'Not synced recently', 'not_linked': 'Not linked'} -%}
+{%- set tag = 'a' if href else 'span' -%}
+{%- set label = text or defaults.get(state, state) -%}
+<{{ tag }} class="pill pill--{{ state }}"{% if href %} href="{{ href }}"{% endif %}{% if detail %} data-tooltip="{{ detail }}" data-tooltip-pos="bottom-end"{% if href %} aria-label="{{ label }}. {{ detail }}"{% endif %}{% endif %}>
+<span class="pill__dot" aria-hidden="true"></span><span class="pill__text">{{ label }}</span>
+</{{ tag }}>
+{%- endmacro -%}
+
+
+{#- badge(text, tone=none, icon=none, title=none)
+    Small label. tone: none/"neutral" | "accent" | "ok" | "warn" | "over" |
+    "info" | "sandbox" | "muted". -#}
+{%- macro badge(text, tone=none, icon=none, title=none) -%}
+{%- set t = _tone(tone, 'badge')|trim -%}
+{%- set t = '' if t == 'neutral' else t -%}
+<span class="badge{{ ' badge--' ~ t if t }}"{% if title %} title="{{ title }}"{% endif %}>{% if icon %}{{ _svg(icon) }}{% endif %}{{ text }}</span>
+{%- endmacro -%}
+
+
+{#- button(label, variant="secondary", size=none, icon=none, icon_only=false, href=none, type="button", spin=false, tooltip=none, **attrs)
+    <button> (or <a> when href is given) with the .btn classes.
+    variant: "primary" | "secondary" | "ghost" | "danger"; size: "sm".
+    icon_only=true hides the text visually: label becomes aria-label + tooltip.
+    spin=true spins the icon while an HTMX request from this button runs.
+    Extra keyword args become attributes:  hx_post="/x", data_confirm="Sure?". -#}
+{%- macro button(label, variant="secondary", size=none, icon=none, icon_only=false, href=none, type="button", spin=false, tooltip=none) -%}
+{%- if variant not in [none, 'primary', 'secondary', 'ghost', 'danger'] %}{{ _fail('ui.button(): unknown variant "' ~ variant ~ '". Use primary, secondary, ghost or danger.') }}{% endif -%}
+{%- if size not in [none, 'sm'] %}{{ _fail('ui.button(): unknown size "' ~ size ~ '". Use size="sm" or leave it out.') }}{% endif -%}
+{%- set cls = 'btn' ~ (' btn--' ~ variant if variant and variant != 'secondary' else '') ~ (' btn--' ~ size if size else '') ~ (' btn--icon' if icon_only else '') ~ (' ' ~ kwargs['class'] if kwargs.get('class') else '') -%}
+{%- set tag = 'a' if href else 'button' -%}
+<{{ tag }} class="{{ cls }}"{% if href %} href="{{ href }}"{% else %} type="{{ type }}"{% endif %}
+{%- if icon_only %} aria-label="{{ label }}" data-tooltip="{{ tooltip or label }}"{% elif tooltip %} data-tooltip="{{ tooltip }}"{% endif %}{{ html_attrs(kwargs, ['class']) }}>
+{%- if icon %}{{ _svg(icon, 'icon--spin' if spin else none) }}{% endif %}{% if not icon_only %}<span>{{ label }}</span>{% endif -%}
+</{{ tag }}>
+{%- endmacro -%}
+
+
+{#- tabs(items, active, label="Sections", target=none)
+    Navigation tabs (links, not an ARIA tablist). items: list of dicts
+    {key, label, href, count?}. `active` = key of the current tab. With
+    `target` the links swap that region via HTMX and push the URL. -#}
+{%- macro tabs(items, active, label="Sections", target=none) -%}
+<nav class="tabs" aria-label="{{ label }}">
+{%- for item in items %}
+<a class="tabs__tab" href="{{ item.href }}"{% if target %} hx-get="{{ item.href }}" hx-target="{{ target }}" hx-push-url="true"{% endif %}{% if item.key == active %} aria-current="page"{% endif %}>{{ item.label }}
+{%- if item.count is defined and item.count is not none %}<span class="tabs__count">{{ item.count }}</span>{% endif %}</a>
+{%- endfor %}
+</nav>
+{%- endmacro -%}
+
+
+{#- dialog(id, title, size=none, autoopen=false)
+    Modal <dialog>; body from {% call %}. Open it with any element carrying
+    data-dialog-open="<id>"; close with data-dialog-close, Esc, a backdrop
+    click, a <form method="dialog">, or an HX-Trigger: dialog:close response
+    header. Put buttons in <div class="dialog__footer"> at the end of the body.
+    size: "sm" | "lg". autoopen=true opens it as soon as it is on the page
+    (for dialogs returned by an HTMX request). -#}
+{%- macro dialog(id, title, size=none, autoopen=false) -%}
+<dialog id="{{ id }}" class="dialog{{ ' dialog--' ~ size if size }}" aria-labelledby="{{ id }}-title"{% if autoopen %} data-dialog-autoopen{% endif %}>
+<header class="dialog__header">
+<h2 class="dialog__title" id="{{ id }}-title">{{ title }}</h2>
+<button type="button" class="btn btn--ghost btn--icon btn--sm" data-dialog-close aria-label="Close">{{ _svg('x') }}</button>
+</header>
+<div class="dialog__body">{% if caller is defined %}{{ caller() }}{% endif %}</div>
+</dialog>
+{%- endmacro -%}
+
+
+{#- chart(id, config, height=280, label=none)
+    Renders <canvas data-chart="<id>" role="img"> plus <script type="application/json"
+    id="<id>-config">{{ config|tojson }}</script>; app.js draws it with Chart.js
+    in theme colours. The page sets {% block charts %}yes{% endblock %}.
+    `label` is the accessible name (falls back to config.title). Optional
+    {% call %} content (a short summary or a small table of the same numbers)
+    renders in a visually hidden <div id="<id>-desc"> that the canvas points to
+    with aria-describedby, so screen readers can reach it.
+    Config contract: see README ("Charts"). -#}
+{%- macro chart(id, config, height=280, label=none) -%}
+{%- set desc = caller() if caller is defined else '' -%}
+<div class="chart" style="--chart-h: {{ height|int }}px">
+<canvas data-chart="{{ id }}" role="img" aria-label="{{ label or config.get('title') or 'Chart' }}"{% if desc|trim %} aria-describedby="{{ id }}-desc"{% endif %}></canvas>
+</div>
+{%- if desc|trim %}
+<div class="sr-only" id="{{ id }}-desc">{{ desc }}</div>
+{%- endif %}
+<script type="application/json" id="{{ id }}-config">{{ config|tojson }}</script>
+{%- endmacro -%}
+
+
+{#- spinner(label="Loading…", size=none)  — size "lg". -#}
+{%- macro spinner(label="Loading…", size=none) -%}
+<span class="spinner{{ ' spinner--' ~ size if size }}" role="status" aria-label="{{ label }}"></span>
+{%- endmacro -%}
+
+
+{#- loading(label="Loading…")
+    Spinner + text, e.g. as the initial content of an hx-trigger="load" region. -#}
+{%- macro loading(label="Loading…") -%}
+<div class="loading"><span class="spinner" aria-hidden="true"></span><span role="status">{{ label }}</span></div>
+{%- endmacro -%}
+
+
+{#- skeleton(lines=3, title=true)
+    Grey placeholder lines for content that is still loading. -#}
+{%- macro skeleton(lines=3, title=true) -%}
+<div class="skeleton-group" aria-hidden="true">
+{%- if title %}<span class="skeleton skeleton--title"></span>{% endif %}
+{%- for i in range(lines|int) %}<span class="skeleton" style="--skeleton-w: {{ [96, 88, 72, 92, 64][loop.index0 % 5] }}%"></span>{% endfor %}
+</div>
+{%- endmacro -%}
+
+
+{#- tip(text, icon="info", pos=none)
+    A small focusable icon that shows `text` as a tooltip.
+    pos: none (above) | "bottom" | "left" | "right" | "bottom-end". -#}
+{%- macro tip(text, icon="info", pos=none) -%}
+<span class="tip" tabindex="0" role="img" aria-label="{{ text }}" data-tooltip="{{ text }}"{% if pos %} data-tooltip-pos="{{ pos }}"{% endif %}>{{ _svg(icon, 'icon--sm') }}</span>
+{%- endmacro -%}
+
+
+{#- kv(items)
+    Definition list for detail panes. items: list of (term, value) pairs;
+    value may be markup; None renders "—". Stacks (term above value) whenever
+    its container is narrower than 360px, whatever the viewport. -#}
+{%- macro kv(items) -%}
+<div class="kv-wrap"><dl class="kv">
+{%- for term, value in items %}
+<dt>{{ term }}</dt><dd>{{ value if value is not none and value != '' else '—' }}</dd>
+{%- endfor %}
+</dl></div>
+{%- endmacro -%}

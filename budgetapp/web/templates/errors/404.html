@@ -1,0 +1,14 @@
+{#- 404 page. Render it through web/templating.render() so the layout context
+    (env, nav, conn) is set; it still renders with an empty context (no env bar,
+    no nav), so a failing context lookup never hides the error. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% block title %}Page not found{% endblock %}
+{% block content %}
+<div class="card">
+{% call ui.empty_state("Page not found", "There is nothing at this address. It may have moved, or the link is out of date.", icon="search", heading=1) %}
+<a class="btn btn--primary" href="/">Go to the dashboard</a>
+<a class="btn" href="/transactions">Transactions</a>
+{% endcall %}
+</div>
+{% endblock %}

@@ -1,0 +1,10 @@
+{#- Placeholder from the web shell; the TXN package replaces this file. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% block title %}Transactions{% endblock %}
+{% block content %}
+{{ ui.page_header("Transactions", "Every charge, refund and payment on your Amex.") }}
+<div class="card">
+{{ ui.empty_state("Coming soon", "This page is being built.", icon="list") }}
+</div>
+{% endblock %}

@@ -1,0 +1,10 @@
+{#- Placeholder from the web shell; the DASH package replaces this file. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% block title %}Trends{% endblock %}
+{% block content %}
+{{ ui.page_header("Trends", "Spending by month and category over time.") }}
+<div class="card">
+{{ ui.empty_state("Coming soon", "This page is being built.", icon="trending") }}
+</div>
+{% endblock %}

@@ -1,0 +1,72 @@
+{#- ==========================================================================
+    Sync status (#sync-status): the status pill AND its action button, so the
+    two always change together. base.html includes it in the top bar; it is
+    also the whole response (status 200) of
+      POST /connection/sync         the Sync now button (hx-target="#sync-status",
+                                    hx-swap="outerHTML"); a plain form post (no
+                                    JS) gets a 303 to /connection instead (there
+                                    is no Referer: Referrer-Policy no-referrer).
+                                    If a sync is already running, return this
+                                    partial (it shows "Syncing…"), not an error.
+      GET  /connection/sync-status  polled every 4 s while a sync runs; polling
+                                    stops when a response no longer says syncing.
+    Context: conn = services.status.ConnectionStatus (or None). Reads conn.state,
+    .label, .syncing, .stale, .needs_reconnect, .last_sync_success_at, .items[*]
+    .consent_days_left and .primary.institution_name / .error_message /
+    .error_code. Uses the `relative_time` filter (web/templating.py).
+    Pill:   Syncing… · Reconnect needed · Sync problem · Not linked ·
+            "Synced 5 min ago" (healthy; amber when stale) · Connected.
+    Action: Link account (not linked) · Reconnect (needs reconnect) · Renew
+            access (consent expired) · a disabled, spinning Sync now (a sync
+            is running) · otherwise Sync now.
+    ========================================================================== -#}
+{%- import "components/ui.html" as ui -%}
+{%- set c = conn|default(none) -%}
+{%- set item = (c.primary|default(none)) if c else none -%}
+{%- set syncing = (c.syncing|default(false)) if c else false -%}
+{%- set last_ok = (c.last_sync_success_at|default(none)) if c else none -%}
+{%- set label = (c.label|default(none)) if c else none -%}
+{%- set reconnect = (c.state != 'not_linked' and (c.needs_reconnect|default(c.state == 'needs_reconnect'))) if c else false -%}
+{%- set expired = ((c.items|default([]))|selectattr('consent_days_left', 'lt', 0)|list|length > 0) if c else false -%}
+{%- set problem = ((item.error_message|default(none)) or (item.error_code|default(none))) if item else none -%}
+{%- set detail = none -%}
+{%- if not c -%}
+  {%- set state, text = 'not_linked', 'Status unavailable' -%}
+{%- elif syncing -%}
+  {%- set state, text = 'syncing', 'Syncing…' -%}
+  {%- set detail = 'Fetching new transactions from Amex. This can take a minute.' -%}
+{%- elif reconnect -%}
+  {%- set state, text = 'needs_reconnect', label or 'Reconnect needed' -%}
+  {%- set detail = problem or 'Amex needs you to sign in again through Plaid.' -%}
+{%- elif c.state == 'error' -%}
+  {%- set state, text = 'error', label or 'Sync problem' -%}
+  {%- set detail = problem or 'The last sync did not finish. See Connection for details.' -%}
+{%- elif c.state == 'not_linked' -%}
+  {%- set state, text = 'not_linked', label or 'Not linked' -%}
+  {%- set detail = 'Link your Amex card, or import a CSV file.' -%}
+{%- elif c.state == 'stale' or c.stale|default(false) -%}
+  {%- set state = 'stale' -%}
+  {%- set text = ('Synced ' ~ (last_ok|relative_time)) if last_ok else (label or 'Not synced recently') -%}
+  {%- set detail = 'No successful sync for over a day and a half.' -%}
+{%- else -%}
+  {%- set state = 'healthy' -%}
+  {%- set text = ('Synced ' ~ (last_ok|relative_time)) if last_ok else (label or 'Connected') -%}
+  {%- set inst = item.institution_name|default(none) if item else none -%}
+  {%- set detail = (inst ~ ' via Plaid') if inst else none -%}
+{%- endif -%}
+<div id="sync-status" class="sync-status"{% if syncing %} hx-get="/connection/sync-status" hx-trigger="every 4s" hx-swap="outerHTML"{% endif %}>
+{{ ui.status_pill(state, text, detail=detail, href='/connection') }}
+{%- if c %}
+{%- if c.state == 'not_linked' %}
+<a class="btn btn--sm btn--primary" href="/connection">{{ ui.icon('link') }}<span>Link account</span></a>
+{%- elif reconnect or expired %}
+<a class="btn btn--sm" href="/connection">{{ ui.icon('link') }}<span>{{ 'Reconnect' if reconnect else 'Renew access' }}</span></a>
+{%- elif syncing %}
+<button type="button" class="btn btn--sm sync-now is-busy" disabled aria-label="Sync now (a sync is already running)">{{ ui.icon('refresh', class='icon--spin') }}<span class="sync-now__label">Sync now</span></button>
+{%- else %}
+<form class="sync-form" method="post" action="/connection/sync">
+<button type="submit" class="btn btn--sm sync-now" hx-post="/connection/sync" hx-target="#sync-status" hx-swap="outerHTML" hx-disabled-elt="this" aria-label="Sync now" data-tooltip="Fetch new transactions now" data-tooltip-pos="bottom-end">{{ ui.icon('refresh', class='icon--spin') }}<span class="sync-now__label">Sync now</span></button>
+</form>
+{%- endif %}
+{%- endif %}
+</div>

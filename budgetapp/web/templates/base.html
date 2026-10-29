@@ -1,0 +1,177 @@
+{#- ==========================================================================
+    Layout for every page.
+    Context (web/templating.render adds it to every page, error pages included;
+    every key is optional so a page still renders with an empty context):
+      request      starlette Request
+      env          "sandbox" | "production" | "test" | "demo":
+                     sandbox     purple bar "Sandbox — test data…", label Sandbox, "(Sandbox)" in the title
+                     test        the same bar with "Test", "(Test)" in the title
+                     demo        orange bar "Demo data — nothing here is real", label Demo, "(Demo)" in the title
+                     production  no bar, green "Live" label
+                   Any other value shows only its name as the label. When
+                   missing or None the page shows NO environment bar or label
+                   (it never assumes Sandbox), so error handlers must render
+                   through web/templating.render() too.
+      nav_items    [{key, label, href, icon, group}, …] in display order
+      active_nav   key of the current page (None for none)
+      conn         services.status.ConnectionStatus or None. Reads: state,
+                   needs_reconnect, consent_warning, items[*].consent_warning /
+                   consent_days_left / consent_due_at; the sync partial reads
+                   more (components/sync_status.html).
+      messages     [{level, text}, …] flash messages to show as toasts
+      app_version  "0.1.0"
+    Blocks: title, head, header_actions, content, scripts, charts
+    ("{% block charts %}yes{% endblock %}" loads Chart.js on that page).
+    ========================================================================== -#}
+{%- import "components/ui.html" as ui -%}
+{%- set env = env|default(none) or none -%}
+{%- set nav_items = nav_items|default([]) or [] -%}
+{%- set active_nav = active_nav|default(none) -%}
+{%- set conn = conn|default(none) -%}
+{%- set messages = messages|default([]) or [] -%}
+{%- set app_version = app_version|default('') -%}
+{%- set env_label = {'sandbox': 'Sandbox', 'production': 'Live', 'test': 'Test', 'demo': 'Demo'}.get(env, (env|string|capitalize) if env else none) -%}
+{%- set show_envbar = env in ['sandbox', 'test', 'demo'] -%}
+{%- set ns = namespace(item=none) -%}
+{%- for item in nav_items if item.key == active_nav %}{% set ns.item = item %}{% endfor -%}
+
+{#- Notices. One Plaid update-mode session fixes both a reconnect and a consent
+    renewal, so the consent banner waits while the reconnect banner shows. The
+    Connection page shows neither: it carries the Reconnect / Renew actions
+    itself, and a banner there would only link to the page already open. -#}
+{%- set on_connection = active_nav == 'connection' -%}
+{%- set show_reconnect = (conn.state != 'not_linked' and (conn.needs_reconnect|default(conn.state == 'needs_reconnect'))) if conn and not on_connection else false -%}
+{%- set cs = namespace(show=false, item=none) -%}
+{%- if conn and not on_connection and not show_reconnect and conn.consent_warning|default(false) -%}
+{%- set cs.show = true -%}
+{%- for it in conn.items|default([]) if it.consent_warning|default(false) -%}
+{%- if cs.item is none or it.consent_days_left < cs.item.consent_days_left %}{% set cs.item = it %}{% endif -%}
+{%- endfor -%}
+{%- endif -%}
+{%- set consent_days = cs.item.consent_days_left|default(none) if cs.item else none -%}
+{%- set consent_due = cs.item.consent_due_at|default(none) if cs.item else none -%}
+{#- An aware datetime: show the local calendar date (the one consent_days_left counts to). -#}
+{%- if consent_due is not none and consent_due.astimezone is defined %}{% set consent_due = consent_due.astimezone().date() %}{% endif -%}
+
+{%- macro brand(env, env_label) -%}
+<a class="brand" href="/">
+<svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="mark-bg" width="32" height="32" rx="8"/><path class="mark-fg" d="M8.5 20.5 13 16l3.5 3.5 7-7.5"/><path class="mark-fg" d="M19.5 12h4v4"/></svg>
+<span class="brand__text"><span class="brand__name">Budget Tracker</span>{% if env_label %}<span class="brand__env brand__env--{{ env }}">{{ env_label }}</span>{% endif %}</span>
+</a>
+{%- endmacro -%}
+
+{%- macro render_nav(prefix, items, active) -%}
+<nav class="nav" aria-label="Main">
+{%- for item in items %}
+{%- if loop.first or item.group != loop.previtem.group %}
+<div class="nav__group">
+{%- if item.group %}<span class="nav__heading" id="{{ prefix }}-nav-{{ loop.index }}">{{ item.group }}</span>{% endif %}
+<ul class="nav__list"{% if item.group %} aria-labelledby="{{ prefix }}-nav-{{ loop.index }}"{% endif %}>
+{%- endif %}
+<li><a class="nav__link" href="{{ item.href }}"{% if item.key == active %} aria-current="page"{% endif %}>{{ ui.icon(item.icon or 'list') }}<span>{{ item.label }}</span></a></li>
+{%- if loop.last or item.group != loop.nextitem.group %}
+</ul>
+</div>
+{%- endif %}
+{%- endfor %}
+</nav>
+{%- endmacro -%}
+<!doctype html>
+<html lang="en"{% if env %} data-env="{{ env }}"{% endif %}>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>
+{%- set page_title = self.title()|trim %}
+<title>{{ page_title }}{% if page_title != 'Budget Tracker' %} · Budget Tracker{% endif %}{% if show_envbar %} ({{ env_label }}){% endif %}</title>
+<link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/css/app.css">
+{% block head %}{% endblock %}
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="page-progress" aria-hidden="true"></div>
+{% include "components/icons.html" %}
+<div class="shell{{ ' has-envbar' if show_envbar }}">
+<aside class="sidebar" aria-label="Sidebar">
+<div class="sidebar__brand">{{ brand(env, env_label) }}</div>
+{%- if nav_items %}
+{{ render_nav('side', nav_items, active_nav) }}
+{%- endif %}
+<div class="sidebar__footer">{{ ui.icon('lock', size='sm') }}<span>Private · runs only on this Mac{% if app_version %} · v{{ app_version }}{% endif %}</span></div>
+</aside>
+
+<div class="main-col">
+<div class="mobile-bar">
+{{ brand(env, env_label) }}
+{%- if nav_items %}
+<details class="mobile-nav">
+<summary aria-label="Menu">{{ ui.icon('menu', class='icon-open') }}{{ ui.icon('x', class='icon-close') }}<span class="mobile-nav__label">Menu</span></summary>
+<div class="mobile-nav__panel">{{ render_nav('mobile', nav_items, active_nav) }}</div>
+</details>
+{%- endif %}
+</div>
+
+<header class="masthead">
+{%- if env == 'demo' %}
+<div class="env-bar env-bar--demo" role="note">{{ ui.icon('alert', size='sm') }}<span class="env-bar__text"><strong>Demo data</strong> — nothing here is real<span class="env-bar__detail">. Made-up transactions in a throwaway database; your Amex account is never touched.</span></span></div>
+{%- elif show_envbar %}
+<div class="env-bar env-bar--{{ env }}" role="note">{{ ui.icon('info', size='sm') }}<span class="env-bar__text"><strong>{{ env_label }}</strong> — test data<span class="env-bar__detail">. Nothing here touches your real Amex account.</span></span></div>
+{%- endif %}
+<div class="topbar">
+<div class="topbar__inner">
+<div class="topbar__title">
+{%- if ns.item and ns.item.group %}<span>{{ ns.item.group }}</span><span class="topbar__sep" aria-hidden="true">/</span>{% endif -%}
+<strong>{{ self.title() }}</strong>
+</div>
+<div class="topbar__actions">
+{% block header_actions %}{% endblock %}
+{%- if conn %}
+{% include "components/sync_status.html" %}
+{%- endif %}
+</div>
+</div>
+</div>
+</header>
+
+{%- if show_reconnect or cs.show %}
+<div class="notices">
+{%- if show_reconnect %}
+{{ ui.banner('over', 'Syncing is paused until you sign in to Amex again through Plaid. Your existing data is safe.', title='Your Amex connection needs attention.', action_href='/connection', action_label='Reconnect', id='reconnect-banner') }}
+{%- elif consent_days is not none and consent_days < 0 %}
+{{ ui.banner('over', 'Amex asks you to renew access every 12 months' ~ ((', and it lapsed on ' ~ (consent_due|date_long)) if consent_due else '') ~ '. Syncing stops until you renew.', title='Your Amex consent has expired.', action_href='/connection', action_label='Renew now', id='consent-banner') }}
+{%- elif consent_days == 0 %}
+{{ ui.banner('over', 'Renew now to keep syncing without a gap. It takes a minute.', title='Your Amex consent expires today.', action_href='/connection', action_label='Renew now', id='consent-banner') }}
+{%- else %}
+{#- The essentials (by when, days left) are in the title: narrow windows show only the title. -#}
+{{ ui.banner('warn', 'Amex asks you to renew access every 12 months. It takes a minute and keeps syncing uninterrupted.', title='Renew your Amex connection' ~ ((' by ' ~ (consent_due|date_long)) if consent_due else '') ~ ((' (' ~ consent_days ~ ' day' ~ ('' if consent_days == 1 else 's') ~ ' left)') if consent_days is not none else '') ~ '.', action_href='/connection', action_label='Renew now', id='consent-banner') }}
+{%- endif %}
+</div>
+{%- endif %}
+
+<main id="main" class="content" tabindex="-1">
+{% block content %}{% endblock %}
+</main>
+</div>
+</div>
+
+<div id="flash" class="toast-stack" aria-live="polite" aria-relevant="additions">
+{%- for m in messages %}
+{{ ui.flash_message(m.level, m.text) }}
+{%- endfor %}
+</div>
+
+<script src="/static/vendor/htmx.min.js" defer></script>
+{%- if self.charts()|trim %}
+<script src="/static/vendor/chart.umd.min.js" defer></script>
+{%- endif %}
+<script src="/static/js/app.js" defer></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
+{#- Blocks used only through self.<name>() above (never rendered in place):
+    title  — the page name (document title and top bar); defaults to the active nav label;
+    charts — any non-empty text loads Chart.js up front. -#}
+{%- if false %}{% block title %}{{ ns.item.label if ns.item else 'Budget Tracker' }}{% endblock %}{% block charts %}{% endblock %}{% endif -%}

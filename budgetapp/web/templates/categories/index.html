@@ -1,0 +1,10 @@
+{#- Placeholder from the web shell; the CAT package replaces this file. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% block title %}Categories{% endblock %}
+{% block content %}
+{{ ui.page_header("Categories", "The categories your spending is grouped into.") }}
+<div class="card">
+{{ ui.empty_state("Coming soon", "This page is being built.", icon="tag") }}
+</div>
+{% endblock %}

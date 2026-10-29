@@ -32,10 +32,7 @@ ALL_COMMANDS = {
     "notify-test",
     "test",
 }
-STUBS = {
-    "start": [],
-    "serve": ["--demo", "probe", "--port", "8801"],
-    "demo": ["create", "probe", "--seed", "3"],
+STUBS = {  # start/serve are built (tests/web/test_serve.py), demo too (tests/test_demo.py)
     "sync": ["--if-due", "--unattended", "--item", "3"],
     "sandbox-link": ["--user", "custom", "--institution", "ins_109508"],
     "sandbox-refresh": [],
@@ -117,13 +114,6 @@ def test_db_status_reports_the_running_cluster(capsys):
     assert cli.main(["db", "status"]) == 0
     out = capsys.readouterr().out
     assert "running" in out and "5434" in out and "server version : 18" in out
-
-
-def test_demo_stub_keeps_its_documented_options(capsys):
-    for argv in (["demo", "list"], ["demo", "drop", "probe"]):
-        assert cli.main(argv) == 2
-    with pytest.raises(SystemExit):
-        cli.main(["demo", "explode"])
 
 
 class TestSetupNeverUpgradesProduction:

@@ -1,0 +1,10 @@
+{#- Placeholder from the web shell; the STMT package replaces this file. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% block title %}Statements{% endblock %}
+{% block content %}
+{{ ui.page_header("Statements", "Each statement period, checked against Amex to the cent.") }}
+<div class="card">
+{{ ui.empty_state("Coming soon", "This page is being built.", icon="receipt") }}
+</div>
+{% endblock %}

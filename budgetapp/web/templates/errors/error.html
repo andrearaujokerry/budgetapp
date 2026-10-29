@@ -1,0 +1,26 @@
+{#- Generic error / notice page for other statuses (400, 403, 503 "upgrade needed",
+    "Keychain approval needed", …). Optional context:
+      status_code  int, shown small above the title
+      title        heading (default "Something went wrong")
+      message      one or two sentences in plain words
+      command      a command the user should run in Terminal (shown as code)
+      icon         sprite icon name (default "alert")
+    Never pass exception text or tracebacks. Render through web/templating.render()
+    so `env` is set (an empty context renders without the env bar). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% block title %}{{ title|default('Something went wrong') }}{% endblock %}
+{% block content %}
+<div class="card">
+{% call ui.empty_state(title|default('Something went wrong'), message|default(none), icon=icon|default('alert'), heading=1, tone='warn') %}
+{%- if command|default(none) %}
+<p class="error-command"><code>{{ command }}</code></p>
+{%- endif %}
+<a class="btn btn--primary" href="">Try again</a>
+<a class="btn" href="/">Go to the dashboard</a>
+{% endcall %}
+{%- if status_code|default(none) %}
+<p class="muted text-xs error-status">Error {{ status_code }}</p>
+{%- endif %}
+</div>
+{% endblock %}
