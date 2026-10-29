@@ -1,0 +1,29 @@
+{#- One rule (swapped after its on/off switch changes). Needs `r` (RuleRow) and `rule_total`. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+<tr id="rule-row-{{ r.id }}"{% if not r.is_active %} class="is-muted"{% endif %}>
+<td class="shrink rule-order">{{ r.position }}</td>
+<td class="col-grow">
+<span class="table__primary">{{ r.title }}</span>
+{%- if r.name or not r.is_active %}
+<span class="table__secondary">{% if r.name %}{{ r.summary }}{% endif %}{% if r.name and not r.is_active %} · {% endif %}{% if not r.is_active %}Off{% endif %}</span>
+{%- endif %}
+</td>
+<td>{{ ui.category_badge(r.category) }}</td>
+<td class="num col-optional-sm">{{ '{:,}'.format(r.transaction_count) }}</td>
+<td class="center">{{ form.switch_field("is_active", r.title ~ " (rule " ~ r.position ~ ")", checked=r.is_active, id="rule-on-" ~ r.id, wrapper_class="check--bare", hx_post="/rules/" ~ r.id ~ "/active", hx_target="closest tr", hx_swap="outerHTML") }}</td>
+<td class="table__actions">
+<form class="inline-action" method="post" action="/rules/{{ r.id }}/move" hx-post="/rules/{{ r.id }}/move" hx-target="#rules-list" hx-swap="innerHTML">
+<input type="hidden" name="direction" value="up">
+{{- ui.button("Move up: " ~ r.title, icon="arrow-up", icon_only=true, variant="ghost", size="sm", type="submit", disabled=(r.position == 1)) -}}
+</form>
+<form class="inline-action" method="post" action="/rules/{{ r.id }}/move" hx-post="/rules/{{ r.id }}/move" hx-target="#rules-list" hx-swap="innerHTML">
+<input type="hidden" name="direction" value="down">
+{{- ui.button("Move down: " ~ r.title, icon="arrow-down", icon_only=true, variant="ghost", size="sm", type="submit", disabled=(r.position == rule_total)) -}}
+</form>
+{{- ui.button("Edit: " ~ r.title, icon="pencil", icon_only=true, variant="ghost", size="sm", href="/rules/" ~ r.id ~ "/edit") -}}
+<form class="inline-action" method="post" action="/rules/{{ r.id }}/delete" hx-post="/rules/{{ r.id }}/delete" hx-target="#rules-list" hx-swap="innerHTML">
+{{- ui.button("Delete: " ~ r.title, icon="trash", icon_only=true, variant="ghost", size="sm", type="submit", data_confirm="Delete the rule “" ~ r.title ~ "”? The transactions it categorized keep their category.") -}}
+</form>
+</td>
+</tr>

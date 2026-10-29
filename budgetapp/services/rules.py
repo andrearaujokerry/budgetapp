@@ -616,8 +616,6 @@ def preview(
                 status, note = "change", ""
             else:
                 status, note = "same", "Already in this category."
-            if proposed is not None and status != "change":
-                note = f"{note} Moves to {proposed.name}."
         if len(sample) < limit:
             sample.append(
                 PreviewItem(
@@ -630,7 +628,7 @@ def preview(
                     current=current_category,
                     proposed=proposed,
                     status=status,
-                    note=note.strip(),
+                    note=note,
                 )
             )
     return RulePreview(

@@ -1,0 +1,53 @@
+{#- New or edited rule (CAT-3). Needs `f` and `pv` (routes/rules._form_context). Typing in the
+    form asks GET /rules/preview (debounced) for the past transactions the rule matches; saving
+    is an ordinary form post. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% import "components/forms.html" as form %}
+{% block title %}{{ "New rule" if f.is_new else "Edit rule" }}{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/rules.css">{% endblock %}
+{% block content %}
+{%- set d = f.draft -%}
+{%- set e = f.errors -%}
+{{ ui.page_header("New rule" if f.is_new else "Edit rule", "Every condition you fill in must match. The first rule that matches a charge sets its category.", back_href="/rules", back_label="Rules") }}
+<div class="grid grid--sidebar rule-editor">
+{% call ui.card("When a transaction matches", id="rule-form-card") %}
+<form class="form" id="rule-form" method="post" action="{{ f.action }}" hx-get="/rules/preview" hx-trigger="input delay:400ms, change" hx-target="#rule-preview" hx-swap="innerHTML" hx-sync="this:replace">
+{%- if not f.is_new %}
+<input type="hidden" name="rule_id" value="{{ f.rule_id }}">
+{%- endif %}
+{%- if e.get("conditions") %}
+{{ ui.banner("over", e.get("conditions"), id="rule-conditions-error") }}
+{%- endif %}
+<div class="form-row">
+{{ form.field("merchant_pattern", "Merchant", value=d.merchant_pattern, placeholder="e.g. UBER", error=e.get("merchant_pattern"), help="The merchant’s name, or the description when there is none.", autocomplete="off", spellcheck="false", maxlength="300") }}
+{{ form.field("description_pattern", "Description", value=d.description_pattern, placeholder="e.g. UBER *TRIP", error=e.get("description_pattern"), help="The description as it appears on your statement.", autocomplete="off", spellcheck="false", maxlength="300") }}
+</div>
+{{ form.select_field("match_type", "How the text matches", f.match_options, value=d.match_type, error=e.get("match_type"), help="Upper or lower case and extra spaces don’t matter.") }}
+<div class="form-row">
+{{ form.money_field("amount_min", "Amount at least", value=d.amount_min, allow_negative=true, optional=true, error=e.get("amount_min")) }}
+{{ form.money_field("amount_max", "Amount at most", value=d.amount_max, allow_negative=true, optional=true, error=e.get("amount_max"), help="Charges are positive, credits negative.") }}
+</div>
+{{ form.select_field("account_id", "Card", f.accounts, value=d.account_id, placeholder="Any card", error=e.get("account_id")) }}
+<hr class="rule-form__rule">
+{{ form.category_select("category_id", f.categories, value=d.category_id, label="Put it in", placeholder="Choose a category…", required=true, error=e.get("category_id")) }}
+<div class="form-row">
+{{ form.field("name", "Name", value=d.name, optional=true, placeholder="e.g. Rides", error=e.get("name"), help="Shown in the list instead of the conditions.", autocomplete="off", maxlength="80") }}
+{{ form.field("priority", "Priority", value=d.priority, type="number", step="1", error=e.get("priority"), help="Lower numbers run first.") }}
+</div>
+<div class="stack stack--sm">
+{{ form.switch_field("is_active", "Rule is on", checked=d.is_active, help="A rule that is off is kept but categorizes nothing.") }}
+{{ form.checkbox_field("apply_to_existing", "Also apply to past transactions", checked=d.apply_to_existing, help="Changes the past transactions in the preview. Card payments and categories you set yourself never change.") }}
+</div>
+<div class="form-actions">
+{{ ui.button("Save rule" if f.is_new else "Save changes", variant="primary", type="submit") }}
+<a class="btn btn--ghost" href="/rules">Cancel</a>
+</div>
+</form>
+{% endcall %}
+{% call ui.card("Preview", subtitle="Past transactions this rule matches", id="rule-preview-card", class="rule-preview-card") %}
+<p class="sr-only" id="rule-preview-status" role="status"></p>
+<div id="rule-preview">{% include "rules/_preview.html" %}</div>
+{% endcall %}
+</div>
+{% endblock %}

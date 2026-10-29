@@ -1,0 +1,188 @@
+/* Rules page (CAT-3, CAT-4): what the design system has no component for.
+   Tokens only (components/README.md section 10). */
+
+/* A switch alone in a table cell: its label text stays for screen readers only. */
+.check--bare {
+  vertical-align: middle;
+}
+
+.check--bare .check__text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Move up / move down / delete are tiny forms in the actions cell. */
+.inline-action {
+  display: inline-block;
+  margin: 0;
+  vertical-align: middle;
+}
+
+.table__actions .inline-action + .inline-action,
+.table__actions .inline-action + .btn,
+.table__actions .btn + .inline-action {
+  margin-left: 2px;
+}
+
+.rule-order {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The rule form. */
+.rule-form__rule {
+  width: 100%;
+  margin: var(--sp-1) 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+/* The live preview next to the form. */
+.rule-preview-card .card__body {
+  min-height: 12rem;
+}
+
+.preview-summary {
+  display: grid;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+
+.preview-summary p {
+  margin: 0;
+}
+
+.preview-summary__count {
+  color: var(--text-secondary);
+}
+
+.preview-summary__count strong {
+  color: var(--text);
+  font-size: var(--fs-xl);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--fw-semibold);
+}
+
+.preview-summary__note,
+.preview-outcomes li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+}
+
+.preview-summary__note .icon,
+.preview-outcomes .icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--text-muted);
+}
+
+.preview-outcomes {
+  display: grid;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.preview-outcomes li.preview-outcomes__main {
+  color: var(--text);
+  font-weight: var(--fw-medium);
+}
+
+.preview-outcomes__main .icon {
+  color: var(--accent-text);
+}
+
+.preview-errors {
+  display: grid;
+  gap: var(--sp-1);
+  margin: 0;
+  padding-left: var(--sp-5);
+  color: var(--over-text);
+  font-size: var(--fs-sm);
+}
+
+.preview-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.preview-item {
+  display: grid;
+  gap: var(--sp-1);
+  padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border);
+}
+
+.preview-item__main {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.preview-item__desc {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: var(--fw-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-item__main .amount {
+  flex: none;
+}
+
+.preview-item__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.preview-item__arrow {
+  display: inline-flex;
+  color: var(--text-muted);
+}
+
+.preview-item__note {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+}
+
+.preview-more {
+  margin: var(--sp-2) 0 0;
+}
+
+/* Re-apply: the date matters only for "Transactions since a date". Browsers without :has()
+   drop this rule and simply show the field. */
+.reapply-form:not(:has(option[value="since"]:checked)) .reapply-since {
+  display: none;
+}
+
+.reapply-result {
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+
+.reapply-result__title {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+}
+
+.reapply-result p {
+  margin: 0;
+}
