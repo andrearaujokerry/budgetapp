@@ -1,0 +1,14 @@
+/* Settings page (OPS). Only what the design system has no component for. */
+
+/* The numbered steps for allowing Mac notifications. */
+.settings-steps {
+  display: grid;
+  gap: var(--sp-1);
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+/* Single short values (a day, a few percentages) don't need the full card width. */
+.settings-narrow {
+  max-width: 22rem;
+}

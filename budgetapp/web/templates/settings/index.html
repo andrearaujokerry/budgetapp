@@ -1,10 +1,21 @@
-{#- Placeholder from the web shell; the OPS package replaces this file. -#}
+{#- Settings page (OPS): the settings form, test notification, facts about this app. -#}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
 {% block title %}Settings{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/settings.css">{% endblock %}
 {% block content %}
-{{ ui.page_header("Settings", "Budget periods, alerts and app details.") }}
-<div class="card">
-{{ ui.empty_state("Coming soon", "This page is being built.", icon="settings") }}
+{{ ui.page_header("Settings", "Budget periods, statements, alerts and details about this app.") }}
+<div class="grid grid--sidebar">
+{% include "settings/_form.html" %}
+<div class="stack">
+{% include "settings/_notify.html" %}
+{% include "settings/_about.html" %}
+{% call ui.card("AI assistant", id="ai") %}
+<div class="stack stack--sm">
+<p>{{ ui.badge("Not available in this version", tone="muted") }}</p>
+<p class="text-secondary">Asking questions about your spending in plain English isn't part of this version, so nothing is ever sent to Anthropic.</p>
+</div>
+{% endcall %}
+</div>
 </div>
 {% endblock %}

@@ -1,0 +1,58 @@
+{#- The settings form (full page and HTMX partial). Context: view, values, errors, period_modes. -#}
+{% import "components/ui.html" as ui %}
+{% import "components/forms.html" as form %}
+<form id="settings-form" class="stack" method="post" action="/settings" hx-post="/settings" hx-target="this" hx-swap="outerHTML" novalidate>
+{% if errors %}
+{{ ui.banner("over", "Nothing was saved. Fix the " ~ (errors|length|pluralize("setting")) ~ " marked below, then save again.", title="Check these settings.", id="settings-errors") }}
+{% endif %}
+
+{% call ui.card("Budget period", subtitle="How Budgets, the dashboard and budget alerts count a period", id="budget-period") %}
+<div class="form">
+{{ form.segmented("budget_period_mode", period_modes, value=values.budget_period_mode, label="Budgets follow", help="A statement cycle runs from the day after one closing date to the next closing date, like your Amex statement.") }}
+{%- if errors.get("budget_period_mode") %}
+<p class="field__error" id="f-budget_period_mode-error">{{ ui.icon("alert") }}<span>{{ errors.get("budget_period_mode") }}</span></p>
+{%- endif %}
+{%- set ns = namespace(options=[]) %}
+{%- for card in view.cards %}{% set ns.options = ns.options + [(card.id, card.label)] %}{% endfor %}
+{{ form.select_field("budget_cycle_account_id", "Card whose statement cycle sets the periods", ns.options, value=values.budget_cycle_account_id, placeholder=("Choose a card" if view.cards else "No cards yet"), error=errors.get("budget_cycle_account_id"), help="Used with Statement cycle. Set its closing day under Statements.", wrapper_class="settings-narrow") }}
+{{ form.switch_field("include_pending_in_budgets", "Count pending charges in budgets", checked=values.include_pending_in_budgets, help="A pending charge counts at its pending amount until it posts.") }}
+</div>
+{% endcall %}
+
+{% call ui.card("Statements", subtitle="Statement cycles on the Statements page and for statement-cycle budgets", id="statements") %}
+<div class="form">
+{% if view.cards %}
+<fieldset class="field">
+<legend class="field__label">Statement closing day</legend>
+<div class="form-row">
+{%- for card in view.cards %}
+{%- set stored = (card.statements|pluralize("statement date") ~ " stored") if card.statements else "no statement dates yet" %}
+{{ form.field(card.field, card.label, value=values[card.field], type="number", min="1", max="31", step="1", placeholder="e.g. 19", error=errors.get(card.field), help=card.detail ~ " · " ~ stored, wrapper_class="settings-narrow") }}
+{%- endfor %}
+</div>
+<p class="field__help">The day of the month each statement closes (printed on the statement). Statement dates from Amex are used first when they are known.</p>
+</fieldset>
+{% else %}
+<p class="text-secondary">No cards yet. Link your Amex on the <a href="/connection">Connection</a> page or <a href="/import">import a CSV</a>, then set its closing day here.</p>
+{% endif %}
+{{ form.field("statement_settle_days", "Days a statement settles", value=values.statement_settle_days, type="number", min="0", max="14", step="1", error=errors.get("statement_settle_days"), help="Late charges and credits can post for a few days after the closing date; a statement is checked against Amex's total after this many days.", wrapper_class="settings-narrow") }}
+</div>
+{% endcall %}
+
+{% call ui.card("Alerts", subtitle="Mac notifications, each sent once", id="alerts") %}
+<div class="form">
+{{ form.switch_field("budget_alerts_enabled", "Budget alerts", checked=values.budget_alerts_enabled, help="When a category's spending reaches each percentage of its budget.") }}
+{{ form.field("alert_thresholds", "Alert at these percentages", value=values.alert_thresholds, placeholder="80, 100", error=errors.get("alert_thresholds"), help="Whole percentages of the budget, separated by commas.", autocomplete="off", wrapper_class="settings-narrow") }}
+{{ form.switch_field("sync_alerts_enabled", "Sync problem alerts", checked=values.sync_alerts_enabled, help="When a sync fails, the data is more than a day and a half old, or Amex needs you to reconnect.") }}
+<div class="form-row">
+{{ form.money_field("large_charge_threshold", "Large-charge alert", value=values.large_charge_threshold, placeholder="Off", optional=true, error=errors.get("large_charge_threshold"), help="A notification for each new charge over this amount. Leave it blank for none.") }}
+{{ form.field("consent_reminder_days", "Consent renewal reminder", value=values.consent_reminder_days, type="number", min="1", max="120", step="1", error=errors.get("consent_reminder_days"), help="Days before Amex's yearly consent runs out to start reminding you.") }}
+</div>
+</div>
+{% endcall %}
+
+<div class="form-actions">
+{{ ui.button("Save settings", variant="primary", type="submit", icon="check", spin=true) }}
+<span class="text-sm text-secondary">Every page uses the new settings at once.</span>
+</div>
+</form>

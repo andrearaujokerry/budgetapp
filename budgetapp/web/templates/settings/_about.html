@@ -1,0 +1,33 @@
+{#- Read-only facts about this installation. Context: about (services.app_settings.About).
+    Never a secret: only whether the Plaid keys are saved. -#}
+{% import "components/ui.html" as ui %}
+{%- set badges = {"sandbox": ("Sandbox", "sandbox"), "production": ("Live", "ok"), "demo": ("Demo data", "warn"), "test": ("Test", "sandbox")} %}
+{%- set badge = badges.get(about.env, (about.env|capitalize, "neutral")) %}
+{%- set env_value %}{{ ui.badge(badge[0], tone=badge[1]) }}{% endset %}
+{%- set database_value %}<code>{{ about.database }}</code> as <code>{{ about.role }}</code><br><span class="text-sm text-secondary">{{ about.server }}</span>{% endset %}
+{%- set plaid_value %}
+{%- if about.plaid_keys == "demo" %}<span class="text-secondary">Not used with demo data</span>
+{%- elif about.plaid_keys == "saved" %}{{ about.plaid_env|capitalize }} · keys saved in Keychain <span class="text-secondary">(never shown)</span>
+{%- elif about.plaid_keys == "missing" %}{{ about.plaid_env|capitalize }} · <span class="text-warn">keys not saved</span><br><span class="text-sm text-secondary">Run <code>./run setup --keys-only</code></span>
+{%- elif about.plaid_keys == "approval" %}<span class="text-warn">Keychain approval needed</span><br><span class="text-sm text-secondary">Run <code>./run doctor --env production</code> in Terminal</span>
+{%- else %}<span class="text-warn">Couldn't read Keychain</span>
+{%- endif %}
+{%- endset %}
+{%- set backups_value %}{{ about.backups_dir }}<br><span class="text-sm text-secondary">
+{%- if about.env == "demo" %}Demo data isn't backed up
+{%- elif about.newest_backup_at %}Newest {{ about.newest_backup_at|date_long }} ({{ about.newest_backup_at|relative_time }})
+{%- else %}No backup yet: <code>./run backup</code>{% if about.env == "production" %} (the backup agent runs nightly){% endif %}
+{%- endif %}</span>{% endset %}
+{%- set version_value %}{{ about.app_version }}{% if about.install_commit %} <span class="text-secondary">· install at commit <code>{{ about.install_commit }}</code></span>{% endif %}{% endset %}
+{% call ui.card("This app", subtitle="Runs only on this Mac", id="about") %}
+{{ ui.kv([
+  ("Environment", env_value),
+  ("Database", database_value),
+  ("Plaid", plaid_value),
+  ("Data folder", about.data_dir),
+  ("Logs", about.logs_dir),
+  ("Backups", backups_value),
+  ("Version", version_value),
+]) }}
+<p class="text-sm text-secondary mt-4">Check security, backups and the background agents any time with <code>./run doctor{{ " --env production" if about.env == "production" }}</code>.</p>
+{% endcall %}

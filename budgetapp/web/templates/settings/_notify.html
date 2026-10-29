@@ -1,0 +1,19 @@
+{#- The Mac notifications card (full page and HTMX partial). Context: demo, notify_sent, sent_at. -#}
+{% import "components/ui.html" as ui %}
+{% call ui.card("Mac notifications", subtitle="Budget, sync and large-charge alerts", id="notify-card") %}
+<div class="stack stack--sm">
+<p>Alerts appear as notifications from <strong>Script Editor</strong>: macOS shows them under its name and icon, and drops them silently until Script Editor may notify. Allow it once:</p>
+<ol class="settings-steps">
+<li>Click <strong>Send test notification</strong>.</li>
+<li>Open System Settings → Notifications → Script Editor (it is listed after the first try).</li>
+<li>Turn on <strong>Allow notifications</strong> and choose the <strong>Alerts</strong> style, so problems stay on screen.</li>
+</ol>
+{% if notify_sent %}
+<p class="text-sm text-ok" role="status">{{ ui.icon("check-circle", size="sm") }} Sent {{ sent_at|relative_time }}. Nothing on screen? Do steps 2 and 3, then send another.</p>
+{% endif %}
+<form method="post" action="/settings/test-notification" hx-post="/settings/test-notification" hx-target="#notify-card" hx-swap="outerHTML">
+{{ ui.button("Send test notification", icon="bell", type="submit", spin=true) }}
+</form>
+{% if demo %}<p class="field__help">Demo data: nothing is sent.</p>{% endif %}
+</div>
+{% endcall %}
