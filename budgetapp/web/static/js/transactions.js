@@ -7,6 +7,7 @@
  *                                      split the first part keeps what the others leave; Save is
  *                                      enabled only when the parts add up to the cent
  *   [data-results][data-sort]          the filter form's hidden sort follows sort-header clicks
+ *   [data-results] .tabs               the current view tab scrolls into sight (phones)
  *
  * Money is handled in integer cents parsed from the text, never as floats.
  */
@@ -281,8 +282,12 @@
     if (focus) focus.focus();
   }
 
+  // root itself counts: after a 422 the re-rendered form is the swapped element.
   function initSplits(root) {
-    forEach((root || doc).querySelectorAll("[data-split-form]"), function (form) {
+    root = root || doc;
+    var forms = Array.prototype.slice.call(root.querySelectorAll("[data-split-form]"));
+    if (root.matches && root.matches("[data-split-form]")) forms.unshift(root);
+    forms.forEach(function (form) {
       if (form._splitReady) return;
       form._splitReady = true;
       form._autoFirst = form.hasAttribute("data-auto-first");
@@ -318,10 +323,23 @@
     if (results && input) input.value = results.getAttribute("data-sort") || "";
   }
 
+  // The view tabs scroll sideways on phones: keep the current one in sight.
+  function showCurrentTab() {
+    forEach(doc.querySelectorAll("[data-results] .tabs"), function (nav) {
+      var tab = nav.querySelector('[aria-current="page"]');
+      if (!tab) return;
+      var n = nav.getBoundingClientRect();
+      var t = tab.getBoundingClientRect();
+      if (t.right > n.right) nav.scrollLeft += Math.ceil(t.right - n.right) + EDGE;
+      else if (t.left < n.left) nav.scrollLeft -= Math.ceil(n.left - t.left) + EDGE;
+    });
+  }
+
   doc.addEventListener("htmx:afterSettle", function (evt) {
     var el = evt.target;
     initSplits(el && el.querySelectorAll ? el : doc);
     syncSort();
+    showCurrentTab();
     if (el && el.matches && el.matches("tr.txn-row") && returnTo === el.id && focusLost()) {
       focusRowMenu(el.id);
     }
@@ -330,6 +348,7 @@
   function init() {
     initSplits(doc);
     syncSort();
+    showCurrentTab();
   }
 
   if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", init);

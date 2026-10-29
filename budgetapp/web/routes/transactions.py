@@ -98,7 +98,7 @@ def _row_context(session: Session) -> dict[str, Any]:
     """What ``_row.html`` needs besides the row itself."""
     return {
         "categories": list(txns.load_categories(session).values()),
-        "show_members": txns.has_card_members(session),
+        "show_members": txns.several_card_members(session),
         "today": clock.today(),
         "conn": None,
     }
@@ -194,7 +194,7 @@ def transactions_page(request: Request, session: SessionDep) -> Response:
         "page": result,
         "categories": list(categories.values()),
         "category_names": {c.id: c.name for c in categories.values()},
-        "show_members": txns.has_card_members(session),
+        "show_members": txns.several_card_members(session),
         "attention": txns.attention_counts(session),
         "any_transactions": result.total_count > 0 or txns.has_transactions(session),
         "today": clock.today(),

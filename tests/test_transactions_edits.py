@@ -11,7 +11,7 @@ from sqlalchemy import select, text
 from budgetapp import periods
 from budgetapp.db import LEDGER_KEY, LOCK_NS_GLOBAL
 from budgetapp.models import Rule, Transaction
-from budgetapp.services import categorize, spending
+from budgetapp.services import categorize, spending, userstate
 from budgetapp.services import transactions as txns
 from budgetapp.services.transactions import TransactionEditError
 from tests.factories import (
@@ -320,6 +320,26 @@ class TestSplits:
                 db, txn.id, parts((cats["groceries"], "10.00", None), (cats["home"], "10.00", None))
             )
         assert "pending" in err.value.errors["parts"]
+
+    def test_card_payments_cannot_be_split(self, db, card, cats):
+        # Its parts would move a payment into spending categories (ARCHITECTURE §6 never gives
+        # a payment splits), whether the system or the user put it in Card Payments.
+        two = parts((cats["groceries"], "-300.00", None), (cats["home"], "-200.00", None))
+        system = make_transaction(
+            db, card, amount="-500.00", category=cats["payments"], category_source="system"
+        )
+        chosen = make_transaction(
+            db, card, amount="-500.00", category=cats["payments"], category_source="user"
+        )
+        for txn in (system, chosen):
+            with pytest.raises(TransactionEditError) as err:
+                txns.set_splits(db, txn.id, two)
+            assert "card payment can't be split" in err.value.errors["parts"]
+            assert not txns.get_row(db, txn.id).can_split
+        # Once the user says it isn't a payment, it can be split like any credit.
+        row = txns.update(db, system.id, category_id=cats["shopping"].id)
+        assert row.can_split
+        assert txns.set_splits(db, system.id, two).is_split
 
     def test_zero_amount_transactions_cannot_be_split(self, db, card, cats):
         txn = make_transaction(db, card, amount="0.00")
@@ -732,7 +752,7 @@ class TestDetail:
         assert detail.row.id == txn.id and detail.account_name == card.display_name
         assert detail.rule == txns.RuleRef(rule.id, "Coffee", True)
         assert detail.replaced_pending == txns.PendingLink(
-            "pend-1", Decimal("45.00"), dt.date(2026, 10, 15), "BLUE BOTTLE"
+            "pend-1", Decimal("45.00"), dt.date(2026, 10, 15), "BLUE BOTTLE", carried_edits=False
         )
         assert [i.plaid_transaction_id for i in detail.inherited_from] == ["gone-9"]
         assert [r.id for r in detail.rules_made_here] == [made.id]
@@ -760,6 +780,12 @@ class TestDetail:
         assert detail.csv_import_filename == "activity.csv" and detail.account_is_manual
         assert detail.replaced_pending == txns.PendingLink("pend-x", None, None, None)
         assert detail.location_text is None and detail.external_category == "Restaurant-Bar & Café"
+
+    def test_a_pending_link_says_whether_edits_moved(self, db, card):
+        state = userstate.to_json(userstate.UserState(notes="Lunch with Sam", tags=("work",)))
+        make_tombstone(db, card, plaid_transaction_id="pend-2", user_state=state)
+        txn = make_transaction(db, card, pending_transaction_id="pend-2", notes="Lunch with Sam")
+        assert txns.detail(db, txn.id).replaced_pending.carried_edits is True
 
     def test_missing(self, db):
         with pytest.raises(txns.TransactionNotFound):

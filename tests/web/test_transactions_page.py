@@ -14,13 +14,14 @@ from markupsafe import Markup
 from sqlalchemy import select
 
 from budgetapp.models import Rule, Transaction
-from budgetapp.services import alerts
+from budgetapp.services import alerts, userstate
 from tests.factories import (
     card_payments,
     get_category,
     make_account,
     make_rule,
     make_split,
+    make_tombstone,
     make_transaction,
 )
 from tests.web.conftest import HTMX
@@ -153,6 +154,7 @@ class TestListPage:
         assert ">Refund<" in rows[refund.id] and "amount--credit" in rows[refund.id]
         assert ">Pending<" in rows[pending.id] and "amount--pending" in rows[pending.id]
         assert "/split" not in rows[pending.id] and "/split" in rows[refund.id]
+        assert "/split" not in rows[payment.id]  # a payment is never split
 
     def test_htmx_gets_only_the_results_with_a_clean_url(self, client, db, card):
         make_transaction(db, card, name="BLUE BOTTLE")
@@ -197,7 +199,57 @@ class TestListPage:
         assert re.search(r'<details class="txn-more" open>', html)
         assert re.search(r'<option value="SAM RIVERA" selected>', html)
         assert re.search(r'id="f-credits"[^>]*checked', html)
-        assert "Card member" in html  # the column shows once a row names a member
+        assert re.search(r'<option value="work" selected>', html)
+
+    def test_a_filter_from_a_link_is_never_applied_out_of_sight(self, client, db, card):
+        # One member, no tags, one card: no real choice, so no selects... unless the URL sets them.
+        make_transaction(db, card, source="csv", account_owner="ALEX RIVERA")
+        plain = client.get("/transactions").text
+        assert 'id="f-member"' not in plain and 'id="f-tag"' not in plain
+        assert 'id="f-account"' not in plain
+        html = client.get("/transactions?member=SAM+RIVERA&tag=Work&account=987654").text
+        assert re.search(r'<option value="SAM RIVERA" selected>', html)
+        assert re.search(r'<option value="Work" selected>', html)
+        assert re.search(r'<option value="987654" selected>A card that is no longer here', html)
+        assert "No matches" in html
+
+    def test_a_tag_filter_selects_the_stored_spelling(self, client, db, card):
+        make_transaction(db, card, tags=["Work"])
+        html = client.get("/transactions?tag=work").text
+        assert re.search(r'<option value="Work" selected>', html)
+        assert "<strong>1</strong> transaction" in html
+
+    def test_the_card_member_column_shows_only_where_it_says_something(self, client, db, card):
+        old = make_transaction(
+            db, card, source="csv", account_owner="ALEX RIVERA", date="2025-01-02"
+        )
+        make_transaction(db, card, source="csv", account_owner="SAM RIVERA", date="2025-01-03")
+        new = make_transaction(db, card, date="2026-10-20")  # Plaid: no member
+        everything = client.get("/transactions").text
+        assert 'id="f-member"' in everything  # two members: the filter is worth it
+        assert 'class="table txn-table txn-table--members"' in everything
+        assert re.search(
+            rf'<tr id="txn-{old.id}".*?txn-col-member txn-member">ALEX RIVERA<', everything, re.S
+        )
+        recent = client.get("/transactions?range=custom&from=2026-10-01")
+        assert 'class="table txn-table"' in recent.text  # the column hides itself here
+        assert "txn-col-member" in recent.text  # the cell is still there for row swaps
+        row = client.post(f"/transactions/{new.id}/edit", data={"notes": "x"}, headers=HTMX)
+        assert 'txn-col-member txn-member"></td>' in row.text
+        one = client.get("/transactions", params={"q": old.name})
+        assert 'class="table txn-table txn-table--members"' in one.text
+
+    def test_one_card_member_gets_no_column(self, client, db, card):
+        make_transaction(db, card, source="csv", account_owner="ALEX RIVERA")
+        html = client.get("/transactions").text
+        assert "txn-col-member" not in html and "Card member" not in html
+
+    def test_credits_only_with_a_positive_amount_explains_itself(self, client, db, card):
+        make_transaction(db, card, amount="-20.00")
+        html = client.get("/transactions?credits=1&min=10&max=50").text
+        assert "No matches" in html and "Type credit amounts with a minus sign" in html
+        found = client.get("/transactions?credits=1&min=-50&max=-10")
+        assert found.context["page"].total_count == 1
 
     def test_bad_parameters_are_explained_not_fatal(self, client):
         response = client.get("/transactions?from=2026-02-30&min=lots&page=abc&sort=x")
@@ -478,6 +530,25 @@ class TestSplitDialog:
         assert reload(db, txn).splits == []
         clean(response)
 
+    def test_a_card_payment_cannot_be_split(self, client, db, card, cats):
+        payment = make_transaction(
+            db, card, amount="-500.00", category=cats["payments"], category_source="system"
+        )
+        html = client.get(f"/transactions/{payment.id}/split", headers=HTMX).text
+        assert "A card payment isn&#39;t spending" in html and "Save split" not in html
+        detail = client.get(f"/transactions/{payment.id}").text
+        assert f"/transactions/{payment.id}/split" not in detail
+        response = client.post(
+            f"/transactions/{payment.id}/split",
+            data={
+                "part_category": [str(cats["groceries"].id), str(cats["home"].id)],
+                "part_amount": ["300", "200"],
+                "part_note": ["", ""],
+            },
+            headers=HTMX,
+        )
+        assert response.status_code == 422 and "A card payment isn&#39;t spending" in response.text
+
     def test_a_pending_charge_cannot_be_split(self, client, db, card, cats):
         txn = make_transaction(db, card, amount="20.00", pending=True)
         html = client.get(f"/transactions/{txn.id}/split", headers=HTMX).text
@@ -664,6 +735,26 @@ class TestDetails:
         assert page.text.count('<h1 class="page-header__title">') == 1
         assert f'href="/transactions/{txn.id}/edit?next=%2Ftransactions%2F{txn.id}"' in page.text
         clean(page)
+
+    def test_a_possible_duplicate_says_it_is_not_counted(self, client, db, card, cats):
+        dupe = make_transaction(
+            db, card, source="csv", duplicate_status="suspect", category=cats["dining"]
+        )
+        html = client.get(f"/transactions/{dupe.id}").text
+        assert "Nothing yet: a possible duplicate is left out of every total" in html
+        assert 'href="/import"' in html
+
+    def test_a_replaced_pending_charge_claims_edits_only_when_they_moved(self, client, db, card):
+        make_tombstone(db, card, plaid_transaction_id="pend-a", amount="9.00")
+        plain = make_transaction(db, card, pending_transaction_id="pend-a")
+        html = client.get(f"/transactions/{plain.id}").text
+        assert "A pending charge of $9.00 on Oct 15, 2026." in html
+        assert "your edits moved" not in html
+        state = userstate.to_json(userstate.UserState(notes="Lunch"))
+        make_tombstone(db, card, plaid_transaction_id="pend-b", amount="9.00", user_state=state)
+        edited = make_transaction(db, card, pending_transaction_id="pend-b", notes="Lunch")
+        html = client.get(f"/transactions/{edited.id}").text
+        assert "A pending charge of $9.00 on Oct 15, 2026; your edits moved with it." in html
 
     def test_full_page_actions_post_plain_forms(self, client, db, card, cats):
         txn = make_transaction(

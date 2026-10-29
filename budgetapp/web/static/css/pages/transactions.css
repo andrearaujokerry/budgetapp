@@ -320,6 +320,11 @@
   white-space: nowrap;
 }
 
+/* The Card member column only on pages where a row names a member (see _results.html). */
+.txn-table:not(.txn-table--members) .txn-col-member {
+  display: none;
+}
+
 /* Forms and dialogs -------------------------------------------------------- */
 .txn-form__context {
   margin: 0;
@@ -470,6 +475,14 @@
   flex-wrap: wrap;
 }
 
+/* One term column for every section, so the values line up down the page (the stacked
+   layout below 360px is the component's own). */
+@container (min-width: 360px) {
+  .txn-detail .kv {
+    grid-template-columns: 11rem minmax(0, 1fr);
+  }
+}
+
 /* Phones: Date and Category hide and the description cell shows both on a third line, so
    the table fits a 390px screen with Amount in view (no sideways scrolling). ----------- */
 @media (max-width: 599.98px) {
@@ -486,11 +499,17 @@
     padding-left: 16px;
   }
 
+  /* Badges move under a long name instead of cutting it to a few letters. */
+  .txn-desc__line {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+
   .txn-desc__phone {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 4px 6px;
+    gap: 2px 10px;
     margin-top: 3px;
     color: var(--text-muted);
     font-size: var(--fs-sm);
@@ -518,8 +537,17 @@
     display: none;
   }
 
+  .txn-split__parts {
+    gap: 12px;
+  }
+
   .txn-split__part {
     grid-template-columns: minmax(0, 1fr) 7.5rem 32px;
+  }
+
+  .txn-split__part + .txn-split__part {
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
   }
 
   .txn-split__note {

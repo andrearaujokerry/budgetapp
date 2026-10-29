@@ -1,7 +1,7 @@
 {#- One transaction row. Context: t (TransactionRow), categories, show_members, today.
     Returned alone (with a toast) after every row edit; it replaces #txn-<id>. Below 600px the
     Date and Category columns hide and the description cell shows both on a third line, so the
-    Amount stays in view. -#}
+    Amount stays in view. The Card member cell is hidden unless the table shows that column. -#}
 {% import "components/ui.html" as ui %}
 {% import "components/forms.html" as form %}
 {%- set shown_date = t.spend_date|date_short if t.spend_date.year == today.year else t.spend_date|date_long -%}
@@ -20,7 +20,7 @@
 {%- if t.subtitle or t.rule_label %}
 <span class="table__secondary">{{ t.subtitle or '' }}{% if t.rule_label %}<span class="txn-desc__rule">{{ ' · ' if t.subtitle }}rule “{{ t.rule_label }}”</span>{% endif %}</span>
 {%- endif %}
-<span class="txn-desc__phone">{{ shown_date }} · {% if t.is_split %}{{ ui.badge('Split', tone='info', icon='split') }}{% else %}{{ ui.category_badge(t.category) }}{% endif %}</span>
+<span class="txn-desc__phone"><span>{{ shown_date }}</span>{% if t.is_split %}{{ ui.badge('Split', tone='info', icon='split') }}{% else %}{{ ui.category_badge(t.category) }}{% endif %}</span>
 {%- if t.needs_review and t.review_reason %}
 <span class="txn-desc__review">{{ ui.icon('alert', size='xs') }}<span>{{ t.review_reason }}</span></span>
 {%- endif %}
@@ -37,7 +37,7 @@
 {%- endif %}
 </td>
 {%- if show_members %}
-<td class="col-optional-md txn-member">{{ t.account_owner or '' }}</td>
+<td class="col-optional-md txn-col-member txn-member">{{ t.account_owner or '' }}</td>
 {%- endif %}
 <td class="col-optional-lg">{% if t.tags %}<span class="chips">{% for tag in t.tags %}<span class="chip">{{ tag }}</span>{% endfor %}</span>{% endif %}</td>
 <td class="num">{{ ui.money(t.amount, pending=t.pending, tone='muted' if t.is_payment else none) }}</td>

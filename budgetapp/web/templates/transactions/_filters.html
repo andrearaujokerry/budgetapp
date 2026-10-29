@@ -64,16 +64,23 @@
 <datalist id="f-merchant-list">{% for m in options.merchants %}<option value="{{ m }}"></option>{% endfor %}</datalist>
 {{ form.money_field("min", "Amount from", value=filt.amount_min, placeholder="", allow_negative=true, compact=true, id="f-min") }}
 {{ form.money_field("max", "Amount to", value=filt.amount_max, placeholder="", allow_negative=true, compact=true, id="f-max") }}
-{%- if options.accounts|length > 1 %}
+{#- Each select shows when it has a real choice, or when its filter is on (a bookmarked or
+    shared URL), so no filter is ever applied out of sight. -#}
 {%- set accounts = namespace(options=[]) %}
 {%- for a in options.accounts %}{% set accounts.options = accounts.options + [(a.id, a.name)] %}{% endfor %}
+{%- if filt.account_id is not none and filt.account_id not in options.accounts|map(attribute='id')|list %}{% set accounts.options = accounts.options + [(filt.account_id, 'A card that is no longer here')] %}{% endif %}
+{%- if accounts.options|length > 1 or filt.account_id is not none %}
 {{ form.select_field("account", "Card", accounts.options, value=filt.account_id, placeholder="All cards", compact=true, id="f-account") }}
 {%- endif %}
-{%- if options.members %}
-{{ form.select_field("member", "Card member", options.members, value=filt.member or none, placeholder="Everyone", compact=true, id="f-member") }}
+{%- set members = options.members|list + ([filt.member] if filt.member and filt.member not in options.members else []) %}
+{%- if members|length > 1 or filt.member %}
+{{ form.select_field("member", "Card member", members, value=filt.member or none, placeholder="Everyone", compact=true, id="f-member") }}
 {%- endif %}
-{%- if options.tags %}
-{{ form.select_field("tag", "Tag", options.tags, value=filt.tag or none, placeholder="Any tag", compact=true, id="f-tag") }}
+{%- set tag = namespace(value=filt.tag) %}
+{%- for t in options.tags %}{% if filt.tag and t|lower == filt.tag|lower %}{% set tag.value = t %}{% endif %}{% endfor %}
+{%- set tags = options.tags|list + ([filt.tag] if filt.tag and tag.value not in options.tags else []) %}
+{%- if tags %}
+{{ form.select_field("tag", "Tag", tags, value=tag.value or none, placeholder="Any tag", compact=true, id="f-tag") }}
 {%- endif %}
 {{ form.checkbox_field("credits", "Credits only", checked=filt.credits_only, id="f-credits", wrapper_class="txn-more__check") }}
 </div>

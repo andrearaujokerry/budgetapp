@@ -51,16 +51,19 @@
 <div class="txn-summary__actions">{{ ui.button("Export CSV", icon="download", size="sm", href=urls.export, download=true) }}</div>
 </div>
 
+{#- The Card member column shows only where it says something: two or more members exist and a
+    row on this page names one (rows always carry the cell, so a row swapped in alone fits). -#}
+{%- set members_here = show_members and page.rows|selectattr('account_owner')|list|length > 0 -%}
 {% call ui.card(flush=true, class="txn-card") %}
 <div class="table-wrap">
-<table class="table txn-table">
+<table class="table txn-table{{ ' txn-table--members' if members_here }}">
 <caption class="sr-only">Transactions, {{ sort_labels[sort] }}{% if page.pages > 1 %}, page {{ page.page }} of {{ page.pages }}{% endif %}</caption>
 <thead><tr>
 {{ ui.sort_th("Date", "date", sort, urls.sort, target="#results") }}
 <th scope="col" class="col-grow">Description</th>
 <th scope="col" class="col-optional-sm">Category</th>
 {%- if show_members %}
-<th scope="col" class="col-optional-md">Card member</th>
+<th scope="col" class="col-optional-md txn-col-member">Card member</th>
 {%- endif %}
 <th scope="col" class="col-optional-lg">Tags</th>
 {{ ui.sort_th("Amount", "amount", sort, urls.sort, num=true, target="#results") }}

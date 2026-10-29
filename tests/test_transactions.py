@@ -94,6 +94,17 @@ class TestFilterParsing:
         filt = F(min="$1,200", max="-5")
         assert (filt.amount_min, filt.amount_max) == (Decimal("-5.00"), Decimal("1200.00"))
 
+    def test_credits_only_with_a_positive_minimum_is_explained(self):
+        # Amounts are signed as shown, so no credit is ever $10 or more: say how to ask.
+        filt = F(credits="1", min="10", max="50")
+        assert (filt.amount_min, filt.credits_only) == (Decimal("10.00"), True)
+        assert len(filt.problems) == 1
+        assert "from $10.00 finds nothing" in filt.problems[0]
+        assert "minus sign" in filt.problems[0]
+        assert F(credits="1", min="-50", max="-10").problems == ()
+        assert F(credits="1", max="50").problems == ()
+        assert F(min="10", max="50").problems == ()
+
     def test_category_tokens(self):
         params = QueryParams("category=007&category=Uncategorized&category=x&category=7&category=0")
         assert TransactionFilter.from_params(params).categories == ("7", "uncategorized")
@@ -511,11 +522,21 @@ class TestReferenceData:
         assert [a.name for a in options.accounts][-1] == "Old Amex"
         assert options.tags == ("x",) and options.period_label == "This month"
         assert any(c.system_key == "uncategorized" for c in options.categories)
-        assert txns.has_card_members(db) and txns.has_transactions(db)
+        assert txns.several_card_members(db) and txns.has_transactions(db)
+
+    def test_one_card_member_is_not_worth_a_column(self, db, card):
+        # Amex CSV rows name the member, Plaid rows usually don't: one name says nothing.
+        make_transaction(db, card, source="csv", account_owner="ALEX RIVERA")
+        make_transaction(db, card, source="csv", account_owner="ALEX RIVERA")
+        make_transaction(db, card, account_owner="")
+        make_transaction(db, card)
+        assert not txns.several_card_members(db)
+        make_transaction(db, card, source="csv", account_owner="SAM RIVERA")
+        assert txns.several_card_members(db)
 
     def test_empty_database(self, db):
         assert not txns.has_transactions(db)
-        assert not txns.has_card_members(db)
+        assert not txns.several_card_members(db)
         assert txns.attention_counts(db) == txns.AttentionCounts(0, 0)
 
     def test_hidden_and_custom_categories_are_listed(self, db):

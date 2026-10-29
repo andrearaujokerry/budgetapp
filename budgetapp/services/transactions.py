@@ -236,7 +236,14 @@ class TransactionFilter:
         account = _get(params, "account")
         account_id = int(account) if account.isdigit() and 0 < int(account) < 2**63 else None
 
-        credits = _get(params, "credits").lower()
+        credits_only = _get(params, "credits").lower() in ("1", "true", "on", "yes")
+        if credits_only and amount_min is not None and amount_min > 0:
+            # Amounts are signed as shown (credits are negative), so this can never match.
+            problems.append(
+                f"Credits are negative amounts (shown like −$54.99), so “Credits only” with an "
+                f"amount from {format_money(amount_min)} finds nothing. Type credit amounts with "
+                "a minus sign, for example from −50 to −10."
+            )
         return cls(
             q=q,
             range=preset,
@@ -250,7 +257,7 @@ class TransactionFilter:
             account_id=account_id,
             tag=" ".join(_get(params, "tag").split())[: MAX_TAG_LENGTH * 2],
             member=_get(params, "member")[:200],
-            credits_only=credits in ("1", "true", "on", "yes"),
+            credits_only=credits_only,
             show=show,
             problems=tuple(problems),
         )
@@ -777,7 +784,8 @@ class TransactionRow:
 
     @property
     def can_split(self) -> bool:
-        return not self.pending and self.amount != 0
+        """Posted, not $0.00 and not a card payment (see :func:`validate_splits`)."""
+        return not self.pending and self.amount != 0 and not self.is_payment
 
 
 def rule_label(
@@ -1054,17 +1062,18 @@ def has_transactions(session: Session) -> bool:
     return bool(session.scalar(select(exists().where(Transaction.id.is_not(None)))))
 
 
-def has_card_members(session: Session) -> bool:
-    """True when any row names a card member (then the list shows that column)."""
-    return bool(
-        session.scalar(
-            select(
-                exists().where(
-                    Transaction.account_owner.is_not(None), Transaction.account_owner != ""
-                )
-            )
-        )
-    )
+def several_card_members(session: Session) -> bool:
+    """True when rows name two or more card members: only then do the Card member column and
+    filter say anything. (Amex CSV files name the member on every row and Plaid rarely does, so
+    with one member the column would only tell the CSV era from the Plaid era, and filtering on
+    that member would hide every Plaid row.)"""
+    names = session.scalars(
+        select(Transaction.account_owner)
+        .where(Transaction.account_owner.is_not(None), Transaction.account_owner != "")
+        .distinct()
+        .limit(2)
+    ).all()
+    return len(names) > 1
 
 
 # --------------------------------------------------------------------------- edits
@@ -1195,9 +1204,11 @@ def validate_splits(
 ) -> list[userstate.SplitState]:
     """Check split parts against ``txn`` (TXN-4); :class:`TransactionEditError` if any is wrong.
 
-    Rules: the row is posted and not $0.00; 2 to 12 parts; each part has a category that exists
-    (each category once), a non-zero amount in cents with the transaction's sign, an optional note;
-    the parts add up EXACTLY to the transaction's amount.
+    Rules: the row is posted, not $0.00 and not a card payment (a row in a ``transfer``
+    category: its parts would move a payment into spending; ARCHITECTURE §6 never gives payments
+    splits); 2 to 12 parts; each part has a category that exists (each category once), a non-zero
+    amount in cents with the transaction's sign, an optional note; the parts add up EXACTLY to
+    the transaction's amount.
     """
     errors: dict[str, str] = {}
     amount = to_money(txn.amount)
@@ -1207,6 +1218,14 @@ def validate_splits(
         )
     if amount == 0:
         raise TransactionEditError({"parts": "A $0.00 transaction can't be split."})
+    own_category = session.get(Category, txn.category_id)
+    if own_category is not None and own_category.kind == "transfer":
+        raise TransactionEditError(
+            {
+                "parts": "A card payment can't be split. If this isn't a card payment, "
+                "change its category first."
+            }
+        )
     if len(parts) < 2:
         raise TransactionEditError({"parts": "Split it into at least two parts."})
     if len(parts) > MAX_SPLIT_PARTS:
@@ -1499,12 +1518,17 @@ class RuleRef:
 
 @dataclass(frozen=True, slots=True)
 class PendingLink:
-    """The pending charge a posted row replaced (its tombstone, when still kept)."""
+    """The pending charge a posted row replaced (its tombstone, when still kept).
+
+    ``carried_edits`` is True only when the tombstone shows the pending charge had user edits
+    (they moved to this row); ``None`` when the tombstone is gone (pruned after 90 days).
+    """
 
     plaid_transaction_id: str
     amount: Decimal | None
     date: dt.date | None
     name: str | None
+    carried_edits: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1595,6 +1619,7 @@ def detail(session: Session, transaction_id: int) -> TransactionDetail:
             to_money(tomb.amount) if tomb else None,
             tomb.date if tomb else None,
             tomb.name if tomb else None,
+            bool(tomb.user_state) if tomb else None,
         )
     inherited = tuple(
         InheritedFrom(t.plaid_transaction_id, to_money(t.amount), t.date, t.name, t.removed_at)

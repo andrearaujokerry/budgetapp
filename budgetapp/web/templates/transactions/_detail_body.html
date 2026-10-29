@@ -57,7 +57,7 @@ Automatic: no rule or category mapping matched
 {{ ui.kv([
   ('Category', category_value),
   ('Set by', source_value),
-  ('Counts as', 'Split across categories' if t.is_split else counts_as),
+  ('Counts as', 'Nothing yet: a possible duplicate is left out of every total' if t.is_duplicate else ('Split across categories' if t.is_split else counts_as)),
 ] + ([('Rules made from it', made_here)] if d.rules_made_here else [])) }}
 </section>
 
@@ -78,10 +78,11 @@ Automatic: no rule or category mapping matched
 {%- set replaced_value -%}
 {%- if d.replaced_pending -%}
 {%- if d.replaced_pending.amount is not none -%}
-A pending charge of {{ ui.money_text(d.replaced_pending.amount) }} on {{ d.replaced_pending.date|date_long }}; your edits moved with it.
+A pending charge of {{ ui.money_text(d.replaced_pending.amount) }} on {{ d.replaced_pending.date|date_long }}
 {%- else -%}
-A pending charge Plaid sent earlier; your edits moved with it.
+A pending charge Plaid sent earlier
 {%- endif -%}
+{{ '; your edits moved with it.' if d.replaced_pending.carried_edits else '.' }}
 {%- endif -%}
 {%- endset -%}
 {%- set inherited_value -%}
@@ -99,7 +100,7 @@ A pending charge Plaid sent earlier; your edits moved with it.
 <{{ h }} class="txn-detail__heading">{{ 'From your Amex CSV file' if from_csv else 'From Plaid' }}</{{ h }}>
 {%- set pfc_value %}{% if d.pfc_primary or d.pfc_detailed %}{{ d.pfc_detailed or d.pfc_primary }}{% if d.pfc_detailed and d.pfc_primary %} (in {{ d.pfc_primary }}){% endif %}{% if d.pfc_confidence %} · confidence {{ d.pfc_confidence|lower|replace('_', ' ') }}{% endif %}{% if d.pfc_version %} · {{ d.pfc_version }}{% endif %}{% endif %}{% endset %}
 {%- set location_value %}{% if d.location_text %}{{ d.location_text }}{% endif %}{% if d.location and d.location.get('lat') is not none and d.location.get('lon') is not none %}{{ ' · ' if d.location_text }}{{ d.location.get('lat') }}, {{ d.location.get('lon') }}{% endif %}{% endset %}
-{%- set amount_value %}{{ ui.money(t.amount) }}{% if d.iso_currency_code and d.iso_currency_code != 'USD' %} {{ d.iso_currency_code }}{% endif %}{% endset %}
+{%- set amount_value %}{{ ui.money(t.amount, tone='muted' if t.is_payment else none) }}{% if d.iso_currency_code and d.iso_currency_code != 'USD' %} {{ d.iso_currency_code }}{% endif %}{% endset %}
 {{ ui.kv([
   ('Description', t.name),
   ('Merchant', t.merchant_name),

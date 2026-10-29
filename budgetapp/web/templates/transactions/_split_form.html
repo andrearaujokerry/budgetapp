@@ -8,7 +8,7 @@
 {%- set kind = 'credit' if t.amount < 0 else 'charge' -%}
 {%- macro part_fields(i, part, n) -%}
 <li class="txn-split__part" data-split-part>
-{{ form.category_select("part_category", categories, value=part.category_id or none, label="Part " ~ n ~ " category", hide_label=true, placeholder="Choose a category", error=errors.get('part-' ~ i ~ '-category'), id="split-cat-" ~ i, compact=true, wrapper_class="txn-split__cat") }}
+{{ form.category_select("part_category", categories, value=part.category_id or none, label="Part " ~ n ~ " category", hide_label=true, placeholder="Choose…", error=errors.get('part-' ~ i ~ '-category'), id="split-cat-" ~ i, compact=true, wrapper_class="txn-split__cat") }}
 {{ form.money_field("part_amount", "Part " ~ n ~ " amount", value=part.amount, hide_label=true, error=errors.get('part-' ~ i ~ '-amount'), id="split-amt-" ~ i, compact=true, wrapper_class="txn-split__amount", data_split_amount=true) }}
 {{ form.field("part_note", "Part " ~ n ~ " note", value=part.note, hide_label=true, placeholder="Note (optional)", error=errors.get('part-' ~ i ~ '-note'), id="split-note-" ~ i, compact=true, wrapper_class="txn-split__note", maxlength="200") }}
 <button type="button" class="btn btn--ghost btn--icon btn--sm txn-split__remove" data-split-remove aria-label="Remove part {{ n }}">{{ ui.icon('x') }}</button>
@@ -22,7 +22,13 @@
 {%- if in_dialog %}{{ t.title }} · {{ t.spend_date|date_long }} · {% endif -%}
 Split {{ ui.money_text(t.amount|abs) }} across categories. Type each part without a minus sign{% if kind == 'credit' %}: this is a credit, so every part is a credit too{% endif %}. The parts must add up to the cent.</p>
 {%- if not t.can_split %}
-{{ ui.banner('warn', "A pending charge can't be split yet, and a $0.00 one never can. Split it once it posts." if t.pending else "A $0.00 transaction can't be split.", title="Can't split this one.") }}
+{%- if t.pending %}
+{{ ui.banner('warn', "A pending charge can't be split yet. Split it once it posts.", title="Can't split this one.") }}
+{%- elif t.is_payment %}
+{{ ui.banner('warn', "A card payment isn't spending, so it can't be split. If this isn't a card payment, change its category first.", title="Can't split this one.") }}
+{%- else %}
+{{ ui.banner('warn', "A $0.00 transaction can't be split.", title="Can't split this one.") }}
+{%- endif %}
 {%- else %}
 {%- if errors.get('parts') %}
 <p class="field__error txn-split__error" id="txn-split-error" role="alert">{{ ui.icon('alert') }}<span>{{ errors.get('parts') }}</span></p>
