@@ -99,7 +99,7 @@ def _form_context(
     ref = CategoryRef.of(category) if category is not None else None
     return {
         "category": ref,
-        "values": values,
+        "data": values,  # not "values": f.values would be the dict method in Jinja
         "errors": errors or {},
         "swatches": swatches,
         "kind_options": KIND_OPTIONS,
