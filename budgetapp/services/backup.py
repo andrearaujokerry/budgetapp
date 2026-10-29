@@ -17,8 +17,10 @@ database, in ONE transaction, so it either completes or changes nothing:
    production dump never lands in Sandbox or the other way round); a dump made by a newer version
    of the app (an unknown schema revision) is refused;
 2. production: the web, sync and backup agents are stopped (and started again at the end);
-3. other sessions on the database are refused (listed), or ended with ``force_disconnect``;
-4. the sync lock of every Item is held until the end, so no sync can run in between;
+3. a running sync (a connection holding a sync lock) is never interrupted: the restore is
+   refused; other sessions on the database are refused (listed), or ended with
+   ``force_disconnect``;
+4. the sync lock of every Item is held until the end, so no sync can start in between;
 5. a pre-restore dump of the current data is taken and verified (``…-pre-restore.dump``);
 6. ``pg_restore`` writes the dump as SQL to a private temporary file (checked complete), then
    ``psql --single-transaction`` drops everything in the ``public`` schema, replays the script and
@@ -647,6 +649,18 @@ def inspect_backup(
     return RestorePlan(path, info, revision, head, path.stat().st_size)
 
 
+def sync_lock_holders(engine: Engine) -> list[int]:
+    """PIDs of other connections holding a sync lock in this database (a sync is running)."""
+    query = text(
+        "SELECT DISTINCT pid FROM pg_locks WHERE locktype = 'advisory' AND granted "
+        "AND classid = :namespace AND pid <> pg_backend_pid() "
+        "AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) "
+        "ORDER BY pid"
+    )
+    with engine.connect() as conn:
+        return [int(pid) for pid in conn.execute(query, {"namespace": db.LOCK_NS_SYNC}).scalars()]
+
+
 def other_sessions(engine: Engine) -> list[SessionInfo]:
     """Client connections to the engine's database other than this one."""
     query = text(
@@ -690,7 +704,8 @@ def item_ids(engine: Engine) -> list[int]:
     with engine.connect() as conn:
         if conn.execute(text("SELECT to_regclass('public.plaid_items')")).scalar() is None:
             return []
-        return [int(i) for i in conn.execute(text("SELECT id FROM plaid_items ORDER BY id"))]
+        rows = conn.execute(text("SELECT id FROM plaid_items ORDER BY id")).scalars()
+        return [int(item_id) for item_id in rows]
 
 
 @contextlib.contextmanager
@@ -880,6 +895,10 @@ def restore(
             stopped = agents.stop_app_agents()
             if stopped:
                 say(f"Stopped the {', '.join(stopped)} agent(s) for the restore.")
+        if sync_lock_holders(engine):  # never interrupted, not even with --force-disconnect
+            raise RestoreRefused(
+                "A sync is running right now. Try again in a few minutes. Nothing was changed."
+            )
         sessions = other_sessions(engine)
         deadline = time.monotonic() + (AGENT_EXIT_WAIT if stopped else 0)
         while sessions and time.monotonic() < deadline:  # stopped agents close their pools
