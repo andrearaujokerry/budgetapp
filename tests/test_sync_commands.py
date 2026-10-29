@@ -22,7 +22,7 @@ from budgetapp.commands import sandbox as sandbox_cmd
 from budgetapp.commands import sync as sync_cmd
 from budgetapp.config import load_settings
 from budgetapp.models import PlaidItem, SyncRun, Transaction
-from budgetapp.services import sync
+from budgetapp.services import linking, sync
 from budgetapp.services.events import SyncOutcome
 from tests.factories import make_item
 
@@ -320,7 +320,7 @@ def test_sandbox_helpers_refuse_production(make_rt, production, fake_plaid, out,
 
 def test_the_custom_user_is_an_amex_like_card_with_known_totals():
     today = dt.date(2026, 11, 3)
-    config = sandbox_cmd.custom_user_config(today)
+    config = linking.custom_user_config(today)
     (account,) = config["override_accounts"]
     assert (account["type"], account["subtype"], account["meta"]["mask"]) == (
         "credit",
@@ -336,20 +336,20 @@ def test_the_custom_user_is_an_amex_like_card_with_known_totals():
         "description": "WHOLE FOODS MARKET #10234 NEW YORK NY",
         "currency": "USD",
     }
-    assert sandbox_cmd.custom_posted_total() == Decimal("793.61")
-    assert sandbox_cmd.custom_pending_total() == Decimal("42.10")
+    assert linking.custom_posted_total() == Decimal("793.61")
+    assert linking.custom_pending_total() == Decimal("42.10")
     assert account["liability"]["purchase_apr"] == 0  # no interest: exact totals
-    username, password = sandbox_cmd.credentials("custom", today)
+    username, password = linking.sandbox_credentials("custom", today)
     assert username == "user_custom"
     parsed = json.loads(password, parse_float=Decimal)  # exact amounts on the wire
     assert parsed["override_accounts"][0]["transactions"][3]["amount"] == Decimal("-89.99")
-    assert sandbox_cmd.credentials("user_good", today) == ("user_good", "pass_good")
+    assert linking.sandbox_credentials("user_good", today) == ("user_good", "pass_good")
     with pytest.raises(ValueError):
-        sandbox_cmd.credentials("user_bad", today)
+        linking.sandbox_credentials("user_bad", today)
 
 
 def test_the_research_fixture_dates_are_reproduced_on_its_creation_day():
-    rows = sandbox_cmd.custom_user_config(dt.date(2026, 10, 28))["override_accounts"][0]
+    rows = linking.custom_user_config(dt.date(2026, 10, 28))["override_accounts"][0]
     dates = [(r["date_transacted"], r["date_posted"]) for r in rows["transactions"]]
     assert dates[0] == ("2026-09-12", "2026-09-13") and dates[-1] == ("2026-10-27", "2026-10-31")
 

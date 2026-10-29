@@ -847,6 +847,22 @@ def _start_run(
         )
 
 
+def prepare_run(session: Session, item_id: int, trigger: str) -> SyncRun:
+    """A ``running`` sync run for a sync that is about to start in the background.
+
+    The web app marks the run before answering, so the page says "Syncing…" at once; pass its id
+    as ``run_id`` to :func:`sync_item` (or :class:`RefreshThenSync` / :class:`Backfill`), which
+    reuses it. The caller commits. A run that never starts (the app stopped) is marked
+    ``interrupted`` by the next sync of the Item.
+    """
+    if trigger not in SYNC_TRIGGERS:
+        raise ValueError(f"unknown sync trigger {trigger!r}")
+    run = SyncRun(item_id=item_id, trigger=trigger, status="running", started_at=clock.now())
+    session.add(run)
+    session.flush()
+    return run
+
+
 def _record_skipped(
     session_factory: sessionmaker[Session], item_id: int, trigger: str, run_id: int | None
 ) -> SyncOutcome:
@@ -1645,7 +1661,8 @@ class Backfill:
 
     Each call runs one sync and returns the seconds until the next (``None`` when done). It stops
     once history is complete (after at least ``min_runs`` syncs), at the cap, or when the Item
-    needs reconnecting or the app failed (the next scheduled sync takes over).
+    needs reconnecting or the app failed (the next scheduled sync takes over). ``run_id``: a
+    ``running`` run prepared for the first sync (:func:`prepare_run`).
     """
 
     def __init__(
@@ -1661,6 +1678,7 @@ class Backfill:
         delays: Sequence[float] = BACKFILL_DELAYS,
         cap: float = BACKFILL_CAP,
         min_runs: int = 1,
+        run_id: int | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -1670,6 +1688,7 @@ class Backfill:
         self.delays = tuple(delays) or (BACKFILL_CAP,)
         self.cap = cap
         self.min_runs = min_runs
+        self.run_id = run_id
         self.monotonic = monotonic
         self.sleep = sleep
         self.started: float | None = None
@@ -1691,6 +1710,7 @@ class Backfill:
             item_id,
             trigger=self.trigger,
             notifier=self.notifier,
+            run_id=self.run_id if not self.outcomes else None,
             sleep=self.sleep,
         )
         self.outcomes.append(outcome)

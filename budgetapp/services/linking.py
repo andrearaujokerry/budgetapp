@@ -29,7 +29,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -530,6 +530,102 @@ def sandbox_create_item(
     )
     meta = LinkMetadata(institution_id, SANDBOX_INSTITUTIONS.get(institution_id))
     return exchange(session_factory, gateway, store, settings, public_token, meta, sleep=sleep)
+
+
+# --------------------------------------------------------------------------- Sandbox test users
+
+
+#: Sandbox test users (RESEARCH T3.2, T3.7): ``custom`` is the Amex-like card below.
+SANDBOX_USERS = ("custom", "user_transactions_dynamic", "user_good")
+CUSTOM_USERNAME = "user_custom"
+
+
+class CustomCharge(NamedTuple):
+    """One transaction of the custom user, dated relative to the day the Item is created."""
+
+    transacted: int  # days from the creation day (negative = earlier)
+    posted: int  # a positive offset means pending at creation (posted on that later day)
+    amount: Decimal  # Plaid's sign: charges positive, refunds and payments negative
+    description: str
+
+
+#: The Amex-like card of RESEARCH T3.7 (verified fixture ``amex_like_card.json``, created there on
+#: 2026-10-28), with its dates kept relative to the creation day: five purchases, a refund, a
+#: payment and one charge still pending. Interest is off (all APRs 0), so the totals are exact.
+CUSTOM_CHARGES: tuple[CustomCharge, ...] = (
+    CustomCharge(-46, -45, Decimal("54.17"), "WHOLE FOODS MARKET #10234 NEW YORK NY"),
+    CustomCharge(-38, -37, Decimal("1200.00"), "DELTA AIR LINES ATLANTA GA"),
+    CustomCharge(-33, -32, Decimal("89.99"), "AMAZON MARKETPLACE NA PA SEATTLE WA"),
+    CustomCharge(-26, -24, Decimal("-89.99"), "AMAZON MARKETPLACE NA PA SEATTLE WA CREDIT"),
+    CustomCharge(-23, -23, Decimal("-500.00"), "ONLINE PAYMENT - THANK YOU"),
+    CustomCharge(-18, -17, Decimal("23.45"), "UBER TRIP HELP.UBER.COM CA"),
+    CustomCharge(-16, -15, Decimal("15.99"), "NETFLIX.COM LOS GATOS CA"),
+    CustomCharge(-1, 3, Decimal("42.10"), "SHAKE SHACK NEW YORK NY"),
+)
+CUSTOM_ACCOUNT = {"name": "Platinum Card", "official_name": "Test Platinum Card", "mask": "1005"}
+CUSTOM_STARTING_BALANCE = Decimal("1293.61")
+CUSTOM_LIABILITY = {
+    "type": "credit",
+    "purchase_apr": 0,
+    "cash_apr": 0,
+    "balance_transfer_apr": 0,
+    "special_apr": 0,
+    "last_statement_balance": Decimal("1254.17"),
+    "minimum_payment_amount": Decimal("40.00"),
+    "last_payment_amount": Decimal("500.00"),
+    "is_overdue": False,
+}
+
+
+def custom_posted_total(charges: Sequence[CustomCharge] = CUSTOM_CHARGES) -> Decimal:
+    """The sum of the charges already posted when the Item is created ($793.61)."""
+    return sum((c.amount for c in charges if c.posted <= 0), Decimal("0.00"))
+
+
+def custom_pending_total(charges: Sequence[CustomCharge] = CUSTOM_CHARGES) -> Decimal:
+    """The sum of the charges still pending when the Item is created ($42.10)."""
+    return sum((c.amount for c in charges if c.posted > 0), Decimal("0.00"))
+
+
+def custom_user_config(today: dt.date) -> dict[str, Any]:
+    """The ``user_custom`` configuration (passed as the password) for an Item created ``today``."""
+
+    def day(offset: int) -> str:
+        return (today + dt.timedelta(days=offset)).isoformat()
+
+    return {
+        "version": 2,
+        "roll_dates_forward": False,
+        "override_accounts": [
+            {
+                "type": "credit",
+                "subtype": "credit card",
+                "starting_balance": CUSTOM_STARTING_BALANCE,
+                "currency": "USD",
+                "meta": dict(CUSTOM_ACCOUNT),
+                "transactions": [
+                    {
+                        "date_transacted": day(c.transacted),
+                        "date_posted": day(c.posted),
+                        "amount": c.amount,
+                        "description": c.description,
+                        "currency": "USD",
+                    }
+                    for c in CUSTOM_CHARGES
+                ],
+                "liability": dict(CUSTOM_LIABILITY),
+            }
+        ],
+    }
+
+
+def sandbox_credentials(user: str, today: dt.date) -> tuple[str, str]:
+    """``(override_username, override_password)`` for one of :data:`SANDBOX_USERS`."""
+    if user == "custom":
+        return CUSTOM_USERNAME, db.json_dumps(custom_user_config(today))
+    if user not in SANDBOX_USERS:
+        raise ValueError(f"unknown Sandbox user {user!r}")
+    return user, "pass_good"
 
 
 # --------------------------------------------------------------------------- update mode

@@ -4,7 +4,7 @@
   creates a test Item without Plaid Link (``/sandbox/public_token/create``), saves it through the
   same exchange path as a real link, then syncs until Plaid has sent the full history.
   ``custom`` is an Amex-like credit card with known totals (RESEARCH T3.7,
-  :func:`custom_user_config`).
+  ``linking.custom_user_config``).
 * ``./run sandbox-refresh [--item ID]``: what "Sync now" does — ``/transactions/refresh``, then a
   sync now and after about 15 s, 45 s and 2 minutes (``user_transactions_dynamic`` then moves its
   pending charges to posted).
@@ -15,11 +15,8 @@
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import logging
-from collections.abc import Sequence
-from decimal import Decimal
-from typing import Any, NamedTuple
+from typing import Any
 
 from budgetapp import clock, db, secrets
 from budgetapp.commands import add_command
@@ -37,102 +34,14 @@ from budgetapp.logsetup import setup_logging
 from budgetapp.plaid_gateway import PlaidGatewayError
 from budgetapp.services import linking
 from budgetapp.services import sync as sync_service
+from budgetapp.services.linking import SANDBOX_USERS as USERS
+from budgetapp.services.linking import sandbox_credentials as credentials
 
 log = logging.getLogger(__name__)
 
-USERS = ("user_good", "user_transactions_dynamic", "custom")
-CUSTOM_USERNAME = "user_custom"
 #: Sandbox backfill after a test link: Plaid's Sandbox usually has the full history in seconds.
 LINK_BACKFILL_DELAYS: tuple[float, ...] = (5.0, 5.0, 10.0, 10.0, 15.0, 15.0, 30.0, 30.0)
 LINK_BACKFILL_CAP = 150.0
-
-
-class CustomCharge(NamedTuple):
-    """One transaction of the custom user, dated relative to the day the Item is created."""
-
-    transacted: int  # days from the creation day (negative = earlier)
-    posted: int  # a positive offset means pending at creation (posted on that later day)
-    amount: Decimal  # Plaid's sign: charges positive, refunds and payments negative
-    description: str
-
-
-#: The Amex-like card of RESEARCH T3.7 (verified fixture ``amex_like_card.json``, created there on
-#: 2026-10-28), with its dates kept relative to the creation day: five purchases, a refund, a
-#: payment and one charge still pending. Interest is off (all APRs 0), so the totals are exact.
-CUSTOM_CHARGES: tuple[CustomCharge, ...] = (
-    CustomCharge(-46, -45, Decimal("54.17"), "WHOLE FOODS MARKET #10234 NEW YORK NY"),
-    CustomCharge(-38, -37, Decimal("1200.00"), "DELTA AIR LINES ATLANTA GA"),
-    CustomCharge(-33, -32, Decimal("89.99"), "AMAZON MARKETPLACE NA PA SEATTLE WA"),
-    CustomCharge(-26, -24, Decimal("-89.99"), "AMAZON MARKETPLACE NA PA SEATTLE WA CREDIT"),
-    CustomCharge(-23, -23, Decimal("-500.00"), "ONLINE PAYMENT - THANK YOU"),
-    CustomCharge(-18, -17, Decimal("23.45"), "UBER TRIP HELP.UBER.COM CA"),
-    CustomCharge(-16, -15, Decimal("15.99"), "NETFLIX.COM LOS GATOS CA"),
-    CustomCharge(-1, 3, Decimal("42.10"), "SHAKE SHACK NEW YORK NY"),
-)
-CUSTOM_ACCOUNT = {"name": "Platinum Card", "official_name": "Test Platinum Card", "mask": "1005"}
-CUSTOM_STARTING_BALANCE = Decimal("1293.61")
-CUSTOM_LIABILITY = {
-    "type": "credit",
-    "purchase_apr": 0,
-    "cash_apr": 0,
-    "balance_transfer_apr": 0,
-    "special_apr": 0,
-    "last_statement_balance": Decimal("1254.17"),
-    "minimum_payment_amount": Decimal("40.00"),
-    "last_payment_amount": Decimal("500.00"),
-    "is_overdue": False,
-}
-
-
-def custom_posted_total(charges: Sequence[CustomCharge] = CUSTOM_CHARGES) -> Decimal:
-    """The sum of the charges already posted when the Item is created ($793.61)."""
-    return sum((c.amount for c in charges if c.posted <= 0), Decimal("0.00"))
-
-
-def custom_pending_total(charges: Sequence[CustomCharge] = CUSTOM_CHARGES) -> Decimal:
-    """The sum of the charges still pending when the Item is created ($42.10)."""
-    return sum((c.amount for c in charges if c.posted > 0), Decimal("0.00"))
-
-
-def custom_user_config(today: dt.date) -> dict[str, Any]:
-    """The ``user_custom`` configuration (passed as the password) for an Item created ``today``."""
-
-    def day(offset: int) -> str:
-        return (today + dt.timedelta(days=offset)).isoformat()
-
-    return {
-        "version": 2,
-        "roll_dates_forward": False,
-        "override_accounts": [
-            {
-                "type": "credit",
-                "subtype": "credit card",
-                "starting_balance": CUSTOM_STARTING_BALANCE,
-                "currency": "USD",
-                "meta": dict(CUSTOM_ACCOUNT),
-                "transactions": [
-                    {
-                        "date_transacted": day(c.transacted),
-                        "date_posted": day(c.posted),
-                        "amount": c.amount,
-                        "description": c.description,
-                        "currency": "USD",
-                    }
-                    for c in CUSTOM_CHARGES
-                ],
-                "liability": dict(CUSTOM_LIABILITY),
-            }
-        ],
-    }
-
-
-def credentials(user: str, today: dt.date) -> tuple[str, str]:
-    """``(override_username, override_password)`` for a ``--user`` choice."""
-    if user == "custom":
-        return CUSTOM_USERNAME, db.json_dumps(custom_user_config(today))
-    if user not in USERS:
-        raise ValueError(f"unknown Sandbox user {user!r}")
-    return user, "pass_good"
 
 
 def register(subparsers: Any) -> None:
