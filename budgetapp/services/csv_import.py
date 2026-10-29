@@ -427,8 +427,10 @@ def linked_only(session: Session, *, production: bool) -> bool:
 
 
 def account_label(account: Account) -> str:
+    """The account's name; a manual account's says it holds CSV rows only (once)."""
     if account.is_manual:
-        return f"{account.name or MANUAL_ACCOUNT_NAME} (CSV only)"
+        name = account.name or MANUAL_ACCOUNT_NAME
+        return name if "csv" in name.casefold() else f"{name} (CSV only)"
     return account.display_name
 
 

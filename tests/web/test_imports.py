@@ -101,7 +101,7 @@ def test_upload_preview_import(client, db):
     assert done.headers["location"] == f"/import?done={record.id}"
     page = client.get(done.headers["location"])
     assert toasts(page.text) == ["Imported aug.csv: 15 added."]
-    assert "Imported aug.csv into American Express (CSV) (CSV only)." in page.text
+    assert "Imported aug.csv into American Express (CSV)." in page.text
     assert page.context["history"][0].filename == "aug.csv"
     assert page.context["preview"] is None
     assert db.scalar(select(func.count()).select_from(Transaction)) == 15

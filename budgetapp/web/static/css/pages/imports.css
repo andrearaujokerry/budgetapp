@@ -112,15 +112,34 @@
   flex-wrap: nowrap;
 }
 
-/* Phones: the date column is hidden and shown in the description's second line instead, and
-   the Keep / Delete buttons keep only their icons (their aria-label names the row). */
-.import-phone {
+/* The file a held row came from: one line, cut with an ellipsis (the full name is its title). */
+.table .import-file {
+  --truncate-w: 12rem;
+}
+
+.import-file__name {
+  display: block;
+  overflow: hidden;
+  max-width: var(--truncate-w);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Phones: the date column is hidden and shown in the description's second line instead (a
+   line of its own when the row has no other detail), and the Keep / Delete buttons keep only
+   their icons (their aria-label names the row). */
+.import-phone,
+.table .import-phone-line {
   display: none;
 }
 
 @media (max-width: 599.98px) {
   .import-phone {
     display: inline;
+  }
+
+  .table .import-phone-line {
+    display: block;
   }
 
   .suspect-actions .btn {

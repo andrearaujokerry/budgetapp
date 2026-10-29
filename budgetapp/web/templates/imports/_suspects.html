@@ -19,7 +19,7 @@
 <td class="table__date col-optional-sm nowrap">{{ s.date|date_long }}</td>
 <td class="col-grow"><span class="table__primary">{{ s.name }}</span><span class="table__secondary"><span class="import-phone">{{ s.date|date_long }} · </span>{{ s.account_label }}{% if s.original_description %} · {{ s.original_description }}{% endif %}</span></td>
 <td class="col-optional-md nowrap">{{ s.account_owner or "—" }}</td>
-<td class="col-optional-lg">{{ s.filename or "—" }}</td>
+<td class="col-optional-lg truncate import-file">{% if s.filename %}<span class="import-file__name" title="{{ s.filename }}">{{ s.filename }}</span>{% else %}—{% endif %}</td>
 <td class="num">{{ ui.money(s.amount) }}</td>
 <td class="table__actions">
 <div class="btn-group suspect-actions">

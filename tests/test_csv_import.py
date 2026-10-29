@@ -413,7 +413,12 @@ class TestTargets:
         assert targets.default == str(linked.id)
         assert [o.value for o in targets.options] == [str(linked.id), str(manual.id)]
         assert targets.options[0].label == "Gold Card ··1001" and targets.options[0].linked
-        assert targets.options[1].label == "American Express (CSV) (CSV only)"
+        assert targets.options[1].label == "American Express (CSV)"
+
+    def test_a_manual_account_is_labelled_csv_only_once(self, db):
+        assert csv_import.account_label(make_account(db, manual=True)) == "American Express (CSV)"
+        renamed = make_account(db, manual=True, name="Old Gold Card")
+        assert csv_import.account_label(renamed) == "Old Gold Card (CSV only)"
 
     def test_the_only_manual_account_is_the_default_before_linking(self, db):
         manual = make_account(db, manual=True)
@@ -612,7 +617,7 @@ class TestPreviewAndCommit:
         preview = csv_import.preview(db, fixture("activity_cp1252.csv"), "c.csv", other.id)
         assert (preview.new, preview.duplicates) == (0, 2)
         assert {r.other_account for r in preview.group("duplicate").sample} == {
-            "American Express (CSV) (CSV only)"
+            "American Express (CSV)"
         }
 
     def test_an_existing_manual_account_is_reused_for_a_new_account_preview(self, db):
@@ -819,7 +824,7 @@ class TestReview:
         history = csv_import.import_history(db)
         assert [h.filename for h in history] == ["aug.csv", "july.csv"]
         assert history[0].suspects == 1 and history[1].suspects == 0
-        assert history[0].account_label == "American Express (CSV) (CSV only)"
+        assert history[0].account_label == "American Express (CSV)"
 
     def test_attach_offers_need_a_manual_and_a_linked_account(self, db):
         manual = make_account(db, manual=True)
