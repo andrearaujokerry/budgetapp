@@ -292,6 +292,17 @@ class TestListPage:
         assert f'id="cat-{txn.id}"' not in html  # no inline select for a split row
         assert "Edit split" in html
 
+    def test_the_phone_line_names_the_parts_of_a_split(self, client, db, card, cats):
+        # Phones hide the Category column, so the date line under the description shows the
+        # first two parts' categories (not a second "Split" badge) and how many more there are.
+        txn = make_transaction(db, card, amount="100.00", category=cats["shopping"])
+        for category, amount in (("groceries", "50.00"), ("home", "30.00"), ("dining", "20.00")):
+            make_split(db, txn, cats[category], amount)
+        html = client.get("/transactions").text
+        line = re.search(r'<span class="txn-desc__phone">(.*?)</span>\s*</td>', html, re.S).group(1)
+        assert re.findall(r'class="cat__name">([^<]*)<', line) == ["Groceries", "Home"]
+        assert "+1 more" in line and "Split" not in line
+
 
 # --------------------------------------------------------------------------- inline category
 
