@@ -799,3 +799,64 @@ class TestLaunchProduction:
     def test_runs_only_from_the_checkout(self, prod, installed):
         code, _, said = self.launch(prod, installed.replace(repo_dir=None), Mac(installed))
         assert code == 2 and "from the budgetapp folder" in said[0]
+
+
+class TestEnsureDatabase:
+    """./run live and install-agents start PostgreSQL through its agent when one is loaded."""
+
+    def ensure(self, prod, layout, mac, cluster):
+        return agents.ensure_database(prod, layout, agents.Launchctl(501, mac), cluster)
+
+    def test_without_the_agent_pg_ctl_starts_it(self, prod, layout):
+        events: list[str] = []
+        cluster = FakeCluster(events, running=False)
+        assert self.ensure(prod, layout, Mac(layout, events=events), cluster) == "already running"
+        assert events == ["cluster start"]
+
+    def test_a_plist_that_is_not_loaded_is_not_used(self, prod, layout):
+        install_plists(layout, ["postgres"])
+        events: list[str] = []
+        self.ensure(prod, layout, Mac(layout, events=events), FakeCluster(events, running=False))
+        assert events == ["cluster start"]
+
+    def test_a_loaded_agent_is_kickstarted_never_pg_ctl(self, prod, layout):
+        install_plists(layout, ["postgres"])
+        events: list[str] = []
+        mac = Mac(layout, loaded=("postgres",), events=events)
+        said = self.ensure(prod, layout, mac, FakeCluster(events, running=False))
+        assert said == "started by its launchd agent"
+        assert events == ["kickstart postgres", "cluster wait"]
+
+    def test_a_running_agent_is_left_alone(self, prod, layout):
+        install_plists(layout, ["postgres"])
+        events: list[str] = []
+        mac = Mac(layout, loaded=("postgres",), events=events)
+        said = self.ensure(prod, layout, mac, FakeCluster(events, running=True))
+        assert said == "already running (launchd agent)" and events == []
+
+    def test_an_agent_that_never_comes_up(self, prod, layout):
+        install_plists(layout, ["postgres"])
+        events: list[str] = []
+        mac = Mac(layout, loaded=("postgres",), events=events)
+        with pytest.raises(agents.AgentError, match="did not start under launchd"):
+            self.ensure(prod, layout, mac, FakeCluster(events, running=False, ready=False))
+
+    def test_live_uses_it(self, prod, layout):
+        layout.venv_python.parent.mkdir(parents=True)
+        layout.venv_python.write_text("")
+        agents.write_stamp(layout, COMMIT, "3.14.2")
+        install_plists(layout, ["postgres", "web"])
+        mac = Mac(layout, loaded=("postgres", "web"))
+        code = agents.launch_production(
+            prod,
+            layout=layout,
+            runner=mac,
+            cluster=FakeCluster(mac.events, running=False),
+            revision=lambda s: code_head(),
+            ready=lambda url: True,
+            open_browser=lambda url: None,
+            say=lambda line: None,
+        )
+        assert code == 0
+        assert mac.events[:2] == ["kickstart postgres", "cluster wait"]
+        assert "cluster start" not in mac.events

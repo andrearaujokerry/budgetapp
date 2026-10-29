@@ -837,6 +837,28 @@ class Cluster:
         return db.wait_for_db(settings, timeout=timeout)
 
 
+def ensure_database(
+    settings: Settings, layout: Layout, launchctl: Launchctl, cluster: Cluster
+) -> str:
+    """Start PostgreSQL the way it is managed and say how.
+
+    While the postgres agent is loaded, ``launchctl kickstart`` starts it: ``pg_ctl start`` would
+    run a server launchd does not supervise, and the agent's own start would then fail on the
+    lock file (RESEARCH T5 gotchas). Without the agent, ``pg_ctl`` (``pgcluster.start``) does it.
+    """
+    if layout.plist_path("postgres").exists() and launchctl.is_loaded("postgres"):
+        if cluster.is_running(settings):
+            return "already running (launchd agent)"
+        launchctl.kickstart("postgres")
+        if not cluster.wait(settings, DB_WAIT):
+            raise AgentError(
+                f"PostgreSQL did not start under launchd within {DB_WAIT} s; see "
+                f"{layout.log_path('postgres')}."
+            )
+        return "started by its launchd agent"
+    return cluster.start(settings)
+
+
 def launch_production(
     settings: Settings,
     *,
@@ -864,7 +886,7 @@ def launch_production(
         runner = runner if runner is not None else default_runner()
         launchctl = launchctl or Launchctl(layout.uid, runner)
         cluster = cluster or Cluster()
-        say(f"  PostgreSQL: {cluster.start(settings)}")
+        say(f"  PostgreSQL: {ensure_database(settings, layout, launchctl, cluster)}")
         reason = upgrade_reason(settings, layout, runner, revision)
         if reason:
             say(f"Upgrading the production install first: {reason}.")
@@ -965,7 +987,9 @@ def install_agents(
     steps: list[PlanStep] = [
         PlanStep(
             "Make sure PostgreSQL is running (the upgrade backs up and migrates the database)",
-            lambda: say(f"     PostgreSQL: {cluster.start(settings)}"),
+            lambda: say(
+                f"     PostgreSQL: {ensure_database(settings, layout, launchctl, cluster)}"
+            ),
         ),
         PlanStep(
             f"Upgrade the production install in {layout.install_dir} to commit {commit[:12]}: "

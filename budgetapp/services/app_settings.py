@@ -156,13 +156,14 @@ def form_values(view: SettingsView) -> dict[str, Any]:
 
 
 def posted_values(view: SettingsView, form: Mapping[str, Any]) -> dict[str, Any]:
-    """The form as the user submitted it (to show again next to the errors)."""
+    """The form as the user submitted it (to show again next to the errors); a text field the
+    post left out shows its stored value, as :func:`save` keeps it."""
     values = form_values(view)
     for key in values:
         if isinstance(values[key], bool):
             values[key] = key in form
-        else:
-            values[key] = str(form.get(key, "") or "")
+        elif key in form:
+            values[key] = str(form.get(key) or "")
     return values
 
 
@@ -219,6 +220,8 @@ def save(session: Session, form: Mapping[str, Any]) -> SettingsView:
 
     closing_days: dict[int, int | None] = {}
     for card in view.cards:
+        if card.field not in form:
+            continue  # not on the submitted form (a card added since): keep what is stored
         raw = _text(form, card.field).strip()
         if not raw:
             closing_days[card.id] = None
@@ -250,7 +253,7 @@ def save(session: Session, form: Mapping[str, Any]) -> SettingsView:
             card = cards[cycle_id]
             if (
                 card.field not in errors
-                and closing_days.get(cycle_id) is None
+                and closing_days.get(cycle_id, card.closing_day) is None
                 and card.statements == 0
             ):
                 errors[card.field] = (

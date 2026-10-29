@@ -260,6 +260,19 @@ class TestSave:
         db.expire_all()
         assert db.get(Account, card.id).statement_closing_day is None
 
+    def test_a_card_missing_from_the_form_keeps_its_closing_day(self, client, db, card):
+        card.statement_closing_day = 19
+        db.flush()
+        data = form(budget_period_mode="statement", budget_cycle_account_id=str(card.id))
+        assert f"closing_day_{card.id}" not in data
+        assert client.post("/settings", data=data, headers=HTMX).status_code == 200
+        db.expire_all()
+        assert db.get(Account, card.id).statement_closing_day == 19
+        assert stored(db).budget_period_mode == "statement"
+        data["statement_settle_days"] = "99"  # after an error the kept day is shown again
+        values = client.post("/settings", data=data).context["values"]
+        assert values[f"closing_day_{card.id}"] == "19"
+
     def test_calendar_mode_keeps_the_chosen_card(self, client, db, card):
         data = form(budget_cycle_account_id=str(card.id), **{f"closing_day_{card.id}": "3"})
         assert client.post("/settings", data=data, headers=HTMX).status_code == 200
