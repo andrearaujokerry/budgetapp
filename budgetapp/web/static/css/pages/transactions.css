@@ -209,14 +209,21 @@
   flex-direction: column;
 }
 
+/* The list scrolls in its own box: a fieldset doesn't clip its overflow reliably. */
+.txn-catpick__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .txn-catpick__list {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-height: 0;
+  min-width: 0;
   margin: 0;
   padding: 6px;
-  overflow-y: auto;
   border: 0;
 }
 
@@ -236,6 +243,7 @@
   gap: 8px;
   padding: 8px;
   border-top: 1px solid var(--border);
+  background: var(--surface-raised);
 }
 
 /* Table -------------------------------------------------------------------- */

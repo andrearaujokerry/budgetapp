@@ -32,6 +32,7 @@
 <span id="f-category-summary" class="txn-catpick__summary" data-catpick-summary>{{ category_summary }}</span>
 </button>
 <div id="txn-catpick" popover class="txn-popover txn-catpick__panel" data-catpick>
+<div class="txn-catpick__scroll">
 <fieldset class="txn-catpick__list">
 <legend class="sr-only">Show only these categories</legend>
 {%- for c in options.categories %}
@@ -39,6 +40,7 @@
 {{ form.checkbox_field("category", ui.category_badge(c), checked=(value in filt.categories or c.id|string in filt.categories), value=value, id="f-cat-" ~ c.id, data_label=c.name, wrapper_class="txn-catpick__option") }}
 {%- endfor %}
 </fieldset>
+</div>
 <div class="txn-popover__footer">
 <button type="button" class="btn btn--ghost btn--sm" data-catpick-clear>Clear</button>
 <button type="button" class="btn btn--sm" popovertarget="txn-catpick" popovertargetaction="hide">Done</button>
