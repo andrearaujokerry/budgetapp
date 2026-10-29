@@ -63,9 +63,13 @@
   vertical-align: middle;
 }
 
+/* An inline error under an amount reads as a sentence: it widens its column a little rather
+   than wrapping a word per line. */
 .budget-error {
   justify-content: flex-end;
+  min-width: 15rem;
   margin: var(--sp-1) 0 0;
+  text-align: left;
   white-space: normal;
 }
 
@@ -139,6 +143,16 @@
 @media (max-width: 599px) {
   .budget-phone {
     display: block;
+  }
+
+  .budget-phone,
+  .budget-pace {
+    white-space: normal;
+  }
+
+  /* Narrow enough that the amount field stays in view next to the category. */
+  .budget-error {
+    min-width: 8.5rem;
   }
 
   .budget-overall .grid--4 {

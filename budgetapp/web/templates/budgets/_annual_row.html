@@ -10,7 +10,7 @@
 <td class="col-grow">
 <span class="table__primary">{{ ui.category_badge(category) }}</span>
 {%- if entry %}{{ bud.phone_status(entry.spent, entry.percent_used, entry.status, entry.remaining) }}{% endif %}
-{%- if entry and entry.pace_amount is not none %}<span class="table__secondary">On an even pace: {{ entry.pace_amount|money }} by now</span>
+{%- if entry and entry.pace_amount is not none %}<span class="table__secondary budget-pace">On an even pace: {{ entry.pace_amount|money }} by {{ 'now' if annual.as_of >= ov.today else annual.as_of|date_short }}</span>
 {%- elif not entry %}<span class="table__secondary">No annual budget from {{ labels.period }} on</span>{% endif %}
 </td>
 <td class="num budget-table__amount">

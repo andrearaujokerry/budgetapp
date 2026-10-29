@@ -131,7 +131,7 @@ class TestPage:
         for sentence in (
             "Calendar month · 17 days left",
             "Overall target",
-            "of $1,000.00 target",
+            "of $1,000 target",
             "Monthly budgets",
             "Spending without a budget",
             "Annual budgets · 2026",
@@ -244,6 +244,18 @@ class TestPeriods:
         assert 'id="period-today"' in response.text
         assert "You are looking at a past month." in text_of(response)
         assert "Changes you make here apply from Sep 2026 on" in text_of(response)
+
+    def test_another_period_is_named_rather_than_this_month(self, client, db, cat, groceries):
+        travel = cat("Travel")
+        make_budget(db, travel, "6000.00", effective_from=day("2026-01-01"), period="annual")
+        current = text_of(client.get("/budgets"))
+        assert "This month No budgets" not in current  # Groceries is budgeted
+        assert "spent this month, tracked by year" in current
+        assert "On an even pace: $4,734.25 by now" in current
+        past = client.get("/budgets?period=2026-09-01")
+        assert re.search(r'id="overall-card-title">Sep 2026</h2>', past.text)
+        assert "spent in Sep 2026, tracked by year" in text_of(past)
+        assert "On an even pace: $4,487.67 by Sep 30" in text_of(past)  # 6000 × 273 / 365
 
     def test_htmx_navigation_returns_the_page_body(self, client, groceries):
         response = client.get("/budgets?period=2026-11-01", headers=HTMX)
@@ -516,14 +528,14 @@ class TestOverallTarget:
             '<section class="card budget-overall" id="overall-card" '
             'aria-labelledby="overall-card-title">'
         )
-        assert "of $3,000.00 target" in text_of(response)
+        assert "of $3,000 target" in text_of(response)
         assert toasts(response) == ["The overall target is $3,000.00 from Oct 2026 on."]
         assert rows(db)[-1] == ("monthly", day("2026-10-01"), D("3000.00"), False)
         response = client.post(
             "/budgets/overall", data={"amount": "", "period": OCT_1}, headers=HTMX
         )
         assert toasts(response) == ["No overall target from Oct 2026 on."]
-        assert "of $500.00 budgeted" in text_of(response)  # the monthly budgets added up
+        assert "of $500 budgeted" in text_of(response)  # the monthly budgets added up
         assert csp_problems(response.text, rendered=True) == []
 
     def test_an_invalid_target(self, client, db):
