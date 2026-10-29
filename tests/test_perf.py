@@ -148,7 +148,18 @@ def five_years_of_transactions(db: Session) -> dict[str, Any]:
         splits.append({"transaction_id": r.id, "category_id": home, "amount": r.amount - half})
     db.execute(insert(TransactionSplit.__table__), splits)
     db.execute(text("ANALYZE transactions, transaction_splits"))
-    return {"count": len(rows), "groceries": category_ids["Groceries"], "splits": len(to_split)}
+    coffee = db.scalar(
+        select(Transaction.id)
+        .where(Transaction.merchant_name == "Blue Bottle Coffee", Transaction.pending.is_(False))
+        .order_by(Transaction.id.desc())
+        .limit(1)
+    )
+    return {
+        "count": len(rows),
+        "groceries": category_ids["Groceries"],
+        "splits": len(to_split),
+        "coffee": coffee,
+    }
 
 
 @pytest.fixture
@@ -198,6 +209,9 @@ def test_transactions_page_and_export_with_five_years_of_data(
         "text search (HTMX)": ("/transactions?q=coffee", HTMX),
         "category filter": (f"/transactions?category={data['groceries']}", None),
         "deep page, by amount": ("/transactions?sort=amount&page=300", None),
+        # The heaviest dialog: its preview runs the draft rule over every transaction.
+        "one-click rule dialog": (f"/transactions/{data['coffee']}/rule", HTMX),
+        "details dialog": (f"/transactions/{data['coffee']}", HTMX),
     }
     timings: dict[str, float] = {}
     results = {}
@@ -213,6 +227,8 @@ def test_transactions_page_and_export_with_five_years_of_data(
     groceries = results["category filter"].context["page"]
     assert 0 < groceries.total_count < data["count"]
     assert results["deep page, by amount"].context["page"].page == 300
+    preview = results["one-click rule dialog"].context["preview"]
+    assert preview.matches > 700  # every Blue Bottle Coffee charge in five years
 
     timings["CSV export, one year"], export = median_seconds(
         perf_client, "/transactions/export.csv?range=custom&from=2025-01-01&to=2025-12-31"

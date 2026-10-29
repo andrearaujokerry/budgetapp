@@ -20,7 +20,9 @@
 {%- if t.subtitle or t.rule_label %}
 <span class="table__secondary">{{ t.subtitle or '' }}{% if t.rule_label %}<span class="txn-desc__rule">{{ ' · ' if t.subtitle }}rule “{{ t.rule_label }}”</span>{% endif %}</span>
 {%- endif %}
-<span class="txn-desc__phone"><span>{{ shown_date }}</span>{% if t.is_split %}{{ ui.badge('Split', tone='info', icon='split') }}{% else %}{{ ui.category_badge(t.category) }}{% endif %}</span>
+<span class="txn-desc__phone"><span>{{ shown_date }}</span>
+{%- if t.is_split %}{% for s in t.splits[:2] %}{{ ui.category_badge(s.category) }}{% endfor %}{% if t.splits|length > 2 %}<span>+{{ t.splits|length - 2 }} more</span>{% endif %}
+{%- else %}{{ ui.category_badge(t.category) }}{% endif %}</span>
 {%- if t.needs_review and t.review_reason %}
 <span class="txn-desc__review">{{ ui.icon('alert', size='xs') }}<span>{{ t.review_reason }}</span></span>
 {%- endif %}
