@@ -7,8 +7,9 @@
 * ``POST /budgets/overall``: the overall monthly target; empty = none.
 * ``POST /budgets/add``: a monthly or annual budget for any visible spending category.
 
-Every POST carries ``period``, a day inside the budget period being edited: the change applies
-from that period on and earlier periods keep their amounts (``services.budgets``). An HTMX edit of
+Every POST carries ``period``, a day inside the budget period being edited (its middle, see
+:func:`form_day`): the change applies from that period on and earlier periods keep their amounts
+(``services.budgets``). An HTMX edit of
 a row answers with that row plus out-of-band updates of the summaries it changes; adding a budget
 (or switching a category between monthly and annual) reloads the page (``HX-Redirect``) so the
 row lands in its sorted place. Plain form posts redirect back to the page (303). Invalid amounts
@@ -39,6 +40,10 @@ router = APIRouter()
 
 NAV = "budgets"
 
+#: Years the page shows. Others are refused (400): the period navigator, rollover and
+#: suggestions step past a period's ends, which overflows near years 1 and 9999.
+YEARS = range(1900, 3000)
+
 
 # --------------------------------------------------------------------------- helpers
 
@@ -46,6 +51,13 @@ NAV = "budgets"
 def page_url(period: Period | None = None) -> str:
     """``/budgets`` for a period (the current one without a parameter)."""
     return "/budgets" if period is None else f"/budgets?period={period.start.isoformat()}"
+
+
+def form_day(period: Period) -> dt.date:
+    """The day a form names its period by: the middle of it, so that a closing date which moves
+    by a few days after the page was drawn (a new or corrected statement) still finds that
+    cycle rather than its neighbour."""
+    return period.start + (period.end - period.start) // 2
 
 
 def transactions_url(category_id: int | None, start: dt.date, end: dt.date) -> str:
@@ -89,7 +101,7 @@ def _labels(ov: BudgetOverview, suggestions: budgets.Suggestions) -> dict[str, s
         "unit": "cycle" if statement else "month",
         "current_link": "This cycle" if statement else "This month",
         "suggest_basis": basis,
-        "param": ov.period.start.isoformat(),
+        "param": form_day(ov.period).isoformat(),
     }
 
 
@@ -131,9 +143,9 @@ def _period(session: Session, value: object, today: dt.date) -> Period:
     try:
         day = dt.date.fromisoformat(str(value))
     except ValueError:
-        raise HTTPException(
-            400, "That budget period isn't valid. Reload the page and try again."
-        ) from None
+        day = None
+    if day is None or day.year not in YEARS:
+        raise HTTPException(400, "That budget period isn't valid. Reload the page and try again.")
     return budgets.period_for(session, day)
 
 
@@ -166,6 +178,10 @@ def _page(request: Request, context: dict[str, Any], *, status_code: int = 200) 
 @router.get("/budgets")
 def budgets_page(request: Request, session: SessionDep, period: dt.date | None = None) -> Response:
     today = clock.today()
+    if period is not None and period.year not in YEARS:
+        raise HTTPException(
+            400, "That period is too far away to show. Open Budgets from the menu for this month."
+        )
     shown = budgets.period_for(session, period or today)
     return _page(request, _context(session, shown, today))
 

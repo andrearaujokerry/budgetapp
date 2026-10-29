@@ -152,7 +152,7 @@ class TestPage:
         assert 'role="meter"' in row and 'aria-valuetext="50% used' in row
         assert 'role="switch"' in row and 'name="enabled"' in row
         assert f'hx-post="/budgets/category/{groceries.id}"' in row
-        assert 'name="period" value="2026-10-01"' in row
+        assert 'name="period" value="2026-10-16"' in row  # the middle of the period
 
     def test_an_empty_database(self, client):
         response = client.get("/budgets")
@@ -272,6 +272,17 @@ class TestPeriods:
     def test_a_malformed_period_is_a_400_page(self, client):
         assert client.get("/budgets?period=soon").status_code == 400
 
+    @pytest.mark.parametrize("far", ["9999-12-15", "0001-01-01", "1899-12-31", "3000-01-01"])
+    def test_a_period_too_far_away_is_a_400_page(self, client, far):
+        """The navigator steps past a period's ends; near years 1 and 9999 that would overflow."""
+        response = client.get(f"/budgets?period={far}")
+        assert response.status_code == 400
+        assert "That period is too far away to show." in text_of(response)
+
+    def test_the_first_and_last_years_shown(self, client):
+        assert client.get("/budgets?period=1900-01-01").status_code == 200
+        assert client.get("/budgets?period=2999-12-31").status_code == 200
+
     def test_statement_cycles(self, client, db, account):
         account.statement_closing_day = 27
         make_statement(db, account, "2026-09-27")
@@ -281,6 +292,32 @@ class TestPeriods:
         assert "Statement Sep 28 – Oct 27" in page
         assert "Statement cycle · closes Oct 27 · 13 days left" in page
         assert 'href="/budgets?period=2026-08-28"' in response.text  # the previous cycle
+
+    def test_an_edit_stays_in_the_cycle_shown_when_its_start_moves(
+        self, client, db, account, groceries
+    ):
+        """Forms name their cycle by its middle day, so a closing date corrected after the page
+        was drawn (moving the cycle's start by two days) still edits the cycle that was shown."""
+        account.statement_closing_day = 27
+        statement = make_statement(db, account, "2026-09-27")
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id)
+        row = row_of(client.get("/budgets"), "line", groceries)
+        shown = re.search(r'name="period" value="([0-9-]+)"', row).group(1)
+        assert shown == "2026-10-12"  # Sep 28 – Oct 27
+        statement.closing_date = day("2026-09-29")
+        db.flush()
+        response = client.post(
+            f"/budgets/category/{groceries.id}",
+            data={"amount": "650", "period": shown},
+            headers=HTMX,
+        )
+        assert toasts(response) == [
+            "Groceries has a monthly budget of $650.00 from Sep 30 – Oct 27 on."
+        ]
+        assert rows(db, groceries) == [
+            ("monthly", day("2026-01-01"), D("500.00"), False),
+            ("monthly", day("2026-09-30"), D("650.00"), False),
+        ]
 
     def test_statement_mode_without_a_card_says_so(self, client, db):
         set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=None)
@@ -456,13 +493,15 @@ class TestMonthlyEdits:
         assert response.status_code == 422
         assert "Card Payments isn't a spending category" in html.unescape(response.text)
 
-    def test_a_malformed_period_field_is_a_400(self, client, groceries):
+    @pytest.mark.parametrize("value", ["yesterday", "9999-12-15", "0001-01-01"])
+    def test_a_malformed_period_field_is_a_400(self, client, db, groceries, value):
         response = client.post(
             f"/budgets/category/{groceries.id}",
-            data={"amount": "1", "period": "yesterday"},
+            data={"amount": "1", "period": value},
             headers=HTMX,
         )
         assert response.status_code == 400
+        assert rows(db, groceries) == [("monthly", day("2026-01-01"), D("500.00"), False)]
 
 
 class TestRollover:
