@@ -1,7 +1,10 @@
-{#- HTMX answer to a monthly row edit: the row, then out-of-band updates of what it changes. -#}
+{#- HTMX answer to a monthly row edit: the row, then out-of-band updates of what it changes.
+    htmx parses a response that starts with a <tr> in table context, where a <tfoot>, a <table> or
+    a <form> that follows the row would be dropped; inside a <template> each one parses on its own,
+    and htmx swaps out-of-band elements found in templates (then removes the templates). -#}
 {%- set line = ov.line_for(category.id) -%}
 {% include "budgets/_line_row.html" %}
 {% set oob = true %}
-{% include "budgets/_totals.html" %}
-{% include "budgets/_overall.html" %}
-{% include "budgets/_unbudgeted.html" %}
+<template>{% include "budgets/_totals.html" %}</template>
+<template>{% include "budgets/_overall.html" %}</template>
+<template>{% include "budgets/_unbudgeted.html" %}</template>

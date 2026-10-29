@@ -92,6 +92,23 @@ def toasts(response) -> list[str]:
     ]
 
 
+def oob_parts(response) -> tuple[str, list[str]]:
+    """``(markup outside <template>s, ids of the out-of-band elements inside them)``.
+
+    htmx parses a response that starts with a ``<tr>`` in table context: a ``<tfoot>``,
+    ``<table>`` or ``<form>`` after the row would be dropped by the HTML parser (checked in
+    Chrome), so out-of-band parts after a row must each sit in a ``<template>``.
+    """
+    templates = re.findall(r"<template>(.*?)</template>", response.text, re.S)
+    outside = re.sub(r"<template>.*?</template>", "", response.text, flags=re.S)
+    ids = []
+    for part in templates:
+        match = re.match(r'\s*<\w+[^>]*\bid="([^"]+)"[^>]*\bhx-swap-oob="true"', part)
+        assert match is not None, f"a template without one out-of-band element: {part[:80]}"
+        ids.append(match.group(1))
+    return outside, ids
+
+
 # --------------------------------------------------------------------------- the page
 
 
@@ -299,6 +316,40 @@ class TestMonthlyEdits:
             ("monthly", day("2026-01-01"), D("500.00"), False),
             ("monthly", day("2026-10-01"), D("650.00"), False),
         ]
+
+    @pytest.mark.parametrize(
+        ("path", "data", "kind", "status", "totals"),
+        [
+            ("", {"amount": "650"}, "line", 200, "budget-totals"),
+            ("", {"amount": "-5"}, "line", 422, "budget-totals"),
+            ("/rollover", {"enabled": "1"}, "line", 200, "budget-totals"),
+            ("/annual", {"amount": "7000"}, "annual", 200, "annual-totals"),
+            ("/annual", {"amount": "1.001"}, "annual", 422, "annual-totals"),
+        ],
+    )
+    def test_row_responses_keep_out_of_band_parts_in_templates(
+        self, client, db, cat, groceries, path, data, kind, status, totals
+    ):
+        """After the row, the totals, the overall card (with its form) and the unbudgeted list
+        (with its table) each come in a <template>, so htmx's parser keeps them whole."""
+        if kind == "annual":
+            travel = cat("Travel")
+            make_budget(db, travel, "6000.00", effective_from=day("2026-01-01"), period="annual")
+            target = travel
+        else:
+            target = groceries
+        response = client.post(
+            f"/budgets/category/{target.id}{path}", data={**data, "period": OCT_1}, headers=HTMX
+        )
+        assert response.status_code == status
+        assert response.text.lstrip().startswith(f'<tr id="{kind}-{target.id}">')
+        outside, oob_ids = oob_parts(response)
+        assert oob_ids == [totals, "overall-card", "unbudgeted"]
+        after_row = outside.split("</tr>", 1)[1]
+        assert not re.search(r"<(table|thead|tbody|tfoot|tr|section|form)\b", after_row)
+        assert re.findall(r'hx-swap-oob="([^"]+)"', outside) == (
+            ["beforeend:#flash"] if status == 200 else []
+        )
 
     def test_edits_persist_and_past_periods_keep_their_amounts(self, client, db, groceries):
         client.post(
