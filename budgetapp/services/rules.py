@@ -164,7 +164,9 @@ class CleanRule:
     is_active: bool
 
 
-def _int_field(value: str, field: str, message: str, errors: dict[str, str]) -> int | None:
+def _int_field(
+    value: str, field: str, message: str, errors: dict[str, str], *, limit: int = 2**62
+) -> int | None:
     if not value:
         return None
     try:
@@ -172,7 +174,7 @@ def _int_field(value: str, field: str, message: str, errors: dict[str, str]) -> 
     except ValueError:
         errors[field] = message
         return None
-    if abs(number) > MAX_PRIORITY:
+    if abs(number) > limit:
         errors[field] = message
         return None
     return number
@@ -200,6 +202,7 @@ def clean_rule(session: Session, draft: RuleDraft, *, current: Rule | None = Non
         "priority",
         f"Enter a whole number between −{MAX_PRIORITY:,} and {MAX_PRIORITY:,}.",
         errors,
+        limit=MAX_PRIORITY,
     )
     try:
         values = categorize.validate_rule(
