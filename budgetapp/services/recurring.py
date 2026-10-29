@@ -9,7 +9,9 @@
   every 12 days on average is a habit, not a subscription); and every amount within 20% of the
   median, allowing one price change (the charges before and after it each within 20% of their
   own median). A merchant that bills several subscriptions under one id (Apple: iCloud and Apple
-  Music) fails the amount test; its charges of one exact amount are then tried on their own.
+  Music) fails the amount test; its charges of one exact amount are then tried on their own, and
+  such series that follow one another at the same cadence are one subscription whose price
+  changed more than once.
 * **For each series:** cadence; typical amount (the new price after a fixed-price change, else
   the median of the last three at the current level); last amount and date; next expected date
   (last + median interval; a monthly, quarterly or yearly series that charges on a fixed day of
@@ -370,7 +372,47 @@ def _detect(charges: Sequence[Charge]) -> list[_Fit]:
             fits.append(
                 _Fit(fit.charges, fit.cadence, fit.median_interval, fit.split, partial=True)
             )
-    return fits
+    return _chain_levels(fits)
+
+
+def _chain_levels(fits: Sequence[_Fit]) -> list[_Fit]:
+    """Join exact-amount series that follow one another into one series: a subscription whose
+    price changed more than once. A level continues the one before it when it has the same
+    cadence and starts within two cadences of that level's last charge (one skipped charge)."""
+    order = sorted(fits, key=lambda f: (f.charges[0].date, f.charges[-1].date))
+    successor: dict[int, int] = {}
+    continued: set[int] = set()
+    for i, fit in enumerate(order):
+        if fit.cadence is None:
+            continue
+        reach = 2 * fit.cadence.days + fit.cadence.tolerance
+        options = [
+            j
+            for j, other in enumerate(order)
+            if j not in continued
+            and other.cadence == fit.cadence
+            and 0 < (other.charges[0].date - fit.charges[-1].date).days <= reach
+        ]
+        if options:
+            j = min(options, key=lambda j: order[j].charges[0].date)
+            successor[i] = j
+            continued.add(j)
+    out = []
+    for i, fit in enumerate(order):
+        if i in continued:
+            continue
+        chain = [fit]
+        k = i
+        while k in successor:
+            k = successor[k]
+            chain.append(order[k])
+        if len(chain) == 1:
+            out.append(fit)
+            continue
+        joined = tuple(c for level in chain for c in level.charges)
+        split = len(joined) - len(chain[-1].charges)
+        out.append(_Fit(joined, fit.cadence, _median(_intervals(joined)), split, partial=True))
+    return out
 
 
 def _forced(charges: Sequence[Charge]) -> _Fit:
