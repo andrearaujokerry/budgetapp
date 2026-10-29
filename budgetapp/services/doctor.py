@@ -109,6 +109,7 @@ class DoctorContext:
     user: str = field(default_factory=getpass.getuser)
     http_status: Callable[[str], int | None] | None = None
     _db: tuple[bool, str | None] | None = field(default=None, repr=False)
+    _db_fix: str = field(default="./run db start", repr=False)
     _pg_ready: bool | None = field(default=None, repr=False)
 
     @classmethod
@@ -142,6 +143,8 @@ class DoctorContext:
     @contextlib.contextmanager
     def session(self) -> Iterator[Session]:
         if self.session_factory is None:
+            if in_test_process() and not self.settings.is_test:
+                raise RuntimeError("tests must pass a session factory for non-test settings")
             from sqlalchemy.pool import NullPool
 
             from budgetapp import db
@@ -164,11 +167,21 @@ class DoctorContext:
                 self._db = (True, None)
             except secrets.KeychainApprovalNeeded:
                 self._db = (False, "macOS didn't allow reading the database password from Keychain")
+                self._db_fix = "Run ./run doctor in Terminal again and click Always Allow."
             except secrets.MissingSecretError:
                 self._db = (False, "the database password isn't in Keychain")
+                self._db_fix = "./run setup"
             except Exception as exc:  # any connection problem is reported, never raised
-                self._db = (False, _first_line(str(getattr(exc, "orig", None) or exc)))
+                problem = _first_line(str(getattr(exc, "orig", None) or exc))
+                self._db = (False, problem)
+                if "password authentication failed" in problem or "does not exist" in problem:
+                    self._db_fix = "./run setup (it creates the database and resets its password)"
         return self._db
+
+    @property
+    def db_fix(self) -> str:
+        """The one-line fix for the database problem :meth:`database` found."""
+        return self._db_fix
 
     def pg_ready(self) -> bool:
         if self._pg_ready is None:
@@ -286,11 +299,11 @@ def _app_paths(ctx: DoctorContext) -> list[tuple[str, Path]]:
         ("data folder", s.data_dir),
         ("database cluster", s.pg_data_dir),
         ("socket folder", s.pg_socket_dir),
-        ("backups", s.backups_dir),
+        ("backup folder", s.backups_dir),
         ("production install", s.install_dir),
-        ("logs", s.logs_dir),
-        ("state", s.state_dir),
-        ("agent scripts", layout.bin_dir),
+        ("log folder", s.logs_dir),
+        ("state folder", s.state_dir),
+        ("agent scripts folder", layout.bin_dir),
     ]
 
 
@@ -394,13 +407,12 @@ def check_database(ctx: DoctorContext) -> Iterable[Check]:
     if reachable:
         yield Check(section, PASS, f"Connected to {s.db_name} as {s.db_role}")
         return
-    fix = "./run db start"
-    if problem and "Keychain" in problem:
-        fix = "Run ./run doctor in Terminal again and click Always Allow."
-    elif problem and "isn't in Keychain" in problem:
-        fix = "./run setup"
     yield Check(
-        section, FAIL, f"Can't connect to {s.db_name} as {s.db_role}", detail=problem, fix=fix
+        section,
+        FAIL,
+        f"Can't connect to {s.db_name} as {s.db_role}",
+        detail=problem,
+        fix=ctx.db_fix,
     )
 
 
@@ -1149,7 +1161,9 @@ def _encrypted(ctx: DoctorContext, destination: dict[str, Any]) -> bool | None:
         return None
     if not isinstance(info, dict):
         return None
-    return info.get("FileVault") is True or info.get("Encrypted") is True
+    # "FileVault" is the volume's own encryption; "Encryption" is true for any Apple silicon
+    # volume (hardware), so it says nothing about a disk that leaves the Mac (RESEARCH T5.6a).
+    return info.get("FileVault") is True
 
 
 def _excluded(ctx: DoctorContext, path: Path) -> bool | None:
