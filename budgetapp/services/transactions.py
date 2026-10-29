@@ -111,32 +111,8 @@ FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 #: Payment processors that put their own prefix before the merchant ("SQ *DELFINA").
 PROCESSOR_PREFIXES = frozenset(
-    {
-        "AMZ",
-        "BT",
-        "CKE",
-        "CLR",
-        "DD",
-        "EB",
-        "FSP",
-        "GGL",
-        "GOOGLE",
-        "IC",
-        "IN",
-        "LS",
-        "PAYPAL",
-        "PG",
-        "PP",
-        "PY",
-        "SP",
-        "SPO",
-        "SQ",
-        "SQU",
-        "TM",
-        "TST",
-        "WPY",
-        "ZETTLE",
-    }
+    "AMZ BT CKE CLR DD EB FSP GGL GOOGLE IC IN LS PAYPAL PG PP PY SP SPO SQ SQU TM TST WPY "  # noqa: SIM905
+    "ZETTLE".split()
 )
 _DOMAIN_TOKEN = re.compile(r"\.(COM|NET|ORG|CO|IO|US)\b|^WWW\.", re.IGNORECASE)
 _STATE_CODE = re.compile(r"^[A-Z]{2}$")
@@ -1401,7 +1377,7 @@ def one_click_draft(session: Session, transaction_id: int) -> RuleDraft:
 
 @dataclass(frozen=True, slots=True)
 class RulePreview:
-    """What a one-click rule would do to past transactions (suspected duplicates excluded)."""
+    """What a one-click rule would do to past transactions (every row, as applying it does)."""
 
     matches: int
     will_change: int
@@ -1448,7 +1424,7 @@ def preview_one_click_rule(
         Transaction.category_source,
     )
     matches = will_change = user_edited = payments = 0
-    for row in session.execute(select(*columns).where(Transaction.duplicate_status != "suspect")):
+    for row in session.execute(select(*columns)):
         if not categorize.rule_matches(draft, row):
             continue
         matches += 1
