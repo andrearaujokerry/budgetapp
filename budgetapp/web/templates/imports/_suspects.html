@@ -1,0 +1,41 @@
+{#- CSV rows held for review (the HTMX target #suspects). Needs `suspects`. -#}
+{% import "components/ui.html" as ui %}
+{% if suspects %}
+{% call ui.card("Held for review", "These CSV rows fall inside the period Plaid covers, but no Plaid transaction matched them. They stay out of every total until you decide.", flush=true, id="suspects") %}
+<div class="table-wrap">
+<table class="table">
+<thead><tr>
+<th scope="col">Date</th>
+<th scope="col" class="col-grow">Description</th>
+<th scope="col" class="col-optional-md">Card member</th>
+<th scope="col" class="col-optional-lg">From file</th>
+<th scope="col" class="num">Amount</th>
+<th scope="col" class="shrink"><span class="sr-only">Actions</span></th>
+</tr></thead>
+<tbody>
+{%- for s in suspects %}
+<tr>
+<td class="table__date">{{ s.date|date_long }}</td>
+<td class="col-grow"><span class="table__primary">{{ s.name }}</span><span class="table__secondary">{{ s.account_label }}{% if s.original_description and s.original_description != s.name %} · {{ s.original_description }}{% endif %}</span></td>
+<td class="col-optional-md">{{ s.account_owner or "—" }}</td>
+<td class="col-optional-lg">{{ s.filename or "—" }}</td>
+<td class="num">{{ ui.money(s.amount) }}</td>
+<td class="table__actions">
+<div class="btn-group suspect-actions">
+<form method="post" action="/import/suspects/{{ s.id }}/keep" hx-post="/import/suspects/{{ s.id }}/keep" hx-target="#suspects" hx-swap="outerHTML">
+{{ ui.button("Keep", size="sm", type="submit", icon="check", tooltip="It is a real charge Plaid missed: count it") }}
+</form>
+<form method="post" action="/import/suspects/{{ s.id }}/delete" hx-post="/import/suspects/{{ s.id }}/delete" hx-target="#suspects" hx-swap="outerHTML" data-confirm="Delete this CSV row? Use this when Plaid already has the same charge.">
+{{ ui.button("Delete", size="sm", variant="danger", type="submit", icon="trash", tooltip="It duplicates a Plaid transaction: delete it") }}
+</form>
+</div>
+</td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{% endcall %}
+{% else %}
+<div id="suspects" hidden></div>
+{% endif %}

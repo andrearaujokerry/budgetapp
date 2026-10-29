@@ -1,10 +1,25 @@
-{#- Placeholder from the web shell; the CSV package replaces this file. -#}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
 {% block title %}Import{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/imports.css">{% endblock %}
 {% block content %}
 {{ ui.page_header("Import", "Add older history from an Amex CSV download.") }}
-<div class="card">
-{{ ui.empty_state("Coming soon", "This page is being built.", icon="upload") }}
-</div>
+
+{% if preview_expired %}
+{{ ui.banner("warn", "Previews last 30 minutes and are used once. Upload the file again.", title="That preview is gone.", id="preview-expired") }}
+{% endif %}
+
+{% if done %}{% include "imports/_done.html" %}{% endif %}
+
+{% for offer in offers %}{% include "imports/_attach.html" %}{% endfor %}
+
+{% if preview %}
+{% include "imports/_preview.html" %}
+{% else %}
+{% include "imports/_upload.html" %}
+{% endif %}
+
+{% include "imports/_suspects.html" %}
+
+{% include "imports/_history.html" %}
 {% endblock %}

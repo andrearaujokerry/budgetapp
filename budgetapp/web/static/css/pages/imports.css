@@ -1,0 +1,113 @@
+/* Import page (SYNC-8): the file input, the download steps and the preview groups. */
+
+/* A file input in the .input frame: the "Choose File" button looks like a small .btn. */
+.input--file {
+  height: auto;
+  min-height: 36px;
+  padding: 4px;
+  cursor: pointer;
+}
+
+.input--file::file-selector-button {
+  height: 28px;
+  margin-right: 10px;
+  padding: 0 10px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.input--file:hover::file-selector-button {
+  border-color: var(--control-border-hover);
+  background: var(--surface-hover);
+}
+
+/* Numbered download steps. */
+.import-steps {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+  counter-reset: import-step;
+}
+
+.import-steps li {
+  position: relative;
+  min-height: 24px;
+  padding-left: 36px;
+  color: var(--text-secondary);
+  line-height: var(--lh-normal);
+  counter-increment: import-step;
+}
+
+.import-steps li::before {
+  content: counter(import-step);
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+}
+
+/* Preview: one block per group of rows. */
+.preview-group {
+  display: grid;
+  gap: 8px;
+}
+
+.preview-group__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+
+.preview-group__title {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+}
+
+.preview-actions {
+  display: grid;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.preview-actions form,
+.suspect-actions form,
+.attach-form .form-actions {
+  margin: 0;
+}
+
+.attach-form {
+  display: grid;
+  gap: 12px;
+}
+
+.attach-form p {
+  color: var(--text-secondary);
+}
+
+.attach-form .form-actions {
+  align-items: flex-end;
+}
+
+.suspect-actions {
+  flex-wrap: nowrap;
+}
