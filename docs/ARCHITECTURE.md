@@ -686,6 +686,11 @@ Security middleware (SEC-1, SEC-4):
 - Host header must be `127.0.0.1` or `localhost` (blocks DNS rebinding).
 - Unsafe methods require an `Origin` of this app, or no `Sec-Fetch-Site` other than
   `same-origin`/`none` (blocks cross-site form posts to localhost).
+- Fetch Metadata on every method: when `Sec-Fetch-Site` is present and is neither
+  `same-origin` nor `none`, only a top-level `GET` navigation (`Sec-Fetch-Mode: navigate`,
+  `Sec-Fetch-Dest: document`) passes; anything else gets 403. This blocks cross-site
+  subresource loads of pages such as `/transactions?q=…` (XS-Search). Requests without Fetch
+  Metadata (curl, old browsers) are not checked.
 - **CSP on every page:** `default-src 'self'; script-src 'self'; style-src 'self';
   style-src-attr 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none';
   form-action 'self'; frame-ancestors 'none'` (inline `style=""` attributes are allowed for
