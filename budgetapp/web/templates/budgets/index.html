@@ -1,10 +1,11 @@
-{#- Placeholder from the web shell; the BUD package replaces this file. -#}
+{#- Budgets page (BUD-1..5). The page body is budgets/_page.html, which HTMX period navigation
+    swaps into #budgets-page; budgets/README in routes/budgets.py lists the routes. -#}
 {% extends "base.html" %}
-{% import "components/ui.html" as ui %}
 {% block title %}Budgets{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/budgets.css">{% endblock %}
 {% block content %}
-{{ ui.page_header("Budgets", "Monthly and yearly limits by category.") }}
-<div class="card">
-{{ ui.empty_state("Coming soon", "This page is being built.", icon="target") }}
+<div id="budgets-page" class="budgets-page">
+{% include "budgets/_page.html" %}
 </div>
 {% endblock %}
+{% block scripts %}<script src="/static/js/budgets.js" defer></script>{% endblock %}

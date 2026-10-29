@@ -1,0 +1,151 @@
+/* Budgets page (BUD-1..5): the period navigator and the budget tables. Everything else comes
+   from app.css. */
+
+/* The page body sits in #budgets-page (HTMX swaps it), so it keeps .content's rhythm itself. */
+.budgets-page > * + * {
+  margin-top: 24px;
+}
+
+.budgets-page > * + .section {
+  margin-top: 40px;
+}
+
+.budgets-page > div:empty {
+  display: none;
+}
+
+.period-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.period-nav__label {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: var(--sp-2);
+  min-width: 7.5rem;
+  padding: 0 var(--sp-1);
+  font-weight: var(--fw-semibold);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.period-nav__kind {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+/* Tables: the meter column gets room; amount inputs, links and errors line up right. */
+.budget-table .budget-table__meter {
+  width: 22%;
+  min-width: 9rem;
+}
+
+.budget-table__amount {
+  white-space: nowrap;
+}
+
+.budget-form,
+.budget-add,
+.budget-rollover {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin: 0;
+}
+
+.budget-switch {
+  vertical-align: middle;
+}
+
+.budget-error {
+  justify-content: flex-end;
+  margin: var(--sp-1) 0 0;
+  white-space: normal;
+}
+
+.budget-spent {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+
+.budget-spent:hover {
+  text-decoration-color: currentColor;
+}
+
+/* Notes under a category name stay truncating block lines (.table__secondary); icons sit
+   inline. */
+.budget-carry .icon,
+.budget-phone .icon {
+  margin-right: 2px;
+  vertical-align: -2px;
+}
+
+.budget-meter-note {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-sm);
+}
+
+/* A suggested amount that isn't saved yet (budgets.js): Enter saves, Esc cancels. */
+.inline-money .inline-control.is-suggested {
+  border-style: dashed;
+  border-color: var(--accent);
+  background-color: var(--accent-soft);
+}
+
+/* The overall target form: field and buttons side by side, stacked on phones. */
+.budget-target {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--sp-2) var(--sp-3);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+
+.budget-target__field {
+  flex: 1 1 18rem;
+  max-width: 34rem;
+}
+
+.budget-target__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding-top: 26px;
+}
+
+@media (max-width: 599px) {
+  .budget-target__actions {
+    padding-top: 0;
+  }
+}
+
+/* Phones: the amount columns scroll out of view, so each row says its state under the name,
+   and the overall tiles sit two by two. */
+.budget-phone {
+  display: none;
+}
+
+@media (max-width: 599px) {
+  .budget-phone {
+    display: block;
+  }
+
+  .budget-overall .grid--4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .budget-table .inline-money .inline-control {
+    width: 6.5em;
+  }
+}

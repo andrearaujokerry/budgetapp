@@ -1,0 +1,14 @@
+{#- The monthly budgets' totals row (visible rows; #budget-totals, out of band after an edit). -#}
+{%- import "components/ui.html" as ui -%}
+{%- set available = ov.lines|sum(attribute='available') -%}
+{%- set spent = ov.lines|sum(attribute='spent') -%}
+{%- set remaining = available - spent -%}
+<tfoot id="budget-totals"{% if oob is defined and oob %} hx-swap-oob="true"{% endif %}>
+<tr>
+<th scope="row" class="col-grow">Total</th>
+<td class="num">{{ ui.money(available, tone='neutral') }}</td>
+<td class="num">{{ ui.money(spent, tone='neutral') }}</td>
+<td class="num">{{ ui.money(remaining, tone='over' if remaining < 0 else 'neutral') }}</td>
+<td colspan="3"></td>
+</tr>
+</tfoot>

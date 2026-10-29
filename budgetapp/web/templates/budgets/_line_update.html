@@ -1,0 +1,7 @@
+{#- HTMX answer to a monthly row edit: the row, then out-of-band updates of what it changes. -#}
+{%- set line = ov.line_for(category.id) -%}
+{% include "budgets/_line_row.html" %}
+{% set oob = true %}
+{% include "budgets/_totals.html" %}
+{% include "budgets/_overall.html" %}
+{% include "budgets/_unbudgeted.html" %}

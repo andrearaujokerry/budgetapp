@@ -1,0 +1,56 @@
+{#- The overall card (BUD-3): spending against the overall target, or against the monthly
+    category budgets added up when there is no target; the target's inline edit. #overall-card;
+    with `oob` set it is an out-of-band swap (after a row edit). -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+{%- set o = ov.overall -%}
+{%- set err = errors.get('overall') -%}
+{%- set t = ov.totals -%}
+<section class="card budget-overall" id="overall-card" aria-labelledby="overall-card-title"{% if oob is defined and oob %} hx-swap-oob="true"{% endif %}>
+<div class="card__header">
+<div class="card__heading">
+<h2 class="card__title" id="overall-card-title">{{ 'Overall target' if o.has_target else 'This ' ~ labels.unit }}</h2>
+<p class="card__subtitle">
+{%- if o.has_target %}Every category counts except those with an annual budget.
+{%- elif o.budget is not none %}Your monthly category budgets added up. Set an overall target to count every category.
+{%- else %}No budgets yet for {{ labels.period }}. Set an overall target, or budgets per category below.{% endif -%}
+</p>
+</div>
+</div>
+<div class="card__body stack stack--lg">
+<div class="grid grid--4">
+{%- if o.budget is not none %}
+{%- set spent_sub = 'of ' ~ (o.budget|money) ~ (' target' if o.has_target else ' budgeted') %}
+{% call ui.stat('Spent', ui.money(o.spent, cents=false), sub=spent_sub, tone=o.status if o.status in ['warn', 'over'] else none, icon='credit-card', id='overall-spent') %}
+{%- if o.percent_used is not none %}{{ ui.progress(o.percent_used, pace_pct=o.pace_percent, status=o.status, show_pct=false, size='sm', name=('Overall target used' if o.has_target else 'Monthly budgets used')) }}{% endif %}
+{% endcall %}
+{%- if o.remaining < 0 %}
+{%- set remaining_sub = 'over ' ~ ('the target' if o.has_target else 'budget') %}
+{%- elif ov.is_current and ov.days_left > 0 %}
+{%- set remaining_sub = 'about ' ~ ui.money_text(o.remaining / ov.days_left, cents=false) ~ ' a day for ' ~ (ov.days_left|pluralize('day')) %}
+{%- else %}
+{%- set remaining_sub = (o.percent_used|pct ~ ' used') if o.percent_used is not none else none %}
+{%- endif %}
+{{ ui.stat('Remaining', ui.money(o.remaining, cents=false, tone='over' if o.remaining < 0 else 'neutral'), sub=remaining_sub, tone='over' if o.remaining < 0 else none, icon='target', id='overall-remaining') }}
+{%- else %}
+{{ ui.stat('Spent', ui.money(t.spent, cents=false), sub='in all categories', icon='credit-card', id='overall-spent') }}
+{{ ui.stat('Remaining', ui.money(none), sub='no budget set', icon='target', id='overall-remaining') }}
+{%- endif %}
+{{ ui.stat('Not budgeted', ui.money(t.unbudgeted_spent, cents=false), sub=('counts toward the target' if o.has_target else (ov.unbudgeted|length|pluralize('category', 'categories') ~ ', listed below') if ov.unbudgeted else 'every category with spending has a budget'), icon='list', id='overall-unbudgeted') }}
+{{ ui.stat('Annual budgets', ui.money(t.annual_spent, cents=false), sub='spent this ' ~ labels.unit ~ ', tracked by year', icon='calendar', id='overall-annual') }}
+</div>
+{%- if t.hidden_spent != 0 %}
+<p class="muted text-sm mt-0">Includes {{ t.hidden_spent|money }} in hidden categories.</p>
+{%- endif %}
+<form class="budget-target" method="post" action="/budgets/overall" hx-post="/budgets/overall" hx-target="#overall-card" hx-swap="outerHTML" hx-sync="this:drop">
+<input type="hidden" name="period" value="{{ labels.param }}">
+{{ form.money_field('amount', 'Overall monthly target', value=(err.raw if err else o.target), id='overall-amount', placeholder='No target', error=(err.message if err else none), help='Compared with every category except annual budgets. Leave it empty for no target; it applies from ' ~ labels.period ~ ' on.', wrapper_class='budget-target__field') }}
+<div class="budget-target__actions">
+{{ ui.button('Save target', type='submit', size='sm', variant='primary', id='overall-save') }}
+{%- if sugg.overall is not none %}
+{{ ui.button('Suggest', size='sm', variant='ghost', icon='wand', id='suggest-overall', tooltip=ui.money_text(sugg.overall) ~ ': ' ~ labels.suggest_basis ~ ', rounded up', data_suggest=ui.decimal_text(sugg.overall), data_suggest_target='overall-amount', aria_label='Suggest an overall target: ' ~ ui.money_text(sugg.overall)) }}
+{%- endif %}
+</div>
+</form>
+</div>
+</section>

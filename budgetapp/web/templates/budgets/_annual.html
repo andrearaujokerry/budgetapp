@@ -1,0 +1,43 @@
+{#- Annual budgets (BUD-5) for the year of the period shown, as of that period's end: spending
+    from Jan 1, with a pace marker. Never part of the monthly totals. -#}
+{%- import "components/ui.html" as ui -%}
+<section class="section" id="annual-section" aria-labelledby="annual-title">
+<div class="section__header">
+<div>
+<h2 class="section__title" id="annual-title">Annual budgets · {{ annual.year }}</h2>
+<p class="section__subtitle">
+{%- if annual.as_of < ov.today %}Spending from Jan 1 through {{ annual.as_of|date_long }}, the end of {{ labels.period }}.
+{%- else %}Spending so far this year{% if annual.pace_percent is not none %}; the marker shows where an even pace would be ({{ annual.pace_percent|pct }} of the year){% endif %}.{% endif -%}
+</p>
+</div>
+{{ ui.button('Add annual budget', icon='plus', size='sm', data_dialog_open='add-annual', id='add-annual-open') }}
+</div>
+{%- if annual.lines %}
+{% call ui.card(flush=true, id='annual-card') %}
+<div class="table-wrap">
+<table class="table budget-table" id="annual-lines">
+<thead><tr>
+<th scope="col" class="col-grow">Category</th>
+<th scope="col" class="num">Annual budget</th>
+<th scope="col" class="num">Spent in {{ annual.year }}</th>
+<th scope="col" class="num">Remaining</th>
+<th scope="col" class="budget-table__meter">Used</th>
+</tr></thead>
+<tbody>
+{%- for entry in annual.lines %}
+{%- set category = entry.category %}
+{% include "budgets/_annual_row.html" %}
+{%- endfor %}
+</tbody>
+{% include "budgets/_annual_totals.html" %}
+</table>
+</div>
+{% endcall %}
+{%- else %}
+<div class="card">
+{% call ui.empty_state('No annual budgets for ' ~ annual.year, 'Plan yearly costs like the annual fee, travel and gifts with one budget for the whole year. Their spending is tracked here, not in the monthly budgets.', icon='calendar') %}
+{{ ui.button('Add annual budget', icon='plus', data_dialog_open='add-annual') }}
+{% endcall %}
+</div>
+{%- endif %}
+</section>

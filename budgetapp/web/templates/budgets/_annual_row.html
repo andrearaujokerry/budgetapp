@@ -1,0 +1,26 @@
+{#- One annual budget row. Needs `category` and `entry` (the AnnualLine, or none after the
+    budget was removed). -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+{%- import "budgets/_macros.html" as bud -%}
+{%- set cid = category.id -%}
+{%- set err = errors.get(cid) -%}
+{%- set year_start = annual.period.start -%}
+<tr id="annual-{{ cid }}">
+<td class="col-grow">
+<span class="table__primary">{{ ui.category_badge(category) }}</span>
+{%- if entry %}{{ bud.phone_status(entry.spent, entry.percent_used, entry.status, entry.remaining) }}{% endif %}
+{%- if entry and entry.pace_amount is not none %}<span class="table__secondary">On an even pace: {{ entry.pace_amount|money }} by now</span>
+{%- elif not entry %}<span class="table__secondary">No annual budget from {{ labels.period }} on</span>{% endif %}
+</td>
+<td class="num budget-table__amount">
+<form class="budget-form" method="post" action="/budgets/category/{{ cid }}/annual" hx-post="/budgets/category/{{ cid }}/annual" hx-trigger="change, submit" hx-sync="this:drop" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="period" value="{{ labels.param }}">
+{{ form.inline_money('amount', err.raw if err else (entry.budget if entry else none), label=category.name ~ ' annual budget', id='annual-budget-' ~ cid, placeholder='No budget', aria_invalid='true' if err else none, aria_describedby=('annual-budget-' ~ cid ~ '-error') if err else none) }}
+</form>
+{{- bud.field_error('annual-budget-' ~ cid ~ '-error', err) }}
+</td>
+<td class="num">{% if entry %}<a class="budget-spent" id="annual-spent-{{ cid }}" href="{{ spent_href(cid, year_start, annual.as_of) }}" aria-label="{{ ui.money_text(entry.spent) }} spent on {{ category.name }} in {{ annual.year }}: see the transactions">{{ ui.money(entry.spent) }}</a>{% else %}{{ ui.money(none) }}{% endif %}</td>
+<td class="num">{% if entry %}{{ ui.money(entry.remaining, tone='over' if entry.remaining < 0 else 'neutral') }}{% else %}{{ ui.money(none) }}{% endif %}</td>
+<td class="budget-table__meter">{% if entry %}{{ bud.meter(entry.percent_used, entry.status, entry.pace_percent, category.name ~ ' annual budget', entry.remaining) }}{% else %}{{ ui.progress(none, name=category.name ~ ' annual budget', size='sm') }}{% endif %}</td>
+</tr>

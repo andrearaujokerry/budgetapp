@@ -1,0 +1,25 @@
+{#- Visible categories with spending in the period but no budget, with "Add budget".
+    #unbudgeted (always present, so an out-of-band update can fill or empty it). -#}
+{%- import "components/ui.html" as ui -%}
+<div id="unbudgeted"{% if oob is defined and oob %} hx-swap-oob="true"{% endif %}>
+{%- if ov.unbudgeted -%}
+{% call ui.card('Spending without a budget', subtitle=(ov.totals.unbudgeted_spent|money) ~ ' in ' ~ labels.period ~ (', counted in the overall target' if ov.overall.has_target else ', not in any budget'), flush=true, id='unbudgeted-card') %}
+<div class="table-wrap">
+<table class="table budget-table budget-table--add">
+<thead><tr>
+<th scope="col" class="col-grow">Category</th>
+<th scope="col" class="num">Spent</th>
+<th scope="col" class="num">Monthly budget</th>
+</tr></thead>
+<tbody>
+{%- for entry in ov.unbudgeted %}
+{%- set category = entry.category %}
+{%- set spent = entry.spent %}
+{% include "budgets/_unbudgeted_row.html" %}
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{% endcall %}
+{%- endif -%}
+</div>

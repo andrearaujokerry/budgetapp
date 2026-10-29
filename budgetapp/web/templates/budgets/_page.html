@@ -1,0 +1,44 @@
+{#- The Budgets page body: header with the period navigator, notices, the overall card, monthly
+    budgets, spending without a budget and annual budgets. Rendered inside #budgets-page by
+    index.html, and alone for HTMX period navigation. -#}
+{%- import "components/ui.html" as ui -%}
+{%- if ov.is_current -%}
+{%- set when = (ov.days_left|pluralize('day')) ~ ' left' -%}
+{%- elif ov.is_past -%}
+{%- set when = 'ended ' ~ (ov.period.end|date_long) -%}
+{%- else -%}
+{%- set when = 'starts ' ~ (ov.period.start|date_long) -%}
+{%- endif -%}
+{%- set subtitle = labels.kind ~ (' · closes ' ~ (ov.period.end|date_short) if ov.period.kind == 'statement' and not ov.is_past else '') ~ ' · ' ~ when -%}
+{% call ui.page_header("Budgets", subtitle) %}
+<nav class="period-nav" aria-label="Budget period">
+{{ ui.button('Previous: ' ~ labels.previous, href='/budgets?period=' ~ ov.previous_period.start.isoformat(), icon='chevron-left', icon_only=true, size='sm', tooltip=labels.previous, id='period-prev', hx_get='/budgets?period=' ~ ov.previous_period.start.isoformat(), hx_target='#budgets-page', hx_push_url='true') }}
+<span class="period-nav__label" id="period-label">{% if ov.period.kind == 'statement' %}<span class="period-nav__kind">Statement</span>{% endif %}{{ labels.period }}</span>
+{{ ui.button('Next: ' ~ labels.next, href='/budgets?period=' ~ ov.next_period.start.isoformat(), icon='chevron-right', icon_only=true, size='sm', tooltip=labels.next, id='period-next', hx_get='/budgets?period=' ~ ov.next_period.start.isoformat(), hx_target='#budgets-page', hx_push_url='true') }}
+{%- if not ov.is_current %}
+{{ ui.button(labels.current_link, href='/budgets', size='sm', variant='ghost', id='period-today', hx_get='/budgets', hx_target='#budgets-page', hx_push_url='true') }}
+{%- endif %}
+</nav>
+{{ ui.button('Budget period: ' ~ labels.kind|lower ~ 's. Change it in Settings', href='/settings', icon='settings', icon_only=true, size='sm', variant='ghost', tooltip='Calendar months or statement cycles: change it in Settings', id='period-settings') }}
+{{ ui.button('Add budget', icon='plus', size='sm', variant='primary', data_dialog_open='add-monthly', id='add-budget-open') }}
+{% endcall %}
+
+{%- if ov.notice %}
+{{ ui.banner('warn', ov.notice, title='Statement cycles unavailable.', action_href='/settings', action_label='Open Settings', id='period-notice') }}
+{%- endif %}
+{%- if ov.is_past %}
+{{ ui.banner('info', 'Changes you make here apply from ' ~ labels.period ~ ' on, until a later change; earlier periods keep their budgets.', title='You are looking at a past ' ~ labels.unit ~ '.', id='edit-note') }}
+{%- elif ov.is_future %}
+{{ ui.banner('info', 'Changes you make here apply from ' ~ labels.period ~ ' on; the current ' ~ labels.unit ~ ' keeps its budgets.', title='You are planning ahead.', id='edit-note') }}
+{%- endif %}
+
+{% include "budgets/_overall.html" %}
+
+{% include "budgets/_lines.html" %}
+
+{% include "budgets/_unbudgeted.html" %}
+
+{% include "budgets/_annual.html" %}
+
+{% set kind = 'monthly' %}{% include "budgets/_add_dialog.html" %}
+{% set kind = 'annual' %}{% include "budgets/_add_dialog.html" %}

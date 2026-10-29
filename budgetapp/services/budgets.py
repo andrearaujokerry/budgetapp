@@ -267,6 +267,7 @@ class BudgetOverview:
     visible categories with spending but no budget, largest first. ``overall`` and ``totals``
     include hidden categories. Annual budgets are reported by :func:`annual_overview` instead;
     ``annual_category_ids`` lists the categories whose spending they cover in this period.
+    ``spending`` is the period's :func:`period_spending` result (every expense category).
     """
 
     period: Period
@@ -283,6 +284,7 @@ class BudgetOverview:
     next_period: Period
     annual_category_ids: frozenset[int]
     settings: PeriodSettings
+    spending: PeriodSpending
 
     @property
     def is_current(self) -> bool:
@@ -731,6 +733,7 @@ def overview(session: Session, period: Period, *, today: dt.date | None = None) 
         next_period=ctx.settings.next(period),
         annual_category_ids=frozenset(annual_ids),
         settings=ctx.settings,
+        spending=spending,
     )
 
 

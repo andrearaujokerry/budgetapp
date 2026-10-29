@@ -1,0 +1,10 @@
+{#- HTMX answer to an annual row edit: the row, then out-of-band updates of what it changes
+    (removing an annual budget moves its spending into the monthly view). -#}
+{%- set ns = namespace(entry=none) -%}
+{%- for a in annual.lines if a.category.id == category.id %}{% set ns.entry = a %}{% endfor -%}
+{%- set entry = ns.entry -%}
+{% include "budgets/_annual_row.html" %}
+{% set oob = true %}
+{% include "budgets/_annual_totals.html" %}
+{% include "budgets/_overall.html" %}
+{% include "budgets/_unbudgeted.html" %}
