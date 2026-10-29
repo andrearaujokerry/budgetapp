@@ -1,0 +1,57 @@
+{#- Small pieces shared by the Statements pages. Import: {% import "statements/_macros.html" as stmt %} -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+
+{#- Open / Settling / Final, with when it becomes final. -#}
+{%- macro status_badge(c) -%}
+{%- if c.status == "open" -%}
+{{ ui.badge("Open", tone="info", icon="clock", title="Closes " ~ (c.closing_date|date_long)) }}
+{%- elif c.status == "settling" -%}
+{{ ui.badge("Settling", tone="warn", icon="clock", title="Late transactions can still arrive; final on " ~ (c.final_on|date_long)) }}
+{%- else -%}
+{{ ui.badge("Final", tone="muted") }}
+{%- endif -%}
+{%- endmacro -%}
+
+{#- Where the closing date comes from. -#}
+{%- macro source_text(c) -%}
+{%- if c.generated -%}estimated closing date
+{%- elif c.closing_date_source == "user" -%}closing date you entered
+{%- else -%}closing date from Amex
+{%- endif -%}
+{%- endmacro -%}
+
+{#- The Gate D result in a table cell: a badge with an icon and words, never colour alone. -#}
+{%- macro check_badge(check) -%}
+{%- if check.state == "pass" -%}
+{%- set label %}Matches{% if check.provisional %}<span class="stmt-wide"> so far</span>{% endif %}{% endset -%}
+{{ ui.badge(label, tone="ok", icon="check") }}
+{%- elif check.state == "fail" -%}
+{{ ui.badge("Off by " ~ (check.difference|abs|money), tone="over", icon="x") }}
+{%- elif check.state == "open" -%}
+<span class="muted text-sm">Still open</span>
+{%- elif check.missing == "new_balance" -%}
+<span class="muted text-sm" title="Type the statement's New Balance to check it">Not checked</span>
+{%- else -%}
+<span class="muted text-sm" title="Type the statement's Previous Balance to check it">Not checked</span>
+{%- endif -%}
+{%- endmacro -%}
+
+{%- macro reported_new_balance(c) -%}
+{%- if c.reported.new_balance is none -%}
+<span class="amount amount--none">—</span>
+{%- else -%}
+{{ ui.money(c.reported.new_balance, tone="neutral") }}
+{%- endif -%}
+{%- endmacro -%}
+
+{#- "Add a statement" by closing date (a card the app doesn't know yet). -#}
+{%- macro add_form(account, add_form) -%}
+{% call ui.card("Add a statement", subtitle="For a statement the app doesn't know yet, by the closing date printed on it. You can type its numbers next.", id="add-statement", class="no-print") %}
+<form class="stmt-add" method="post" action="/statements">
+<input type="hidden" name="account_id" value="{{ account.id }}">
+{{ form.date_field("closing_date", "Closing date", value=add_form["values"].get("closing_date"), error=add_form["errors"].get("closing_date"), required=true, id="add-closing-date") }}
+<div class="form-actions">{{ ui.button("Add statement", icon="plus", type="submit") }}</div>
+</form>
+{% endcall %}
+{%- endmacro -%}

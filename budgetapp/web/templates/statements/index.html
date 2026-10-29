@@ -1,10 +1,90 @@
-{#- Placeholder from the web shell; the STMT package replaces this file. -#}
+{#- Statements (INS-4, REL-3): every statement period of one card, checked against Amex.
+    Context: accounts, account_tabs, account (AccountOption or None), rows (StatementSummary,
+    newest first), current, latest, mismatches, today, add_form {values, errors}. -#}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
+{% import "components/forms.html" as form %}
+{% import "statements/_macros.html" as stmt %}
 {% block title %}Statements{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/statements.css">{% endblock %}
+
 {% block content %}
-{{ ui.page_header("Statements", "Each statement period, checked against Amex to the cent.") }}
+{{ ui.page_header("Statements", (account.name ~ " · " if account and account_tabs|length <= 1 else "") ~ "Each statement period, checked against Amex to the cent.") }}
+
+{%- if account_tabs|length > 1 %}
+{{ ui.tabs(account_tabs, account.id|string, label="Cards") }}
+{%- endif %}
+
+{%- if not account %}
 <div class="card">
-{{ ui.empty_state("Coming soon", "This page is being built.", icon="receipt") }}
+{{ ui.empty_state("No card yet", "Link your Amex on the Connection page, or import an Amex CSV file, and its statement periods appear here.", icon="receipt", action_href="/connection", action_label="Go to Connection") }}
 </div>
+{%- elif not rows %}
+<div class="card">
+{% call ui.empty_state("No statement dates yet", "The app learns each closing date from Amex through Plaid after a sync. Until then, set the card's closing day in Settings, or add a statement by the closing date printed on it.", icon="calendar") %}
+{{ ui.button("Open Settings", href="/settings") }}
+{% endcall %}
+</div>
+{{ stmt.add_form(account, add_form) }}
+{%- else %}
+
+{%- if mismatches %}
+{%- set first = mismatches[0] %}
+{{ ui.banner("over", ("The first is the period that closed " ~ (first.cycle.closing_date|date_long) ~ ", off by " ~ (first.check.difference|abs|money) ~ ".") if mismatches|length > 1 else ("The period that closed " ~ (first.cycle.closing_date|date_long) ~ " is off by " ~ (first.check.difference|abs|money) ~ ". Open it to see where the difference comes from."), title=(mismatches|length|pluralize("statement")) ~ " " ~ ("doesn't" if mismatches|length == 1 else "don't") ~ " match your Amex statement.", action_href="/statements/" ~ account.id ~ "/" ~ first.cycle.key, action_label="Open it", id="mismatch-banner") }}
+{%- endif %}
+
+<div class="grid grid--3 stmt-stats">
+{%- if current %}
+{{ ui.stat("New charges this period", ui.money(current.new_charges, tone="neutral"), sub="Closes " ~ (current.cycle.closing_date|date_short) ~ " · " ~ (((current.cycle.closing_date - today).days + 1)|pluralize("day")) ~ " left", icon="calendar", href="/statements/" ~ account.id ~ "/" ~ current.cycle.key) }}
+{%- endif %}
+{%- if latest %}
+{%- set check = latest.check %}
+{%- if check.failed %}{% set sub, tone = "Off by " ~ (check.difference|abs|money), "over" %}
+{%- elif check.passed and check.provisional %}{% set sub, tone = "Matches so far · final " ~ (latest.cycle.final_on|date_short), "ok" %}
+{%- elif check.passed %}{% set sub, tone = "Matches to the cent", "ok" %}
+{%- elif latest.cycle.status == "settling" %}{% set sub, tone = "Settling until " ~ (latest.cycle.final_on|date_short), "info" %}
+{%- else %}{% set sub, tone = "Not checked yet", none %}{% endif %}
+{{ ui.stat("Last statement · " ~ (latest.cycle.closing_date|date_short), ui.money(latest.cycle.reported.new_balance if latest.cycle.reported.new_balance is not none else latest.new_balance, tone="neutral"), sub=sub, tone=tone, icon="receipt", href="/statements/" ~ account.id ~ "/" ~ latest.cycle.key) }}
+{%- endif %}
+{%- set checkable = rows|selectattr('check.state', 'in', ['pass', 'fail'])|list %}
+{%- set passing = checkable|selectattr('check.state', 'equalto', 'pass')|list %}
+{{ ui.stat("Statements that match", (passing|length ~ " of " ~ checkable|length) if checkable else "—", sub=("All to the cent" if checkable and passing|length == checkable|length else ((checkable|length - passing|length)|pluralize("statement") ~ " off") if checkable else "Add a New Balance to check one"), tone=("ok" if checkable and passing|length == checkable|length else ("over" if checkable else none)), icon="check-circle") }}
+</div>
+
+{% set subtitle %}Periods end on the closing date; a transaction belongs to the period it posted in. Pending charges count once they post.{% endset %}
+{% call ui.card("Statement periods", subtitle=subtitle, flush=true, id="periods") %}
+<div class="table-wrap">
+<table class="table stmt-periods">
+<thead><tr>
+<th scope="col" class="col-grow"><span class="stmt-wide">Period</span><span class="stmt-narrow">Closing date</span></th>
+<th scope="col" class="col-optional-sm">Status</th>
+<th scope="col" class="num col-optional-md">New charges</th>
+<th scope="col" class="num col-optional-md">Payments/Credits</th>
+<th scope="col" class="num">Activity</th>
+<th scope="col" class="num col-optional-sm">New balance</th>
+<th scope="col">Check</th>
+</tr></thead>
+<tbody>
+{%- for row in rows %}
+{%- set c = row.cycle %}
+<tr>
+<td class="col-grow">
+<a class="table__primary" href="/statements/{{ account.id }}/{{ c.key }}"><span class="stmt-wide">{{ c.label }}</span><span class="stmt-narrow">{{ c.closing_date|date_long }}</span></a>
+<span class="table__secondary"><span class="stmt-narrow">{{ c.status_label }} · </span>{{ c.days }} days · {{ stmt.source_text(c) }}</span>
+</td>
+<td class="col-optional-sm"><span class="cluster stmt-badges">{{ stmt.status_badge(c) }}{% if c.flagged %}{{ ui.badge(c.days ~ " days", tone="warn", icon="alert", title="Unusually long or short: a statement may be missing") }}{% endif %}{% if c.checked_at %}{{ ui.badge("Checked", tone="muted", icon="check", title="Checked " ~ (c.checked_at|date_long)) }}{% endif %}</span></td>
+<td class="num col-optional-md">{{ ui.money(row.new_charges, tone="neutral") }}</td>
+<td class="num col-optional-md">{{ ui.money(row.payments_credits, tone="neutral") }}</td>
+<td class="num">{{ ui.money(row.net_activity, tone="neutral") }}</td>
+<td class="num col-optional-sm">{{ stmt.reported_new_balance(c) }}</td>
+<td>{{ stmt.check_badge(row.check) }}</td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{% endcall %}
+
+{{ stmt.add_form(account, add_form) }}
+{%- endif %}
 {% endblock %}

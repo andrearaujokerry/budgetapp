@@ -1,0 +1,160 @@
+{#- The Recurring page's content (swapped whole by the override buttons, so the totals follow).
+    Context: overview (RecurringOverview). -#}
+{%- import "components/ui.html" as ui -%}
+{%- set o = overview -%}
+
+{#- phone: what the hidden columns would say ("Monthly · next Nov 1"). -#}
+{%- macro merchant_cell(s, phone) -%}
+<td class="col-grow">
+<a class="table__primary" href="/transactions?q={{ s.search_text|urlencode }}">{{ s.merchant }}</a>
+<span class="table__secondary"><span class="rec-narrow">{{ s.cadence_label }} · {{ phone }}</span><span class="rec-wide">{{ s.count|pluralize("charge") }} since {{ s.first_date|month_label }}
+{%- if s.is_confirmed %} · kept by you{% endif %}
+{%- if not s.detected %} · irregular{% endif %}</span></span>
+</td>
+{%- endmacro -%}
+
+{%- macro amount_cell(s) -%}
+<td class="num">
+{{ ui.money(s.typical_amount, tone="neutral") }}
+{%- if s.price_changed %}<span class="table__secondary rec-was">was {{ s.previous_amount|money }}</span>{% endif %}
+</td>
+{%- endmacro -%}
+
+{%- macro actions(s, buttons) -%}
+<td class="table__actions">
+<form class="rec-actions" method="post" action="/recurring/override" hx-post="/recurring/override" hx-target="#recurring-content" hx-swap="outerHTML">
+<input type="hidden" name="key" value="{{ s.key }}">
+<input type="hidden" name="name" value="{{ s.merchant }}">
+{%- for status, label, icon in buttons %}
+{{ ui.button(label ~ ": " ~ s.merchant, icon=icon, icon_only=true, variant="ghost", size="sm", type="submit", name="status", value=status, tooltip=label) }}
+{%- endfor %}
+</form>
+</td>
+{%- endmacro -%}
+
+{%- set keep = ("confirmed", "Always list it", "check") -%}
+{%- set ignore = ("ignored", "Ignore it", "eye-off") -%}
+{%- set reset = ("reset", "Back to automatic", "refresh") -%}
+
+<div id="recurring-content" class="stack stack--lg">
+{%- if o.is_empty %}
+<div class="card">
+{{ ui.empty_state("No recurring charges found yet", "A merchant shows up here once it has charged at least three times (twice for yearly charges) at a steady interval and a similar amount.", icon="repeat", action_href="/transactions", action_label="See transactions") }}
+</div>
+{%- else %}
+
+<div class="grid grid--3">
+{{ ui.stat("Monthly cost", ui.money(o.monthly_total, cents=false), sub="About " ~ ui.money_text(o.yearly_total, cents=false) ~ " a year · " ~ (o.active|length|pluralize("active charge")), icon="repeat") }}
+{%- if o.next_up %}
+{%- set days = (o.next_up.next_expected - o.today).days %}
+{{ ui.stat("Next charge", ui.money(o.next_up.typical_amount), sub=o.next_up.merchant ~ " · " ~ ("today" if days == 0 else ("tomorrow" if days == 1 else (o.next_up.next_expected|date_short))), icon="calendar") }}
+{%- else %}
+{{ ui.stat("Next charge", "—", sub="Nothing expected", icon="calendar") }}
+{%- endif %}
+{{ ui.stat("Lapsed", o.lapsed|length, sub=("Not charged lately" if o.lapsed else "Every series is current"), icon="clock") }}
+</div>
+
+{% call ui.card("Active", subtitle="By next expected charge. Monthly cost spreads weekly and yearly charges over a month.", flush=true, id="active") %}
+{%- if o.active %}
+<div class="table-wrap">
+<table class="table rec-table">
+<thead><tr>
+<th scope="col" class="col-grow">Merchant</th>
+<th scope="col" class="col-optional-sm">How often</th>
+<th scope="col" class="num">Amount</th>
+<th scope="col" class="num col-optional-sm">Monthly</th>
+<th scope="col" class="col-optional-sm">Next expected</th>
+<th scope="col" class="col-optional-md">Category</th>
+<th scope="col" class="shrink"><span class="sr-only">Actions</span></th>
+</tr></thead>
+<tbody>
+{%- for s in o.active %}
+<tr>
+{{ merchant_cell(s, ("late since " ~ (s.next_expected|date_short)) if s.late else (("next " ~ (s.next_expected|date_short)) if s.next_expected else "no next date")) }}
+<td class="col-optional-sm">{{ s.cadence_label }}</td>
+{{ amount_cell(s) }}
+<td class="num col-optional-sm">{{ ui.money(s.monthly_cost, tone="neutral") }}</td>
+<td class="col-optional-sm">
+{%- if s.next_expected %}
+{%- set days = (s.next_expected - o.today).days %}
+<span class="table__primary">{{ s.next_expected|date_short }}</span>
+{%- if s.late %}<span class="table__secondary">{{ ui.badge("Late · " ~ ((-days)|pluralize("day")), tone="warn", icon="alert", title="Expected " ~ (s.next_expected|date_long) ~ "; not charged yet") }}</span>
+{%- else %}<span class="table__secondary">{{ "today" if days == 0 else ("tomorrow" if days == 1 else "in " ~ (days|pluralize("day"))) }}</span>{% endif %}
+{%- else %}<span class="muted">—</span>{% endif %}
+</td>
+<td class="col-optional-md">{{ ui.category_badge(s.category) }}</td>
+{{ actions(s, [reset, ignore] if s.is_confirmed else [keep, ignore]) }}
+</tr>
+{%- endfor %}
+</tbody>
+<tfoot><tr class="rec-total">
+<td class="col-grow">Total</td>
+<td class="col-optional-sm"></td>
+<td></td>
+<td class="num col-optional-sm">{{ ui.money(o.monthly_total, tone="neutral") }}</td>
+<td class="col-optional-sm"></td>
+<td class="col-optional-md"></td>
+<td></td>
+</tr></tfoot>
+</table>
+</div>
+{%- else %}
+{{ ui.empty_state("Nothing active right now", "Every series found has lapsed or is ignored.", icon="repeat", compact=true) }}
+{%- endif %}
+{% endcall %}
+
+{%- if o.lapsed %}
+{% call ui.card("Lapsed", subtitle="Not charged for more than one and a half times the usual interval: cancelled, or billed differently now.", flush=true, id="lapsed") %}
+<div class="table-wrap">
+<table class="table rec-table">
+<thead><tr>
+<th scope="col" class="col-grow">Merchant</th>
+<th scope="col" class="col-optional-sm">How often</th>
+<th scope="col" class="num">Amount</th>
+<th scope="col" class="col-optional-sm">Last charge</th>
+<th scope="col" class="col-optional-md">Category</th>
+<th scope="col" class="shrink"><span class="sr-only">Actions</span></th>
+</tr></thead>
+<tbody>
+{%- for s in o.lapsed %}
+<tr>
+{{ merchant_cell(s, "last " ~ (s.last_date|date_short)) }}
+<td class="col-optional-sm">{{ s.cadence_label }}</td>
+{{ amount_cell(s) }}
+<td class="col-optional-sm"><span class="table__primary">{{ s.last_date|date_long }}</span><span class="table__secondary">{{ ((o.today - s.last_date).days)|pluralize("day") }} ago</span></td>
+<td class="col-optional-md">{{ ui.category_badge(s.category) }}</td>
+{{ actions(s, [reset, ignore] if s.is_confirmed else [keep, ignore]) }}
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{% endcall %}
+{%- endif %}
+
+{%- if o.ignored %}
+{% call ui.card("Ignored", subtitle="Hidden from the lists and the monthly cost. Restore one to bring it back.", flush=true, id="ignored") %}
+<div class="table-wrap">
+<table class="table table--compact rec-table">
+<thead><tr>
+<th scope="col" class="col-grow">Merchant</th>
+<th scope="col" class="col-optional-sm">How often</th>
+<th scope="col" class="num">Amount</th>
+<th scope="col" class="shrink"><span class="sr-only">Actions</span></th>
+</tr></thead>
+<tbody>
+{%- for s in o.ignored %}
+<tr class="is-muted">
+{{ merchant_cell(s, s.count|pluralize("charge")) }}
+<td class="col-optional-sm">{{ s.cadence_label }}</td>
+{{ amount_cell(s) }}
+{{ actions(s, [("reset", "Restore", "refresh")]) }}
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{% endcall %}
+{%- endif %}
+{%- endif %}
+</div>

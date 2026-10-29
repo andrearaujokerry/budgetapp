@@ -1,0 +1,43 @@
+/* Recurring page (INS-3): only what the shared components don't cover. */
+
+/* The Keep / Ignore / Restore buttons share one small form per row. */
+.rec-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
+}
+
+/* "was $17.99" under a price that changed. */
+.rec-was {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Phones: the cadence moves into the merchant's second line, the table fits the screen and the
+   monthly total (also in the first tile) leaves the footer. */
+.rec-narrow {
+  display: none;
+}
+
+@media (max-width: 599.98px) {
+  .rec-narrow {
+    display: inline;
+  }
+
+  .rec-wide {
+    display: none;
+  }
+
+  .rec-table .table__secondary {
+    white-space: normal;
+  }
+
+  .table-wrap > .rec-table {
+    --grow-min: 6rem;
+    min-width: 0;
+  }
+
+  .rec-total {
+    display: none;
+  }
+}

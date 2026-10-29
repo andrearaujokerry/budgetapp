@@ -1,10 +1,11 @@
-{#- Placeholder from the web shell; the STMT package replaces this file. -#}
+{#- Recurring charges and subscriptions (INS-3). Context: overview (RecurringOverview).
+    The content is a partial (#recurring-content) that the Keep / Ignore / Restore buttons swap. -#}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
 {% block title %}Recurring{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/recurring.css">{% endblock %}
+
 {% block content %}
-{{ ui.page_header("Recurring", "Subscriptions and other repeating charges.") }}
-<div class="card">
-{{ ui.empty_state("Coming soon", "This page is being built.", icon="repeat") }}
-</div>
+{{ ui.page_header("Recurring", "Subscriptions and other repeating charges from the last 13 months, with what they cost a month.") }}
+{% include "recurring/_content.html" %}
 {% endblock %}
