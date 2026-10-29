@@ -410,6 +410,11 @@ class DeletedRule:
 
 
 def delete_rule(session: Session, rule_id: int) -> DeletedRule:
+    """Delete a rule; the rows it categorized keep their category (``rule_id`` becomes null).
+
+    Takes the ledger lock first: the foreign key's ``SET NULL`` writes those transactions.
+    """
+    ledger_lock(session)
     rule = get_rule(session, rule_id)
     row = get_row(session, rule.id)
     session.execute(delete(Rule).where(Rule.id == rule.id))

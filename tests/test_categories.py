@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import func, select, text
 
+from budgetapp.db import LEDGER_KEY, LOCK_NS_GLOBAL
 from budgetapp.models import (
     AlertEvent,
     Budget,
@@ -475,3 +476,14 @@ class TestMerge:
         result = categories.merge_categories(db, empty.id, get_category(db, "Home").id)
         assert result.counts.is_empty
         assert db.get(Category, empty.id) is None
+
+    def test_merge_takes_the_ledger_lock(self, db):
+        lock = text(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted"
+            " AND pid = pg_backend_pid() AND classid = :ns AND objid = :key AND objsubid = 2"
+        )
+        params = {"ns": LOCK_NS_GLOBAL, "key": LEDGER_KEY}
+        empty = make_category(db, "Empty")
+        assert not db.scalar(lock, params)
+        categories.merge_categories(db, empty.id, get_category(db, "Home").id)
+        assert db.scalar(lock, params) == 1

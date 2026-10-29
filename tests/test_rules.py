@@ -5,8 +5,9 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
+from budgetapp.db import LEDGER_KEY, LOCK_NS_GLOBAL
 from budgetapp.models import Rule, Transaction
 from budgetapp.services import categorize, rules
 from budgetapp.services.categorize import RuleValidationError
@@ -30,6 +31,15 @@ def draft(category, **kw):
 def state(db, txn):
     db.refresh(txn)
     return txn.category_id, txn.category_source, txn.rule_id
+
+
+def holds_ledger_lock(db) -> bool:
+    """This session's transaction holds ``db.ledger_lock`` (released only when it ends)."""
+    query = text(
+        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted"
+        " AND pid = pg_backend_pid() AND classid = :ns AND objid = :key AND objsubid = 2"
+    )
+    return bool(db.scalar(query, {"ns": LOCK_NS_GLOBAL, "key": LEDGER_KEY}))
 
 
 # --------------------------------------------------------------------------- summary & listing
@@ -338,6 +348,13 @@ class TestDeleteAndActive:
         with pytest.raises(RuleNotFound):
             rules.delete_rule(db, rule.id)
 
+    def test_delete_takes_the_ledger_lock(self, db, uber_world):
+        # The foreign key's SET NULL writes transactions (ARCHITECTURE §6, Locks).
+        rule = make_rule(db, uber_world.transportation, merchant_pattern="uber")
+        assert not holds_ledger_lock(db)
+        rules.delete_rule(db, rule.id)
+        assert holds_ledger_lock(db)
+
     def test_inactive_rules_do_not_categorize(self, db, uber_world):
         w = uber_world
         rule = make_rule(db, w.transportation, merchant_pattern="uber")
@@ -593,3 +610,8 @@ class TestReapply:
         result = rules.reapply(db, ReapplyScope(), dry_run=False)
         assert (result.examined, result.changed, result.skipped_user) == (0, 0, 0)
         assert db.scalar(select(func.count()).select_from(Transaction)) == 0
+
+    def test_takes_the_ledger_lock_even_for_a_dry_run(self, db, stale):
+        assert not holds_ledger_lock(db)
+        rules.reapply(db, ReapplyScope(), dry_run=True)
+        assert holds_ledger_lock(db)
