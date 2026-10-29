@@ -26,7 +26,7 @@ Printer = Callable[[str], None]
 
 GROUP_TITLES = {
     "new": "Will be added",
-    "suspect": "Will be added but held for review (inside Plaid's history, no matching Plaid charge)",
+    "suspect": "Will be added but held for review (in Plaid's history, no matching Plaid charge)",
     "matched": "Already synced from Plaid (merged, not added again)",
     "duplicate": "Already imported",
     "changed": "Imported before with a different date or amount (skipped)",
@@ -117,7 +117,7 @@ def import_file(
     notifier: Notifier | None = None,
     out: Printer = print,
 ) -> int:
-    """Preview (and unless ``dry_run``, import) ``data``; commits ``session``. Returns the exit code."""
+    """Preview (and unless ``dry_run``, import) ``data``, then commit; returns the exit code."""
     try:
         target = choose_account(session, account_id, production=production)
         preview = csv_import.preview(session, data, filename, target, production=production)
@@ -154,7 +154,8 @@ def import_file(
 
 
 def _row_line(row: csv_import.PreviewRow) -> str:
-    text = f"    row {row.row_number:>5}  {row.date.isoformat()}  {format_money(row.amount):>12}  {row.name}"
+    amount = format_money(row.amount)
+    text = f"    row {row.row_number:>5}  {row.date.isoformat()}  {amount:>12}  {row.name}"
     if row.plaid_name or row.plaid_date:
         text += f"  ↔ Plaid: {row.plaid_name or '?'} ({row.plaid_date})"
     if row.other_account:

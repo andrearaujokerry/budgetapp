@@ -15,9 +15,9 @@ row number and a reason.
 Mapping: ``Description`` → ``name``, ``Appears On Your Statement As`` → ``original_description``,
 ``Category`` → ``external_category`` (blank for payments), ``Card Member`` → ``account_owner``,
 the address fields and ``Extended Details`` → ``location``; ``source='csv'``, ``pending=false``,
-``posted_date`` from the Reference when plausible (``reconcile.reference_posting_date``), else the
-``Date``. ``Account #`` is never used: it differs per additional card member, and the whole file goes
-to one account the user chooses.
+``posted_date`` from the Reference when plausible (``reconcile.reference_posting_date``), else
+the ``Date``. ``Account #`` is never used: it differs per additional card member, and the whole
+file goes to one account the user chooses.
 
 Flow: :func:`preview` parses and classifies every row (new, held for review, matches a Plaid
 transaction, already imported, changed since an earlier import, error) without writing anything
@@ -44,7 +44,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from secrets import token_urlsafe
-from typing import Any, TypeVar
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -61,8 +61,6 @@ from budgetapp.services.notify import Notifier, NullNotifier
 from budgetapp.services.reconcile import CsvSide, ReconcileResult, reference_posting_date
 
 log = logging.getLogger(__name__)
-
-T = TypeVar("T")
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
 PREVIEW_TTL = dt.timedelta(minutes=30)
@@ -629,7 +627,7 @@ def clean_filename(filename: str | None) -> str:
     return name or "upload.csv"
 
 
-def _chunks(items: Sequence[T], size: int = _CHUNK) -> Iterator[Sequence[T]]:
+def _chunks[T](items: Sequence[T], size: int = _CHUNK) -> Iterator[Sequence[T]]:
     for start in range(0, len(items), size):
         yield items[start : start + size]
 
@@ -687,8 +685,8 @@ def preview(
     if len(file_bytes) > MAX_FILE_BYTES:
         raise ImportRefused(
             "too_large",
-            f"The file is larger than {MAX_FILE_BYTES // (1024 * 1024)} MB; an Amex download of two "
-            "years is usually under 2 MB. Check that you chose the CSV file.",
+            f"The file is larger than {MAX_FILE_BYTES // 2**20} MB; an Amex download of two years "
+            "is usually under 2 MB. Check that you chose the CSV file.",
         )
     account = _target(session, account_id, production=production)
     parsed = parse_file(file_bytes)
@@ -1139,7 +1137,7 @@ def import_record(session: Session, csv_import_id: int) -> ImportRecord | None:
 
 @dataclass(frozen=True, slots=True)
 class SuspectRow:
-    """An unpaired CSV row inside Plaid's history, held out of every total until the user decides."""
+    """An unpaired CSV row inside Plaid's history: out of every total until the user decides."""
 
     id: int
     account_label: str

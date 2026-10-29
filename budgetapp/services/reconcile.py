@@ -580,16 +580,25 @@ def _move_statements(session: Session, manual: Account, target: Account) -> tupl
 def _merge_statement(source: Statement, into: Statement, existing: Sequence[Statement]) -> None:
     """Merge ``source`` (a manual account's statement) into ``into`` (the linked account's)."""
     others = [s for s in existing if s is not into]
-    if source.closing_date_source == "user" and into.closing_date_source != "user":
-        if not any(s.closing_date == source.closing_date for s in others):
-            into.closing_date = source.closing_date
-            into.closing_date_source = "user"
-    if into.plaid_issue_date is None and source.plaid_issue_date is not None:
-        if not any(s.plaid_issue_date == source.plaid_issue_date for s in others):
-            into.plaid_issue_date = source.plaid_issue_date
-    if into.period_start_override is None and source.period_start_override is not None:
-        if source.period_start_override <= into.closing_date:
-            into.period_start_override = source.period_start_override
+    if (
+        source.closing_date_source == "user"
+        and into.closing_date_source != "user"
+        and not any(s.closing_date == source.closing_date for s in others)
+    ):
+        into.closing_date = source.closing_date
+        into.closing_date_source = "user"
+    if (
+        into.plaid_issue_date is None
+        and source.plaid_issue_date is not None
+        and not any(s.plaid_issue_date == source.plaid_issue_date for s in others)
+    ):
+        into.plaid_issue_date = source.plaid_issue_date
+    if (
+        into.period_start_override is None
+        and source.period_start_override is not None
+        and source.period_start_override <= into.closing_date
+    ):
+        into.period_start_override = source.period_start_override
     if source.reported_new_balance is not None and (
         into.reported_new_balance is None
         or (
