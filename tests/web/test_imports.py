@@ -108,6 +108,18 @@ def test_upload_preview_import(client, db):
     assert_clean(page)
 
 
+def test_a_double_clicked_import_imports_once(client, db):
+    token = preview_token(upload(client, fixture("activity_2025-08.csv"), filename="aug.csv"))
+    first = client.post("/import/commit", data={"token": token}, follow_redirects=False)
+    second = client.post("/import/commit", data={"token": token}, follow_redirects=False)
+    assert first.status_code == second.status_code == 303
+    record = db.scalars(select(CsvImport)).one()
+    assert second.headers["location"] == first.headers["location"] == f"/import?done={record.id}"
+    page = client.get(second.headers["location"])
+    assert toasts(page.text) == ["Imported aug.csv: 15 added."]  # not "0 added, 15 already…"
+    assert db.scalar(select(func.count()).select_from(Transaction)) == 15
+
+
 def test_a_preview_with_errors_and_duplicates(client, db):
     token = preview_token(upload(client, fixture("activity_malformed.csv")))
     client.post("/import/commit", data={"token": token})

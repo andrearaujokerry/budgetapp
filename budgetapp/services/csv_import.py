@@ -26,8 +26,9 @@ never written to disk). :func:`commit` inserts the new rows (``ON CONFLICT (csv_
 NOTHING``, so a re-import or an overlapping file adds nothing twice), categorizes them (rules,
 then the Amex category mapping), records ``csv_imports``, runs ``reconcile.reconcile_item`` (rows
 that pair with a Plaid transaction are merged into it: never stored twice) and calls
-``alerts.evaluate_after_import``. Every writing function takes ``db.ledger_lock`` first and never
-commits; the caller commits. Raw file contents never go to the logs.
+``alerts.evaluate_after_import``; a preview is imported once (committing it again answers with
+that import). Every writing function takes ``db.ledger_lock`` first and never commits; the caller
+commits. Raw file contents never go to the logs.
 """
 
 from __future__ import annotations
@@ -573,6 +574,9 @@ class ImportPreview:
 class _Stored:
     preview: ImportPreview
     rows: tuple[ParsedRow, ...]
+    #: the ``csv_imports`` row this preview was imported as (kept so a repeated commit, e.g. a
+    #: double-clicked Import button, answers with that import instead of importing again)
+    import_id: int | None = None
 
 
 _PREVIEWS: dict[str, _Stored] = {}
@@ -607,9 +611,10 @@ def _stored(token: str | None) -> _Stored | None:
 
 
 def get_preview(token: str | None) -> ImportPreview | None:
-    """The preview stored under ``token``, or ``None`` when unknown or expired (30 minutes)."""
+    """The preview stored under ``token``, or ``None`` when unknown, expired (30 minutes) or
+    already imported."""
     stored = _stored(token)
-    return stored.preview if stored is not None else None
+    return stored.preview if stored is not None and stored.import_id is None else None
 
 
 def discard_preview(token: str | None) -> bool:
@@ -939,6 +944,22 @@ def _manual_account(session: Session) -> Account:
     return account
 
 
+def _outcome(row: CsvImport, *, inserted_ids: tuple[int, ...] = ()) -> ImportOutcome:
+    return ImportOutcome(
+        account_id=row.account_id,
+        filename=row.filename,
+        csv_import_id=row.id,
+        row_count=row.row_count,
+        inserted_count=row.inserted_count,
+        duplicate_count=row.duplicate_count,
+        matched_plaid_count=row.matched_plaid_count,
+        error_count=row.error_count,
+        inserted_transaction_ids=inserted_ids,
+        date_min=row.date_min,
+        date_max=row.date_max,
+    )
+
+
 def commit(
     session: Session,
     preview_token: str,
@@ -953,15 +974,27 @@ def commit(
     mapping), records ``csv_imports``, reconciles with Plaid (rows that pair are merged into the
     Plaid transaction and count as ``matched_plaid_count``, not as inserted) and calls
     ``alerts.evaluate_after_import``. Raises :class:`ImportRefused` (``expired``, ``account``).
+
+    A preview is imported once. Committing it again (a double-clicked Import button sends two
+    requests) waits for the first import on the ledger lock and then returns that import's
+    outcome without importing anything or evaluating alerts again; only when the first attempt
+    was rolled back does it import.
     """
+    expired = ImportRefused(
+        "expired",
+        "That preview has expired (previews last 30 minutes) or was already imported. Upload "
+        "the file again.",
+    )
+    if _stored(preview_token) is None:
+        raise expired
+    ledger_lock(session)  # first, and it serializes two commits of the same preview
     stored = _stored(preview_token)
     if stored is None:
-        raise ImportRefused(
-            "expired",
-            "That preview has expired (previews last 30 minutes) or was already imported. Upload "
-            "the file again.",
-        )
-    ledger_lock(session)
+        raise expired
+    if stored.import_id is not None:
+        earlier = session.get(CsvImport, stored.import_id)
+        if earlier is not None:
+            return _outcome(earlier)
     preview_ = stored.preview
     account = _target(session, preview_.account_id, production=production)
     if account is None:
@@ -994,21 +1027,10 @@ def commit(
     csv_import.duplicate_count = len(stored.rows) - len(inserted)
     session.flush()
 
-    outcome = ImportOutcome(
-        account_id=account.id,
-        filename=csv_import.filename,
-        csv_import_id=csv_import.id,
-        row_count=csv_import.row_count,
-        inserted_count=csv_import.inserted_count,
-        duplicate_count=csv_import.duplicate_count,
-        matched_plaid_count=csv_import.matched_plaid_count,
-        error_count=csv_import.error_count,
-        inserted_transaction_ids=tuple(kept),
-        date_min=csv_import.date_min,
-        date_max=csv_import.date_max,
-    )
+    outcome = _outcome(csv_import, inserted_ids=tuple(kept))
     alerts.evaluate_after_import(session, notifier or NullNotifier(), outcome)
-    discard_preview(preview_token)
+    with _LOCK:
+        stored.import_id = csv_import.id
     log.info(
         "CSV import %d: %d added, %d matched Plaid, %d duplicates, %d errors",
         csv_import.id,

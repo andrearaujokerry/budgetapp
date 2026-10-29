@@ -634,11 +634,31 @@ class TestPreviewAndCommit:
             csv_import.commit(db, preview.token)
         assert info.value.kind == "expired"
 
-    def test_a_preview_is_imported_once(self, db):
+    def test_a_preview_is_imported_once(self, db, monkeypatch):
         preview = csv_import.preview(db, fixture("activity_cp1252.csv"), "c.csv", None)
+        first = csv_import.commit(db, preview.token)
+        assert csv_import.get_preview(preview.token) is None  # the page shows it as gone
+        evaluated = []
+        monkeypatch.setattr(
+            alerts, "evaluate_after_import", lambda *args: evaluated.append(args) or []
+        )
+        # a double-clicked Import button: the second request answers with the first import
+        again = csv_import.commit(db, preview.token)
+        assert again.csv_import_id == first.csv_import_id
+        assert (again.inserted_count, again.duplicate_count) == (2, 0)
+        assert db.scalar(select(func.count()).select_from(CsvImport)) == 1
+        assert len(csv_rows(db)) == 2
+        assert evaluated == []
+
+    def test_a_preview_whose_import_was_rolled_back_imports_again(self, db):
+        preview = csv_import.preview(db, fixture("activity_cp1252.csv"), "c.csv", None)
+        savepoint = db.begin_nested()
         csv_import.commit(db, preview.token)
-        with pytest.raises(ImportRefused):
-            csv_import.commit(db, preview.token)
+        savepoint.rollback()  # e.g. the request's commit failed
+        assert csv_rows(db) == []
+        outcome = csv_import.commit(db, preview.token)
+        assert outcome.inserted_count == 2
+        assert db.scalar(select(func.count()).select_from(CsvImport)) == 1
 
     def test_only_a_few_previews_are_kept(self, db):
         tokens = [
