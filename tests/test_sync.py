@@ -792,6 +792,42 @@ def test_account_churn_keeps_the_account_and_carries_edits(linked, fake_plaid, d
     assert (out.added, out.removed) == (1, 1)
 
 
+def test_an_account_re_issued_without_new_transactions_is_kept_by_accounts_get(
+    linked, fake_plaid, db
+):
+    txn = fake_plaid.add_transaction(linked.fake_item, amount="70.00", merchant_name="REI")
+    linked.sync()
+    account_id = linked.account().id
+    edit(db, linked.row(txn["transaction_id"]), notes="Tent")
+    old_pid = linked.account_pid
+    new_pid = fake_plaid.churn_account(linked.fake_item, old_pid, redeliver=False)
+    quiet = linked.sync()  # no transactions: only /accounts/get shows the new account id
+    assert (quiet.added, quiet.removed) == (0, 0)
+    accounts = list(db.scalars(select(Account)))
+    assert [a.id for a in accounts] == [account_id]
+    assert accounts[0].plaid_account_id == new_pid and "re-issued" in accounts[0].notice
+    # Plaid re-delivers the history under the new account later: the edits follow the charge.
+    fake_plaid.remove_transaction(linked.fake_item, txn["transaction_id"])
+    fake_plaid.add_transaction(
+        linked.fake_item,
+        transaction_id="rei-again",
+        account_id=new_pid,
+        amount="70.00",
+        merchant_name="REI",
+        name=txn["name"],
+        date=txn["date"],
+        authorized_date=txn["authorized_date"],
+    )
+    later = linked.sync()
+    assert (later.added, later.removed) == (1, 1)
+    (row,) = linked.rows()
+    assert (row.plaid_transaction_id, row.account_id, row.notes) == (
+        "rei-again",
+        account_id,
+        "Tent",
+    )
+
+
 # --------------------------------------------------------------------------- consent (SYNC-6)
 
 

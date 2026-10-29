@@ -123,7 +123,10 @@ def test_production_shows_the_checklist_and_confirms_the_one_time_link(prod_clie
     assert 'hx-get="/connection/preflight" hx-trigger="load"' in html
     assert 'data-dialog-open="confirm-link"' in html  # the page's button opens the dialog …
     dialog = html[html.index('<dialog id="confirm-link"') :]
-    assert "This uses 1 of your 10 Plaid connections, permanently." in text(dialog)
+    assert (
+        "This uses 1 of your 10 Plaid connections, permanently. Make sure the checklist is done"
+        in text(dialog)
+    )
     # … whose Link button stays disabled until every box is ticked (static/js/link.js)
     assert re.search(r'data-link-mode="new" data-needs-checklist disabled', dialog)
     assert "/connection/sandbox-item" not in html

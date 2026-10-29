@@ -516,16 +516,10 @@ class _Applier:
                 ).one_or_none()
             )
             if account is None:
-                account = self._churned_account(known, seen, data)
+                account = churned_account(known, seen, data)
                 if account is not None:
-                    old = account.plaid_account_id
-                    account.plaid_account_id = pid
-                    account.notice = (
-                        f"Plaid re-issued this card's account on {self.now:%b %-d, %Y} "
-                        "(American Express can do this after a card replacement). Its history "
-                        "was matched to this card; check that nothing is missing or doubled."
-                    )
-                    known.pop(old, None)
+                    known.pop(account.plaid_account_id, None)
+                    reissue_account(account, pid, self.now)
                     log.warning("Account churn on Item %s: an account was re-issued", self.item.id)
                 else:
                     account = Account(item_id=self.item.id, plaid_account_id=pid)
@@ -540,23 +534,6 @@ class _Applier:
                 known[pid] = account
         self.s.flush()
         self.accounts = known
-
-    def _churned_account(
-        self, known: dict[str, Account], seen: set[str], data: Mapping[str, Any]
-    ) -> Account | None:
-        """The existing account a new account id re-issues (same type, subtype and mask)."""
-        mask = _text(data.get("mask"))
-        if mask is None:
-            return None
-        matches = [
-            a
-            for pid, a in known.items()
-            if pid not in seen
-            and a.mask == mask
-            and a.type == _text(data.get("type"))
-            and a.subtype == _text(data.get("subtype"))
-        ]
-        return matches[0] if len(matches) == 1 else None
 
     # ---------------------------------------------------------------- preload
 
@@ -791,6 +768,36 @@ class _Applier:
         return completed_now
 
 
+def churned_account(
+    known: Mapping[str, Account], listed: set[str], data: Mapping[str, Any]
+) -> Account | None:
+    """The existing account that a new Plaid account id re-issues (ARCHITECTURE §6 step 2): the
+    one account of the Item with the same type, subtype and mask whose own id Plaid no longer
+    lists in ``listed``. ``None`` when there is no such account or more than one."""
+    mask = _text(data.get("mask"))
+    if mask is None:
+        return None
+    matches = [
+        a
+        for pid, a in known.items()
+        if pid not in listed
+        and a.mask == mask
+        and a.type == _text(data.get("type"))
+        and a.subtype == _text(data.get("subtype"))
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def reissue_account(account: Account, new_id: str, now: dt.datetime) -> None:
+    """Point ``account`` at the id Plaid re-issued it under, and tell the user (``notice``)."""
+    account.plaid_account_id = new_id
+    account.notice = (
+        f"Plaid re-issued this card's account on {now.astimezone():%b %-d, %Y} (American "
+        "Express can do this after a card replacement). Its history was matched to this card; "
+        "check that nothing is missing or doubled."
+    )
+
+
 def update_account(account: Account, data: Mapping[str, Any], now: dt.datetime) -> bool:
     """Copy an AccountBase (``/accounts/get`` or a sync page) onto ``account``; True if changed."""
     changed = False
@@ -973,20 +980,30 @@ def refresh_accounts(
         _side_error(session_factory, item_id, err, "/accounts/get")
         return False
     now = clock.now()
+    entries = list(body.get("accounts") or ())
+    listed = {data["account_id"] for data in entries}
     with db.transaction(session_factory) as s:
         known = {
             a.plaid_account_id: a
             for a in s.scalars(select(Account).where(Account.item_id == item_id))
         }
-        for data in body.get("accounts") or ():
-            account = known.get(data["account_id"])
+        for data in entries:
+            pid = data["account_id"]
+            account = known.get(pid)
             if account is None:
                 account = s.scalars(
-                    select(Account).where(Account.plaid_account_id == data["account_id"])
+                    select(Account).where(Account.plaid_account_id == pid)
                 ).one_or_none()
             if account is None:
-                account = Account(item_id=item_id, plaid_account_id=data["account_id"])
+                account = churned_account(known, listed, data)
+                if account is not None:  # re-issued with no new transactions to show it
+                    known.pop(account.plaid_account_id, None)
+                    reissue_account(account, pid, now)
+                    log.warning("Account churn on Item %s: an account was re-issued", item_id)
+            if account is None:
+                account = Account(item_id=item_id, plaid_account_id=pid)
                 s.add(account)
+            known[pid] = account
             update_account(account, data, now)
     return True
 

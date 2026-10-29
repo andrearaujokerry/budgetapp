@@ -69,7 +69,7 @@
 {%- if o.production %}
 {% call ui.dialog("confirm-link", "Link American Express?", size="sm") %}
 <div class="stack">
-<p><strong>This uses 1 of your 10 Plaid connections, permanently.</strong> Tick each item once it is done in Plaid's Dashboard. If Plaid stops the link because one is missing, no connection is used, but you start over.</p>
+<p><strong>This uses 1 of your 10 Plaid connections, permanently.</strong> Make sure the checklist is done: tick each item once it is set in Plaid's Dashboard.</p>
 <fieldset class="stack stack--sm link-confirm" data-link-checklist>
 <legend class="sr-only">Checklist</legend>
 {%- for c in checklist %}

@@ -77,6 +77,13 @@ KEYCHAIN_MESSAGE = (
 KEYS_UNREADABLE = "The Plaid keys couldn't be read from Keychain. Check them with ./run doctor."
 NOT_STARTED = "The app is stopping, so the sync didn't start. Try again in a moment."
 
+#: The Sandbox test users offered for "Create a test Item without Link" (linking.SANDBOX_USERS).
+SANDBOX_USER_OPTIONS = [
+    ("custom", "Amex-like card, known totals"),
+    ("user_transactions_dynamic", "Dynamic: pending charges post"),
+    ("user_good", "Plaid's standard test user"),
+]
+
 # Polling of the live region: fast while a sync runs, slower while a follow-up waits.
 POLL_SYNCING = "every 4s"
 POLL_WAITING = "every 10s"
@@ -257,13 +264,6 @@ def page_context(
         "now": clock.now(),
         "today": clock.today(),
     }
-
-
-SANDBOX_USER_OPTIONS = [
-    ("custom", "Amex-like card, known totals"),
-    ("user_transactions_dynamic", "Dynamic: pending charges post"),
-    ("user_good", "Plaid's standard test user"),
-]
 
 
 # --------------------------------------------------------------------------- the page
