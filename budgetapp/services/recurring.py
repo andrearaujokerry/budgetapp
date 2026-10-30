@@ -336,6 +336,28 @@ def search_text(merchant_name: str | None, name: str) -> str:
     return head or name.strip()
 
 
+def _found_by(text: str, charge: Charge) -> bool:
+    """Would the Transactions page's search for ``text`` list ``charge``? It does when every word
+    is in the charge's description, merchant or statement descriptor, ignoring case."""
+    fields = [f.casefold() for f in (charge.name, charge.merchant_name, charge.descriptor) if f]
+    return all(any(word in f for f in fields) for word in text.casefold().split())
+
+
+def _series_search_text(charges: Sequence[Charge]) -> str:
+    """:func:`search_text` for a series, found in every one of its charges: the last charge's
+    merchant, else (a series joined across the CSV and Plaid eras, whose names differ) its
+    statement descriptor's head, else the first charge's merchant or description."""
+    last, first = charges[-1], charges[0]
+    options = [search_text(last.merchant_name, last.name)]
+    if last.descriptor:
+        options.append(search_text(None, last.descriptor))
+    options.append(search_text(first.merchant_name, first.name))
+    for text in options:
+        if all(_found_by(text, charge) for charge in charges):
+            return text
+    return options[0]
+
+
 def _first_word(text: str | None) -> str | None:
     """The first word of a merchant's name or description, cleaned like a key."""
     if not text or not text.strip():
@@ -876,7 +898,7 @@ def _series(
     return RecurringSeries(
         key=candidate.keys[0],
         merchant=(last.merchant_name or last.name).strip(),
-        search_text=search_text(last.merchant_name, last.name),
+        search_text=_series_search_text(charges),
         cadence=cadence.key if cadence else None,
         cadence_label=cadence.label if cadence else "Irregular",
         interval_days=interval,

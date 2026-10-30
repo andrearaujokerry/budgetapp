@@ -13,6 +13,7 @@ from sqlalchemy import insert, select
 from budgetapp import periods
 from budgetapp.models import RecurringOverride, Transaction
 from budgetapp.services import recurring as rec
+from budgetapp.services import transactions as txns
 from tests.factories import (
     card_payments,
     get_category,
@@ -537,6 +538,10 @@ class TestYearly:
             "ent-dmv",
             rec.merchant_key(name="CA DMV REGISTRATION       SACRAMENTO CA"),
         )
+        # The Transactions search the page links to finds both eras' charges.
+        assert s.search_text == descriptor
+        listed = txns.search(db, txns.TransactionFilter.from_params({"q": s.search_text}))
+        assert listed.total_count == 2
 
     def test_a_place_visited_in_both_eras_is_not_yearly(self, db, today, card):
         descriptor = "SFMOMA SAN FRANCISCO CA"

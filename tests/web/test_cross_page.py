@@ -1,5 +1,5 @@
 """Links between pages land on views that agree with the page they came from (integration of the
-Budgets, Transactions and Statements packages)."""
+Budgets, Recurring, Transactions and Statements packages)."""
 
 from __future__ import annotations
 
@@ -90,3 +90,35 @@ def test_a_spent_link_lists_exactly_what_the_budget_counts(
         by_posting_date
     )
     assert csp_problems(listed.text, rendered=True) == []
+
+
+def test_a_recurring_series_links_to_all_of_its_charges(client, db):
+    """A yearly renewal joined across the CSV era (the Amex description) and the Plaid era (the
+    merchant's name): the Recurring page's link must list both charges, not only the last."""
+    card = make_account(db)
+    descriptor = "CA DMV REGISTRATION SACRAMENTO CA"
+    make_transaction(
+        db,
+        card,
+        amount="198.00",
+        date="2025-04-17",
+        source="csv",
+        name="CA DMV REGISTRATION       SACRAMENTO CA",
+        original_description=descriptor,
+    )
+    make_transaction(
+        db,
+        card,
+        amount="212.00",
+        date="2026-04-17",
+        name="CA DMV REGISTRATION",
+        merchant_name="California DMV",
+        merchant_entity_id="ent-dmv",
+        original_description=descriptor,
+    )
+    page = client.get("/recurring").text
+    match = re.search(r'<a class="table__primary" href="([^"]+)">California DMV</a>', page)
+    assert match is not None
+    assert "2 charges since Apr 2025" in page
+    listed = client.get(html.unescape(match.group(1))).context["page"]
+    assert sorted(row.amount for row in listed.rows) == [Decimal("198.00"), Decimal("212.00")]
