@@ -125,7 +125,7 @@ def five_years_of_transactions(db: Session) -> dict[str, Any]:
                     ),
                     "tags": ["work"] if n % 15 == 0 else (["travel", "nyc"] if n % 40 == 0 else []),
                     "notes": "Dinner with Sam" if n % 50 == 0 else None,
-                    "account_owner": "SAM RIVERA" if n % 3 == 0 else "ALEX KERRY",
+                    "account_owner": "SAM RIVERA" if n % 3 == 0 else "ALEX MORGAN",
                 }
             )
         day += dt.timedelta(days=1)
