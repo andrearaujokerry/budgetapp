@@ -80,8 +80,8 @@ def transactions_url(
     ``basis`` and ``include_pending`` are the budget's (``PeriodSpending.basis`` /
     ``.include_pending``), so the list holds what the figure counts: ``status=posted`` when
     pending charges don't count, and ``basis=posted_date`` when the budget counts posting
-    dates (statement mode). The Transactions page dates rows by spend date unless it honours
-    ``basis``.
+    dates (statement mode; the Transactions page then applies the range to
+    ``COALESCE(posted_date, date)``, like ``spending.basis_date``).
     """
     params = [] if category_id is None else [f"category={category_id}"]
     params += [f"from={start.isoformat()}", f"to={end.isoformat()}"]

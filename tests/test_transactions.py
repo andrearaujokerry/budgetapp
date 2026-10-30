@@ -342,9 +342,47 @@ class TestEachFilter:
             csv.reader(io.StringIO("".join(txns.export_csv(db, filt, today=TODAY))[1:]))
         )
         assert sorted(r[3] for r in exported[1:]) == ["pending", "posted after closing"]
-        # Only the budget period switches basis: a custom range still means the dates shown.
+        # A custom range means the dates shown, unless the link asks for posting dates.
         custom = F(range="custom", category=str(groceries.id), **{"from": "2026-10-15"})
         assert names(run(db, custom)) == ["pending"]
+
+    def test_a_custom_range_by_posting_date(self, db, card, cats):
+        """The Budgets page's statement-mode Spent links ask for ``basis=posted_date``: the
+        range then applies to ``COALESCE(posted_date, date)``, as ``period_spending`` counts."""
+        groceries = cats["groceries"]
+        for name, date, authorized in (
+            ("charged before, posted inside", "2026-09-29", "2026-09-26"),
+            ("charged inside, posted after", "2026-10-28", "2026-10-26"),
+        ):
+            make_transaction(
+                db, card, name=name, date=date, authorized_date=authorized, category=groceries
+            )
+        make_transaction(db, card, name="pending", date="2026-10-19", pending=True)
+        params = f"category={groceries.id}&from=2026-09-28&to=2026-10-27&basis=posted_date"
+        filt = TransactionFilter.from_params(QueryParams(params))
+        assert filt.basis == spending.BASIS_POSTED_DATE
+        assert TransactionFilter.from_params(filt.to_params()) == filt
+        assert ("basis", "posted_date") in filt.to_params()
+        page = run(db, filt)
+        assert names(page) == ["charged before, posted inside"]
+        assert page.dates.label == "Sep 28 – Oct 27, 2026, by posting date"
+        everything = run(db, filt.replace(categories=()))
+        assert sorted(names(everything)) == ["charged before, posted inside", "pending"]
+        by_spend_date = run(db, filt.replace(basis=spending.BASIS_SPEND_DATE))
+        assert names(by_spend_date) == ["charged inside, posted after"]
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "range=last_month&basis=posted_date",  # presets keep their own basis
+            "range=custom&basis=posted_date",  # no dates, nothing to apply it to
+            "from=2026-09-28&basis=authorized",  # unknown basis
+        ],
+    )
+    def test_the_posting_date_basis_needs_a_custom_range(self, query):
+        filt = TransactionFilter.from_params(QueryParams(query))
+        assert filt.basis == spending.BASIS_SPEND_DATE
+        assert "basis" not in dict(filt.to_params())
 
     def test_categories_including_uncategorized(self, db, card, cats):
         make_transaction(db, card, name="G", category=cats["groceries"])

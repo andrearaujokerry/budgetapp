@@ -200,16 +200,20 @@ class TransactionFilter:
     """What the list shows: every field is optional; the defaults show everything counted.
 
     Query parameters: ``q``, ``range`` (``all``, ``period``, ``last_month``, ``90d``, ``year``,
-    ``custom``), ``from``/``to`` (ISO dates, ``custom`` only), ``category`` (repeatable: an id or
-    ``uncategorized``), ``merchant``, ``min``/``max`` (the signed amount as shown: charges
-    positive, credits negative), ``status`` (``pending``/``posted``), ``account``, ``tag``,
-    ``member`` (card member), ``credits`` (``1``) and ``show`` (``review``/``duplicates``).
+    ``custom``), ``from``/``to`` (ISO dates, ``custom`` only), ``basis`` (``posted_date``: a
+    ``custom`` range by posting date, as the Budgets page's statement-mode links ask; otherwise
+    ranges cover spend dates), ``category`` (repeatable: an id or ``uncategorized``),
+    ``merchant``, ``min``/``max`` (the signed amount as shown: charges positive, credits
+    negative), ``status`` (``pending``/``posted``), ``account``, ``tag``, ``member`` (card
+    member), ``credits`` (``1``) and ``show`` (``review``/``duplicates``).
     """
 
     q: str = ""
     range: str = "all"
     date_from: dt.date | None = None
     date_to: dt.date | None = None
+    #: The date a ``custom`` range applies to (``spending.BASIS_*``).
+    basis: str = spending.BASIS_SPEND_DATE
     categories: tuple[str, ...] = ()
     merchant: str = ""
     amount_min: Decimal | None = None
@@ -239,6 +243,9 @@ class TransactionFilter:
             date_from = date_to = None
         elif date_from and date_to and date_from > date_to:
             date_from, date_to = date_to, date_from
+        basis = _get(params, "basis").lower()
+        if basis not in spending.BASES or not (date_from or date_to):
+            basis = spending.BASIS_SPEND_DATE
 
         tokens: list[str] = []
         for raw in _getlist(params, "category"):
@@ -279,6 +286,7 @@ class TransactionFilter:
             range=preset,
             date_from=date_from,
             date_to=date_to,
+            basis=basis,
             categories=tuple(tokens),
             merchant=" ".join(_get(params, "merchant").split())[:200],
             amount_min=amount_min,
@@ -304,6 +312,8 @@ class TransactionFilter:
                 out.append(("from", self.date_from.isoformat()))
             if self.date_to:
                 out.append(("to", self.date_to.isoformat()))
+            if self.basis != spending.BASIS_SPEND_DATE:
+                out.append(("basis", self.basis))
         out.extend(("category", token) for token in self.categories)
         if self.merchant:
             out.append(("merchant", self.merchant))
@@ -569,7 +579,8 @@ def resolve_dates(
 
     Every preset covers spend dates, except the budget period (``period``): it uses the date
     basis of ``spending.period_spending`` (the posting date in statement mode), so the list shows
-    exactly the rows Budgets count in that period.
+    exactly the rows Budgets count in that period. A ``custom`` range uses the filter's
+    ``basis`` (the Budgets page's links in statement mode ask for posting dates).
     """
     today = today or clock.today()
     preset = filt.range
@@ -592,7 +603,10 @@ def resolve_dates(
         year_period = periods.year_of(today)
         return DateRange(year_period.start, year_period.end, f"This year ({today.year})")
     if preset == "custom":
-        return DateRange(filt.date_from, filt.date_to, _span_label(filt.date_from, filt.date_to))
+        label = _span_label(filt.date_from, filt.date_to)
+        if filt.basis == spending.BASIS_POSTED_DATE:
+            label += ", by posting date"
+        return DateRange(filt.date_from, filt.date_to, label, filt.basis)
     return DateRange(None, None, "All dates")
 
 

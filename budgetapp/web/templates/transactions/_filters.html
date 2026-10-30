@@ -54,6 +54,9 @@
 {%- if filt.show != 'all' %}
 <input type="hidden" name="show" value="{{ filt.show }}">
 {%- endif %}
+{%- if filt.basis != 'spend_date' %}
+<input type="hidden" name="basis" value="{{ filt.basis }}">
+{%- endif %}
 
 <div class="filter-bar__actions">
 <a class="btn btn--ghost btn--sm" href="/transactions">Reset</a>
