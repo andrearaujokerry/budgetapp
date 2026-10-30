@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy import func, select, text
 
 from budgetapp import db as app_db
+from budgetapp import periods
 from budgetapp import secrets as app_secrets
 from budgetapp.models import (
     Account,
@@ -25,7 +26,14 @@ from budgetapp.models import (
     Transaction,
     TransactionTombstone,
 )
-from budgetapp.services import alerts, reconcile, sync, userstate
+from budgetapp.services import (
+    alerts,
+    csv_import,
+    reconcile,
+    spending,
+    sync,
+    userstate,
+)
 from budgetapp.services.events import SyncOutcome
 from tests.factories import (
     card_payments,
@@ -37,6 +45,7 @@ from tests.factories import (
     make_statement,
     make_sync_run,
     make_tombstone,
+    make_transaction,
     plaid_credit_liability,
     plaid_txn,
 )
@@ -1163,6 +1172,137 @@ def test_the_alerts_hook_gets_the_outcome(linked, fake_plaid, alert_calls):
     assert alert_calls == [out]
     assert out.inserted_transaction_ids == (linked.row(txn["transaction_id"]).id,)
     assert (out.trigger, out.item_status, out.initial_history_load) == ("schedule", "healthy", True)
+
+
+# ---------------------------------------------------- CSV reconciliation, end to end (SYNC-8)
+# The real reconcile module inside the apply transaction (ARCHITECTURE §6): CSV rows pair with the
+# Plaid rows a sync inserts, the sync that completes Plaid's history holds the CSV rows Plaid
+# doesn't have, and a pending charge that posts pairs with the CSV row held while it was pending.
+
+
+def amex_reference(posted: str, n: int) -> str:
+    """An Amex Reference that embeds the posting date ``posted`` (YYYYDDD, RESEARCH T4.3b)."""
+    day = dt.date.fromisoformat(posted)
+    return f"3{day.year}{day.timetuple().tm_yday:03d}{n:010d}"
+
+
+def csv_row(db, account, n: int, *, amount: str, date: str, posted: str, name: str, **kwargs):
+    """An imported Amex CSV row on the card, as ``csv_import`` stores it."""
+    return make_transaction(
+        db,
+        account,
+        source="csv",
+        amount=amount,
+        date=date,
+        posted_date=posted,
+        name=name,
+        original_description=name,
+        csv_reference=amex_reference(posted, n),
+        **kwargs,
+    )
+
+
+def test_the_sync_that_completes_the_history_holds_the_unpaired_csv_rows(linked, fake_plaid, db):
+    account = make_account_for(linked)
+    rows = {
+        "twin": csv_row(
+            db, account, 1, amount="25.00", date="2026-10-09", posted="2026-10-10", name="TARTINE"
+        ),
+        "missing": csv_row(
+            db, account, 2, amount="40.00", date="2026-09-20", posted="2026-09-21", name="KIOSK"
+        ),
+        "older": csv_row(
+            db, account, 3, amount="15.00", date="2024-09-01", posted="2024-09-02", name="CAFE"
+        ),
+    }
+    ids = {key: row.id for key, row in rows.items()}
+    september = periods.month_period(2026, 9)
+    fake_plaid.set_update_status(linked.fake_item, "INITIAL_UPDATE_COMPLETE")
+    plaid = fake_plaid.add_transaction(
+        linked.fake_item,
+        amount="25.00",
+        date="2026-10-10",
+        authorized_date="2026-10-09",
+        name="TARTINE BAKERY",
+        merchant_name="Tartine Bakery",
+    )
+    first = linked.sync()
+    assert first.added == 1 and not first.history_completed_now
+    assert db.get(Transaction, ids["twin"]) is None  # paired by the sync that inserted its twin
+    assert linked.row(plaid["transaction_id"]).csv_reference == amex_reference("2026-10-10", 1)
+    assert db.get(Transaction, ids["missing"]).duplicate_status == "none"  # history incomplete
+    assert spending.period_spending(db, september).total == Decimal("40.00")
+
+    fake_plaid.add_transaction(linked.fake_item, amount="7.00", date="2024-11-02")
+    fake_plaid.set_update_status(linked.fake_item, "HISTORICAL_UPDATE_COMPLETE")
+    second = linked.sync()
+    assert second.history_completed_now
+    assert linked.account().plaid_history_start == dt.date(2024, 11, 2)
+    # held by this same sync: out of every total at once, listed on /import
+    assert db.get(Transaction, ids["missing"]).duplicate_status == "suspect"
+    assert db.get(Transaction, ids["older"]).duplicate_status == "none"  # before Plaid's history
+    assert spending.period_spending(db, september).total == Decimal("0.00")
+    assert [(s.id, s.pending) for s in csv_import.list_suspects(db)] == [(ids["missing"], False)]
+
+
+def test_completing_the_history_without_new_rows_still_holds_them(linked, fake_plaid, db):
+    account = make_account_for(linked)
+    fake_plaid.set_update_status(linked.fake_item, "INITIAL_UPDATE_COMPLETE")
+    fake_plaid.add_transaction(linked.fake_item, amount="5.00", date="2026-08-01")
+    linked.sync()
+    row = csv_row(db, account, 5, amount="40.00", date="2026-09-20", posted="2026-09-21", name="X")
+    fake_plaid.set_update_status(linked.fake_item, "HISTORICAL_UPDATE_COMPLETE")
+    out = linked.sync()
+    assert (out.added, out.history_completed_now) == (0, True)
+    db.expire_all()
+    assert row.duplicate_status == "suspect"
+
+
+@pytest.mark.parametrize("decision", ["held", "kept"])
+def test_a_pending_charge_that_posts_pairs_with_the_csv_row_held_for_it(
+    linked, fake_plaid, db, decision
+):
+    account = make_account_for(linked)
+    fake_plaid.add_transaction(linked.fake_item, amount="60.00", date="2026-09-01")
+    pending = fake_plaid.add_pending(
+        linked.fake_item,
+        amount="18.50",
+        date="2026-10-14",
+        name="SWEETGREEN",
+        merchant_name="Sweetgreen",
+    )
+    row = csv_row(
+        db,
+        account,
+        6,
+        amount="18.50",
+        date="2026-10-14",
+        posted="2026-10-15",
+        name="SWEETGREEN SAN FRANCISCO CA",
+        notes="Lunch with Sam",
+    )
+    row_id = row.id
+    first = linked.sync()  # history complete, but Plaid's twin is still pending: held
+    assert first.history_completed_now
+    db.expire_all()
+    assert db.get(Transaction, row_id).duplicate_status == "suspect"
+    (held,) = csv_import.list_suspects(db)
+    assert (held.id, held.pending, held.pending_name) == (row_id, True, "Sweetgreen")
+    if decision == "kept":
+        assert csv_import.keep_suspect(db, row_id)
+        db.flush()
+
+    fake_plaid.post_pending(linked.fake_item, pending["transaction_id"], date="2026-10-15")
+    linked.sync()
+    posted = linked.row(f"{pending['transaction_id']}-posted")
+    assert db.get(Transaction, row_id) is None  # merged into the posted charge
+    assert (posted.csv_reference, posted.notes, posted.duplicate_status) == (
+        amex_reference("2026-10-15", 6),
+        "Lunch with Sam",
+        "none",
+    )
+    assert csv_import.list_suspects(db) == []
+    assert [t.amount for t in linked.rows()] == [Decimal("60.00"), Decimal("18.50")]
 
 
 # --------------------------------------------------------------------------- unit pieces
