@@ -575,21 +575,37 @@ class TestMergeBudgetsInEffect:
         categories.merge_categories(db, cafes.id, coffee.id)
         assert [r.amount for r in budget_rows(db, coffee)] == [None, Decimal("60.00")]
 
-    def test_statement_mode_starts_the_budget_with_the_current_cycle(self, db):
+    def test_statement_mode_starts_the_budget_mid_cycle_like_a_budget_edit(self, db):
+        """The Budgets page writes a cycle's edit at its middle day (a cycle start moves when a
+        closing date is corrected); the merge does the same."""
         account = make_account(db, statement_closing_day=27)
         make_statement(db, account, "2026-09-27")
         set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id)
         coffee, cafes = make_category(db, "Coffee"), make_category(db, "Cafes")
         make_budget(db, coffee, None, effective_from=dt.date(2026, 1, 1))
         make_budget(db, cafes, "100.00", effective_from=dt.date(2026, 1, 1))
-        result = categories.merge_categories(db, cafes.id, coffee.id)
-        assert result.counts.budgets.effective_from == dt.date(2026, 9, 28)
+        result = categories.merge_categories(db, cafes.id, coffee.id)  # cycle Sep 28 - Oct 27
+        assert result.counts.budgets.effective_from == dt.date(2026, 10, 12)
         assert budget_rows(db, coffee)[-1] == (
             "monthly",
             Decimal("100.00"),
             False,
-            dt.date(2026, 9, 28),
+            dt.date(2026, 10, 12),
         )
+
+    def test_an_annual_budget_never_reaches_back_into_last_year(self, db, freeze_today):
+        freeze_today(dt.date(2027, 1, 2))
+        account = make_account(db, statement_closing_day=9)
+        make_statement(db, account, "2026-12-09")  # this cycle: Dec 10, 2026 - Jan 9, 2027
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id)
+        presents, gifts = make_category(db, "Presents"), make_category(db, "Gift ideas")
+        make_budget(db, presents, None, effective_from=dt.date(2026, 1, 1), period="annual")
+        make_budget(db, gifts, "1200.00", effective_from=dt.date(2026, 1, 1), period="annual")
+        categories.merge_categories(db, gifts.id, presents.id)
+        assert budget_rows(db, presents) == [
+            ("annual", None, False, dt.date(2026, 1, 1)),  # 2026 keeps no annual budget
+            ("annual", Decimal("1200.00"), False, dt.date(2027, 1, 1)),
+        ]
 
 
 class TestIcons:

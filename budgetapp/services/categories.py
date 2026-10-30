@@ -12,15 +12,21 @@
 * :func:`merge_preview` / :func:`merge_categories`: ONE transaction, under the ledger lock, that
   re-points every reference — transactions, split parts, rules, Plaid/Amex mappings, budgets,
   alert events and the category ids inside tombstones' ``user_state`` — then deletes the source.
-  Categories are never deleted any other way. System categories can't be merged away.
+  Categories are never deleted any other way. System categories can't be merged away. Budgets
+  follow :class:`BudgetMerge`: the target keeps its own rows, and a target with no budget this
+  period takes the source's current one.
 * :func:`list_mappings` / :func:`set_mapping`: the "Plaid & Amex categories" editor. Plaid PFC v2
   codes are grouped by their primary code, Amex CSV ``Group-Subgroup`` values by their group;
-  each row has its transaction count, its own mapping (or none: then the group's mapping, else
-  Uncategorized, applies) and ``|credit`` keys (tried first for credits) are shown as such.
-  External categories found in transactions but not mapped (for example Amex subgroups nobody
-  has verified, such as ``Other-Charities``) are listed so they can be mapped. A mapping change
-  affects new transactions; past ones change only when categories are re-applied (CAT-4), and
-  never where the user set the category.
+  each row has its transaction count and its own mapping, or the one it falls back to in the
+  order categorization tries them (ARCHITECTURE §5: for credits ``sub|credit``, ``group|credit``,
+  ``sub``, ``group``; otherwise ``sub``, ``group``; then Uncategorized). ``|credit`` keys are
+  shown as such, and a code's credits that reach a ``|credit`` mapping count on the code's own
+  credit row, so every row shows where its transactions really go. External categories found
+  in transactions but not mapped (for example Amex subgroups nobody has verified, such as
+  ``Other-Charities``) are listed so they can be mapped, and any row's own mapping can be
+  removed again. A mapping change affects new transactions; past ones change only when
+  categories are re-applied (CAT-4), and never where the user set the category:
+  :class:`MappingChange` says how many re-applying would move.
 
 Services never commit; the route or command does.
 """
@@ -60,7 +66,7 @@ from budgetapp.models import (
     v_allocations,
 )
 from budgetapp.money import ZERO
-from budgetapp.periods import Period, budget_period_for
+from budgetapp.periods import STATEMENT, Period, budget_period_for
 from budgetapp.services import spending, userstate
 from budgetapp.services.categorize import (
     CREDIT_KEY_SUFFIX,
@@ -504,8 +510,8 @@ class BudgetMerge:
     * ``move``: the target has no budget rows at all, so the source's rows (its history) move.
     * ``keep_target``: the target has a budget now; it keeps it and the source's rows are dropped.
     * ``take_source``: the target has budget rows but no budget now, and the source has one: the
-      target gets the source's current budget (amount, period, rollover) from the start of the
-      current budget period, like a budget edit; the source's rows are dropped.
+      target gets the source's current budget (amount, period, rollover) for the current budget
+      period, written like a budget edit (:func:`_budget_start`); the source's rows are dropped.
     * ``drop``: neither has a budget now; the source's old rows are dropped.
     """
 
@@ -650,6 +656,20 @@ def _budget_now(session: Session, category_id: int, ends: Mapping[str, dt.date])
     return found
 
 
+def _budget_start(period: Period, kind: str) -> dt.date:
+    """Where a budget for the current ``period`` starts, as the Budgets page writes an edit: the
+    period's start, or a statement cycle's middle day (its start moves when a closing date is
+    corrected, and a row there would change the cycle before). An annual budget starts no earlier
+    than January 1, so last year's annual amount stays as it was."""
+    if period.kind == STATEMENT:
+        start = period.start + dt.timedelta(days=(period.days - 1) // 2)
+    else:
+        start = period.start
+    if kind == "annual":
+        start = max(start, dt.date(clock.today().year, 1, 1))
+    return start
+
+
 def _budget_plan(session: Session, source: Category, target: Category) -> BudgetMerge:
     rows = _count(session, Budget.category_id, source.id)
     if not rows:
@@ -668,7 +688,7 @@ def _budget_plan(session: Session, source: Category, target: Category) -> Budget
         period=live.period,
         amount=live.amount,
         rollover=live.rollover and live.period == "monthly",
-        effective_from=period.start,
+        effective_from=_budget_start(period, live.period),
     )
 
 
@@ -753,9 +773,9 @@ def merge_categories(session: Session, source_id: int, target_id: int) -> MergeR
     tombstones' ``user_state`` (so an edit carried to a future replacement row lands in
     ``target``). Budgets (:class:`BudgetMerge`): the target keeps its own budget rows. The
     source's rows move only when the target has none at all; otherwise they are dropped, and a
-    target with no budget this period takes the source's current budget from the start of the
-    period. (Moving rows next to the target's could replace its amount from a later date, or give
-    one category both a monthly and an annual budget.)
+    target with no budget this period takes the source's current budget for this period, written
+    like a budget edit. (Moving rows next to the target's could replace its amount from a later
+    date, or give one category both a monthly and an annual budget.)
 
     Expires every object in the session afterwards (their references moved). The caller commits.
     """

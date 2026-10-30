@@ -22,7 +22,8 @@
 {%- if b.action == "keep_target" %}
 <p class="text-sm text-secondary">“{{ p.target.name }}” keeps its own budget, so {{ b.source_rows|pluralize("budget entry", "budget entries") }} of “{{ p.source.name }}” {{ "is" if b.source_rows == 1 else "are" }} dropped.</p>
 {%- elif b.action == "take_source" %}
-<p class="text-sm text-secondary">“{{ p.target.name }}” has no budget now, so it takes the budget of “{{ p.source.name }}”: {{ b.amount|money }} a {{ "month" if b.period == "monthly" else "year" }}{{ " with rollover" if b.rollover }}, from {{ b.effective_from|date_long }}. The older budget entries of “{{ p.source.name }}” are dropped.</p>
+{%- set older = b.source_rows - 1 %}
+<p class="text-sm text-secondary">“{{ p.target.name }}” has no budget now, so it takes the budget of “{{ p.source.name }}”: {{ b.amount|money }} a {{ "month" if b.period == "monthly" else "year" }}{{ " with rollover" if b.rollover }}, from {{ b.effective_from|date_long }}.{% if older %} {{ older|pluralize("older budget entry", "older budget entries") }} of “{{ p.source.name }}” {{ "is" if older == 1 else "are" }} dropped.{% endif %}</p>
 {%- elif b.action == "drop" %}
 <p class="text-sm text-secondary">Neither has a budget now, so {{ b.source_rows|pluralize("old budget entry", "old budget entries") }} of “{{ p.source.name }}” {{ "is" if b.source_rows == 1 else "are" }} dropped.</p>
 {%- endif %}

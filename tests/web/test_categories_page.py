@@ -558,18 +558,23 @@ class TestMergeBudgetsAndLongNames:
             "“Coffee” has no budget now, so it takes the budget of “Pets”: $100.00 a month, from"
             " Oct 1, 2026." in text
         )
-        assert "keeps its own budget" not in text
+        assert "keeps its own budget" not in text and "older budget" not in text
+        make_budget(db, world.pets, "90.00", effective_from=dt.date(2026, 3, 1))
+        text = html.unescape(client.get(url, headers=HTMX).text)
+        assert (
+            "$90.00 a month, from Oct 1, 2026. 1 older budget entry of “Pets” is dropped." in text
+        )
         response = client.post(f"/categories/{world.pets.id}/merge", data={"target_id": coffee.id})
         assert toasts(response.text) == [
             "Merged “Pets” into “Coffee”: 1 transaction moved. It takes over the budget of"
-            " “Pets”: $100.00 a month."
+            " “Pets”: $90.00 a month."
         ]
         latest = db.scalars(
             select(Budget)
             .where(Budget.category_id == coffee.id)
             .order_by(Budget.effective_from.desc())
         ).first()
-        assert (latest.amount, latest.effective_from) == (Decimal("100.00"), dt.date(2026, 10, 1))
+        assert (latest.amount, latest.effective_from) == (Decimal("90.00"), dt.date(2026, 10, 1))
 
     def test_names_in_the_merge_sentences_can_wrap(self, client, db, world):
         target = make_category(db, "Kids activities, school supplies and after-school programs")
