@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import html
 import re
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
@@ -163,3 +164,144 @@ class TestOverrides:
         response = override(client, key, status)
         assert response.status_code == 400
         assert db.scalars(select(RecurringOverride)).all() == []
+
+
+# --------------------------------------------------------------------------- review fixes
+
+
+def monthly(first: dt.date, count: int) -> list[dt.date]:
+    out = []
+    for i in range(count):
+        year, month = periods.add_months(first.year, first.month, i)
+        out.append(periods.clamp_day(year, month, first.day))
+    return out
+
+
+def row_form(page: str, label: str) -> str:
+    """The hidden fields of the action form whose buttons are labelled ``…: <label>``."""
+    for form in re.findall(r'<form class="rec-actions".*?</form>', page, flags=re.S):
+        if f': {html.escape(label)}"' in form:
+            return form
+    raise AssertionError(f"no actions for {label!r}")
+
+
+def hidden(form: str, name: str) -> list[str]:
+    return [html.unescape(v) for v in re.findall(rf'name="{name}" value="([^"]*)"', form)]
+
+
+class TestSeriesChoices:
+    """Review findings: Ignore hid all of a merchant's series; a CSV-era choice was lost."""
+
+    def test_ignoring_one_of_a_merchants_subscriptions(self, client, db, today):
+        card = make_account(db)
+        apple = {"merchant_entity_id": "ent-apple", "merchant_name": "Apple"}
+        for day in monthly(D(2025, 11, 10), 12):
+            make_transaction(db, card, amount="0.99", date=day, **apple)
+        for day in monthly(D(2025, 11, 18), 12):
+            make_transaction(db, card, amount="10.99", date=day, **apple)
+        page = client.get("/recurring").text
+        assert 'aria-label="Ignore it: Apple $0.99"' in page
+        form = row_form(page, "Apple $0.99")
+        assert hidden(form, "key") == ["ent-apple|0.99"]
+        assert hidden(form, "also") == ["ent-apple"]
+        response = client.post(
+            "/recurring/override",
+            data={
+                "key": "ent-apple|0.99",
+                "also": "ent-apple",
+                "status": "ignored",
+                "name": "Apple $0.99",
+            },
+            headers=HTMX,
+        )
+        assert toasts(response.text) == ["Ignored: Apple $0.99 won't be listed as recurring."]
+        overview = response.context["overview"]
+        assert [s.typical_amount for s in overview.active] == [Decimal("10.99")]
+        assert [s.typical_amount for s in overview.ignored] == [Decimal("0.99")]
+        rows = db.scalars(select(RecurringOverride.merchant_key)).all()
+        assert rows == ["ent-apple|0.99"]  # "also" is only cleared by a reset
+        assert csp_problems(response.text, rendered=True) == []
+
+    def test_a_joined_series_posts_both_keys(self, client, db, freeze_today):
+        freeze_today(D(2026, 5, 20))
+        card = make_account(db)
+        csv_name = "SPOTIFY USA               NEW YORK NY"
+        for day in monthly(D(2025, 6, 3), 6):
+            make_transaction(db, card, amount="11.99", date=day, source="csv", name=csv_name)
+        for day in monthly(D(2025, 12, 3), 6):
+            make_transaction(
+                db,
+                card,
+                amount="11.99",
+                date=day,
+                name="SPOTIFY USA",
+                merchant_name="Spotify",
+                merchant_entity_id="ent-spotify",
+            )
+        form = row_form(client.get("/recurring").text, "Spotify")
+        assert hidden(form, "key") == ["ent-spotify", "spotify usa new york ny"]
+        response = client.post(
+            "/recurring/override",
+            data={"key": ["ent-spotify", "spotify usa new york ny"], "status": "ignored"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        rows = {r.merchant_key: r.status for r in db.scalars(select(RecurringOverride))}
+        assert rows == {"ent-spotify": "ignored", "spotify usa new york ny": "ignored"}
+
+    def test_too_many_keys_are_refused(self, client, db, today):
+        data = {"key": [f"k{i}" for i in range(30)], "status": "ignored"}
+        response = client.post("/recurring/override", data=data)
+        assert response.status_code == 400
+        assert "That recurring charge isn't valid." in text_of(response.text)
+        assert db.scalars(select(RecurringOverride)).all() == []
+
+
+class TestOrphanChoices:
+    """Review finding: an override whose merchant isn't detected could not be seen or undone."""
+
+    def test_listed_and_restorable(self, client, db, today):
+        card = make_account(db)
+        clipper = {"merchant_name": "Clipper", "merchant_entity_id": "ent-clipper"}
+        for day in (D(2026, 6, 1), D(2026, 6, 24), D(2026, 7, 13), D(2026, 8, 5)):
+            make_transaction(db, card, amount="40.00", date=day, **clipper)
+        make_recurring_override(db, "ent-clipper", "ignored")
+        page = client.get("/recurring").text
+        text = text_of(page)
+        assert "Ignored Hidden from the lists and the monthly cost." in text
+        assert "Clipper Ignored · no repeating charges lately" in text
+        assert hidden(row_form(page, "Clipper"), "key") == ["ent-clipper"]
+        assert csp_problems(page, rendered=True) == []
+        response = client.post(
+            "/recurring/override",
+            data={"key": "ent-clipper", "status": "reset", "name": "Clipper"},
+            headers=HTMX,
+        )
+        assert response.context["overview"].is_empty
+        assert db.scalars(select(RecurringOverride)).all() == []
+
+    def test_a_kept_choice_without_charges(self, client, db, today):
+        make_recurring_override(db, "old gym", "confirmed")
+        text = text_of(client.get("/recurring").text)
+        assert "Your choices" in text
+        assert "old gym Always listed · no repeating charges lately" in text
+
+
+class TestBillsAndPending:
+    def test_a_varying_bill_and_a_pending_renewal(self, client, db, freeze_today):
+        freeze_today(D(2026, 10, 16))
+        card = make_account(db)
+        amounts = ["54.34", "48.05", "44.38", "45.23", "49.89", "61.29", "62.71", "71.42"]
+        for day, amount in zip(monthly(D(2025, 10, 14), 8), amounts, strict=True):
+            make_transaction(db, card, amount=amount, date=day, merchant_name="PG&E")
+        for day in monthly(D(2025, 11, 5), 11):
+            make_transaction(db, card, amount="15.49", date=day, merchant_name="Netflix")
+        make_transaction(
+            db, card, amount="15.49", date=D(2026, 10, 5), pending=True, merchant_name="Netflix"
+        )
+        page = client.get("/recurring").text
+        text = text_of(page)
+        assert "$62.71 varies" in text
+        assert "the Oct 5 charge is pending" in text
+        assert "Late" not in text
+        assert csp_problems(page, rendered=True) == []

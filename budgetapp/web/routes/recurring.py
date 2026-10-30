@@ -2,9 +2,10 @@
 next expected date (``services.recurring``).
 
 * ``GET /recurring``: the page (an HTMX request gets the ``#recurring-content`` partial).
-* ``POST /recurring/override``: ``key`` (the merchant key) and ``status`` = ``ignored``,
-  ``confirmed`` or ``reset``. HTMX gets the refreshed content plus a toast; a plain post is
-  redirected (303) back to the page.
+* ``POST /recurring/override``: ``key`` (repeated: the series' own keys, ``RecurringSeries.keys``),
+  ``also`` (repeated, optional: keys its status may come from, cleared by ``reset``) and
+  ``status`` = ``ignored``, ``confirmed`` or ``reset``. HTMX gets the refreshed content plus a
+  toast; a plain post is redirected (303) back to the page.
 """
 
 from __future__ import annotations
@@ -37,13 +38,14 @@ def recurring_page(request: Request, session: SessionDep) -> Response:
 @router.post("/recurring/override")
 def recurring_override(request: Request, session: SessionDep, form: FormDep) -> Response:
     action = ACTIONS.get(str(form.get("status", "")))
-    key = str(form.get("key", ""))
     if action is None:
         raise HTTPException(400, "That action isn't available.")
     status, message = action
+    keys = [str(key) for key in form.getlist("key")]
+    also = [str(key) for key in form.getlist("also")]
     name = str(form.get("name", "")).strip()[:80] or "This charge"
     try:
-        recurring.set_override(session, key, status)
+        recurring.set_series_override(session, keys, status, also=also)
     except ValueError as err:
         raise HTTPException(400, str(err)) from None
     session.commit()

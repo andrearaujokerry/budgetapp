@@ -33,6 +33,11 @@
     white-space: normal;
   }
 
+  /* "was $17.99" stays on one line (more specific than the rule above). */
+  .rec-table .rec-was {
+    white-space: nowrap;
+  }
+
   .table-wrap > .rec-table {
     --grow-min: 6rem;
     min-width: 0;
