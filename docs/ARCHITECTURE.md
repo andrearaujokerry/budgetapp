@@ -57,9 +57,9 @@ macOS privacy protection (TCC) blocks launchd-started processes from `~/Desktop`
 repository lives. So production **always** runs the Application Support install:
 - `upgrade_install()` is the only way production code changes: refuse if the repository has
   uncommitted changes → stop the web, sync and backup agents → take a backup →
-  `pip install -r requirements.txt` then `pip install --no-deps <repo>` (never editable) →
-  run migrations from the new install while holding the sync lock → write the install stamp
-  (git commit) → restart the agents.
+  `pip install -r requirements.txt` then `pip install --no-deps` from `git archive <commit>`
+  (never the working tree, never editable) → run migrations from the new install while holding
+  the sync lock → write the install stamp (that commit) → restart the agents.
 - `./run live` calls `upgrade_install()` when the repository's commit differs from the stamp,
   then opens the web agent (or serves from the install when no web agent is installed).
 - A **schema guard** in `db.py` compares the database's Alembic revision with the code's
@@ -425,9 +425,11 @@ the override above.
   `delivered_at`, `error`.
 - **csv_imports** (SYNC-8): `filename`, `file_sha256`, `account_id` (FK ON DELETE RESTRICT),
   `imported_at`, `row_count`, `inserted_count`, `duplicate_count`, `matched_plaid_count`,
-  `error_count`, `date_min`, `date_max`.
-- **recurring_overrides** (INS-3): `merchant_key` (unique), `status` (`ignored` \|
-  `confirmed`).
+  `error_count` (unreadable rows, and rows whose Reference was imported before with a different
+  date or amount), `date_min`, `date_max`.
+- **recurring_overrides** (INS-3): `merchant_key` (unique: a merchant key, or
+  `<merchant key>|<amount>` for one of a merchant's several exact-amount series), `status`
+  (`ignored` \| `confirmed`).
 
 ## 6. Domain rules
 
@@ -504,12 +506,14 @@ applies.
 6. **Reconciliation** with CSV rows (below), then the cursor update.
 
 ### CSV ↔ Plaid reconciliation (SYNC-8)
-`reconcile.reconcile_item(session, item_id)` is a full pass, run after every sync that
-inserted rows, after every CSV import and after attaching a manual account:
-- Candidates: unpaired CSV rows (`source = 'csv'`) and unpaired Plaid rows (no `csv_reference`)
-  across all accounts of the Item, with equal amounts, the CSV date within
+`reconcile.reconcile_item(session, item_id)` is a full pass, run by every sync that inserted
+rows or completed Plaid's history, after every CSV import and after attaching a manual account:
+- Candidates: unpaired CSV rows (`source = 'csv'`) and unpaired, posted Plaid rows (no
+  `csv_reference`) across all accounts of the Item, with equal amounts, the CSV date within
   `[COALESCE(authorized_date, date) − 3 days, date]` — widened to `[date − 30 days, date]` when
-  `authorized_date` is null.
+  `authorized_date` is null. A CSV row whose Reference holds a plausible posting date pairs only
+  with a Plaid row posted on that date or up to 3 days before it (never with a later charge of
+  the same amount).
 - One global one-to-one assignment, best first by date distance, then description similarity
   (CSV `Appears On Your Statement As`/`Description` vs Plaid `original_description`/`name`).
 - A pair moves the CSV row's user state onto the Plaid row (unless the Plaid row has its own),
@@ -521,7 +525,8 @@ inserted rows, after every CSV import and after attaching a manual account:
 - **Cutover:** once the Item has `history_complete_at`, each account's `plaid_history_start`
   is set to its earliest Plaid posted date. Unpaired CSV rows dated on or after it become
   `duplicate_status = 'suspect'` (excluded from every total) and are listed on `/import` with
-  "Keep" (→ `kept`) and "Delete".
+  "Keep" (→ `kept`) and "Delete". The sync that first sees `HISTORICAL_UPDATE_COMPLETE` sets
+  `history_complete_at` before its pass, so it holds those rows itself.
 - `reconcile.attach_manual_account(session, manual_id, plaid_account_id)` (CSV package): drops
   manual rows whose Reference already exists, moves the rest (transactions, imports, rules,
   statements — a statement that collides on `(account_id, closing_date)` or
@@ -667,8 +672,9 @@ sync_item(item_id, trigger):
      or a transport error, discard the pages and restart from `start` (bounded retries)
   NOT_READY → record success with no changes; keep the cursor null (and, while it is null,
      last_sync_success_at: no data has arrived yet)
-  ONE transaction: ledger lock → apply algorithm (section 6) → reconcile_item →
-     cursor compare-and-set → item healthy, error cleared, history_complete_at, cutover
+  ONE transaction: ledger lock → apply algorithm (section 6) → history_complete_at and
+     plaid_history_start → reconcile_item (pairs, then the cutover) → item healthy, error
+     cleared → cursor compare-and-set
   record sync_run success with counts (own transaction)
   best effort, each in its own transaction:
      /accounts/get → balances (SYNC-7)
