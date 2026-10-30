@@ -11,6 +11,10 @@
 
 {% include "transactions/_filters.html" %}
 
+{#- Announced after a filter, sort or page change (transactions.js copies #results' data-status
+    here); it stays outside #results so screen readers keep watching it. -#}
+<p id="txn-results-status" class="sr-only" role="status"></p>
+
 <div id="results" class="txn-results">
 {% include "transactions/_results.html" %}
 </div>

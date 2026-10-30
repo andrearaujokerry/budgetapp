@@ -122,7 +122,7 @@ class TestCategoryEdit:
         row = txns.update(db, txn.id, category_id=cats["shopping"].id)
         assert row.category_source == "user" and row.category.name == "Shopping"
 
-    @pytest.mark.parametrize("value", ["", "abc", "0", "-3", "999999999"])
+    @pytest.mark.parametrize("value", ["", "abc", "0", "-3", "999999999", "²", "\x00"])
     def test_bad_categories_are_refused(self, db, card, cats, value):
         txn = make_transaction(db, card, category=cats["dining"])
         with pytest.raises(TransactionEditError) as err:
@@ -143,11 +143,62 @@ class TestCategoryEdit:
         with pytest.raises(txns.TransactionNotFound):
             txns.update(db, 987654321, notes="x")
 
-    def test_edits_take_the_ledger_lock(self, db, card):
-        txn = make_transaction(db, card)
+    @pytest.mark.parametrize(
+        "edit", ["category", "notes", "reset", "clear_review", "set_splits", "clear_splits"]
+    )
+    def test_every_edit_takes_the_ledger_lock(self, db, card, cats, edit):
+        txn = make_transaction(
+            db, card, amount="20.00", category=cats["groceries"], category_source="user"
+        )
         assert not holds_ledger_lock(db)
-        txns.update(db, txn.id, notes="hello")
+        if edit == "category":
+            txns.update(db, txn.id, category_id=cats["home"].id)
+        elif edit == "notes":
+            txns.update(db, txn.id, notes="hello")
+        elif edit == "reset":
+            txns.reset_to_automatic(db, txn.id)
+        elif edit == "clear_review":
+            txns.clear_review(db, txn.id)
+        elif edit == "set_splits":
+            txns.set_splits(
+                db,
+                txn.id,
+                [
+                    (cats["groceries"].id, Decimal("5.00"), None),
+                    (cats["home"].id, Decimal("15.00"), None),
+                ],
+            )
+        else:
+            txns.clear_splits(db, txn.id)
         assert holds_ledger_lock(db)
+
+
+class TestEditsCarry:
+    """Edits made here are user state (ARCHITECTURE §6): they follow a charge to its posted row,
+    and a split stays whole when Plaid changes the amount."""
+
+    def test_edits_on_a_pending_charge_move_to_the_posted_one(self, db, card, cats):
+        pending = make_transaction(db, card, amount="30.00", pending=True)
+        txns.update(db, pending.id, category_id=cats["dining"].id, notes="lunch", tags=["Work"])
+        state = userstate.capture(db.get(Transaction, pending.id))
+        assert state is not None and state.category_id == cats["dining"].id
+        posted = make_transaction(db, card, amount="31.50", category=cats["uncategorized"])
+        categorize.apply_carried_state(categorize.Categorizer.load(db), posted, state)
+        assert (posted.category_id, posted.category_source) == (cats["dining"].id, "user")
+        assert posted.notes == "lunch" and list(posted.tags) == ["Work"]
+
+    def test_a_split_rescaled_after_an_amount_change_needs_review(self, db, card, cats):
+        txn = make_transaction(db, card, amount="100.00", category=cats["groceries"])
+        txns.set_splits(
+            db, txn.id, parts((cats["groceries"], "60.00", None), (cats["home"], "40.00", None))
+        )
+        stored = db.get(Transaction, txn.id)
+        stored.amount = Decimal("100.01")
+        db.flush()
+        assert userstate.fit_splits_to_amount(stored)
+        db.flush()
+        row = txns.get_row(db, txn.id)
+        assert row.is_split and row.splits_total == Decimal("100.01") and row.needs_review
 
 
 class TestNotesAndTags:
@@ -194,6 +245,15 @@ class TestNotesAndTags:
         with pytest.raises(TransactionEditError) as err:
             txns.update(db, txn.id, notes="x" * 2001)
         assert "notes" in err.value.errors
+
+    def test_control_characters_are_dropped(self, db, card):
+        # PostgreSQL refuses NUL in text: a pasted "\x00" used to fail the save with a 500.
+        txn = make_transaction(db, card)
+        row = txns.update(
+            db, txn.id, notes="Lunch\x00 with\r\nSam\x07\tok", tags=["wo\x00rk", "\x1bred"]
+        )
+        assert row.notes == "Lunch with\nSam\tok" and row.tags == ("work", "red")
+        assert reload(db, txn).notes == "Lunch with\nSam\tok"
 
 
 class TestResetAndReview:
@@ -312,6 +372,13 @@ class TestSplits:
             "$9.99" in err.value.errors["parts"]
             and "$0.01 left to assign" in err.value.errors["parts"]
         )
+
+    def test_part_notes_lose_control_characters(self, db, card, cats):
+        txn = make_transaction(db, card, amount="10.00", category=cats["groceries"])
+        row = txns.set_splits(
+            db, txn.id, parts((cats["groceries"], "4.00", "milk\x00"), (cats["home"], "6.00", None))
+        )
+        assert [s.note for s in row.splits] == ["milk", None]
 
     def test_pending_charges_cannot_be_split(self, db, card, cats):
         txn = make_transaction(db, card, amount="20.00", pending=True)
@@ -458,6 +525,13 @@ class TestSplits:
         ("  NETFLIX.COM  ", "NETFLIX.COM"),
         ("*", "*"),
         ("", ""),
+        # Amex CSV descriptions pad the merchant before the city: the padding ends the merchant.
+        ("BLUE BOTTLE COFFEE        SAN FRANCISCO CA", "BLUE BOTTLE COFFEE"),
+        ("SFMTA PAYBYPHONE          SAN FRANCISCO CA", "SFMTA PAYBYPHONE"),
+        ("SQ *DELFINA               SAN FRANCISCO CA", "DELFINA"),
+        ("WHOLEFDS MKT 10234        SAN FRANCISCO CA", "WHOLEFDS MKT"),
+        ("  LYFT   *RIDE TUE 5PM", "LYFT"),
+        ("NETFLIX.COM\x00", "NETFLIX.COM"),
     ],
 )
 def test_clean_description(raw, cleaned):
@@ -477,6 +551,28 @@ class TestOneClickDraft:
         txn = make_transaction(db, card, name="SQ *DELFINA SAN FRANCISCO CA", source="csv")
         draft = txns.one_click_draft(db, txn.id)
         assert (draft.merchant_pattern, draft.category_id) == ("DELFINA SAN FRANCISCO", None)
+
+    def test_a_csv_row_drafts_a_pattern_that_matches_new_plaid_charges(self, db, card, cats):
+        # Plaid rows match on merchant_name ("Blue Bottle Coffee"): a draft that kept the city
+        # from the CSV Description would never match a new charge.
+        csv_row = make_transaction(
+            db,
+            card,
+            source="csv",
+            name="BLUE BOTTLE COFFEE        SAN FRANCISCO CA",
+            category=cats["dining"],
+            category_source="amex",
+        )
+        plaid_row = make_transaction(
+            db, card, name="BLUE BOTTLE COFFEE", merchant_name="Blue Bottle Coffee"
+        )
+        draft = txns.one_click_draft(db, csv_row.id)
+        assert (draft.merchant_pattern, draft.category_id) == (
+            "BLUE BOTTLE COFFEE",
+            cats["dining"].id,
+        )
+        rule = Rule(merchant_pattern=draft.merchant_pattern, match_type="contains")
+        assert categorize.rule_matches(rule, plaid_row) and categorize.rule_matches(rule, csv_row)
 
     def test_runs_before_the_rule_that_matched(self, db, card, cats):
         older = make_rule(db, cats["shopping"], merchant_pattern="COSTCO", priority=40)
@@ -607,7 +703,9 @@ class TestOneClickRule:
         assert moved["dupe"] == (cats["groceries"].id, "rule")  # still a row, never counted
         assert holds_ledger_lock(db)
 
-    def test_without_applying_nothing_in_the_past_changes(self, db, cats, coffee):
+    def test_without_applying_only_this_transaction_follows_the_rule(self, db, cats, coffee):
+        # "Always categorize like this" acts on the row it came from at once; "Also apply to past
+        # transactions" decides about the others.
         result = txns.create_one_click_rule(
             db,
             coffee["source"].id,
@@ -615,12 +713,125 @@ class TestOneClickRule:
             category_id=cats["groceries"].id,
             apply_to_past=False,
         )
-        assert (result.applied, result.changed) == (False, 0)
+        assert (result.applied, result.changed, result.source_changed) == (False, 0, True)
         db.expire_all()
-        assert coffee["past"].category_id == cats["dining"].id
+        source = coffee["source"]
+        assert (source.category_id, source.category_source, source.rule_id) == (
+            cats["groceries"].id,
+            "rule",
+            result.rule_id,
+        )
+        assert coffee["past"].category_id == coffee["csv"].category_id == cats["dining"].id
         future = make_transaction(db, None, name="BLUE BOTTLE", merchant_name="Blue Bottle Coffee")
         decision = categorize.Categorizer.load(db).decide(future)
         assert (decision.category_id, decision.rule_id) == (cats["groceries"].id, result.rule_id)
+        assert holds_ledger_lock(db)
+
+    def test_a_transaction_categorized_by_hand_keeps_its_category(self, db, cats, coffee):
+        result = txns.create_one_click_rule(
+            db,
+            coffee["user"].id,
+            merchant_pattern="Blue Bottle",
+            category_id=cats["groceries"].id,
+            apply_to_past=False,
+        )
+        assert not result.source_changed
+        db.expire_all()
+        assert (coffee["user"].category_id, coffee["user"].category_source) == (
+            cats["personal"].id,
+            "user",
+        )
+
+    def test_a_pattern_that_misses_this_transaction_leaves_it_alone(self, db, cats, coffee):
+        result = txns.create_one_click_rule(
+            db,
+            coffee["source"].id,
+            merchant_pattern="Philz",
+            category_id=cats["groceries"].id,
+            apply_to_past=False,
+        )
+        assert not result.source_changed
+        db.expire_all()
+        assert coffee["source"].category_id == coffee["other"].category_id == cats["dining"].id
+
+    def test_applied_to_the_past_the_result_says_whether_this_one_moved(self, db, cats, coffee):
+        result = txns.create_one_click_rule(
+            db,
+            coffee["source"].id,
+            merchant_pattern="Blue Bottle",
+            category_id=cats["dining"].id,
+            apply_to_past=True,
+        )
+        assert not result.source_changed  # it was already in Dining & Drinks
+        db.expire_all()
+        assert (coffee["source"].category_source, coffee["source"].rule_id) == (
+            "rule",
+            result.rule_id,
+        )
+
+    def test_the_preview_says_when_only_csv_rows_match(self, db, card, cats):
+        csv_row = make_transaction(
+            db, card, source="csv", name="BLUE BOTTLE COFFEE        SAN FRANCISCO CA"
+        )
+        make_transaction(db, card, name="BLUE BOTTLE COFFEE", merchant_name="Blue Bottle Coffee")
+
+        def preview(pattern):
+            return txns.preview_one_click_rule(
+                db, csv_row.id, merchant_pattern=pattern, category_id=cats["dining"].id
+            )
+
+        city = preview("BLUE BOTTLE COFFEE SAN FRANCISCO")
+        assert (city.matches, city.csv_only, city.plaid_merchant) == (1, True, None)
+        merchant = preview("BLUE BOTTLE COFFEE")
+        assert (merchant.matches, merchant.csv_only) == (2, False)
+
+    def test_the_preview_names_the_merchant_plaid_uses(self, db, card, cats):
+        # Plaid's description has the text, but the rule reads Plaid's merchant name ("SFMTA").
+        csv_row = make_transaction(
+            db, card, source="csv", name="SFMTA PAYBYPHONE          SAN FRANCISCO CA"
+        )
+        for _ in range(2):
+            make_transaction(db, card, name="SFMTA PAYBYPHONE", merchant_name="SFMTA")
+        make_transaction(db, card, name="SFMTA PAYBYPHONE MUNI", merchant_name="Muni")
+
+        def preview(pattern):
+            return txns.preview_one_click_rule(
+                db, csv_row.id, merchant_pattern=pattern, category_id=cats["home"].id
+            )
+
+        draft = txns.one_click_draft(db, csv_row.id).merchant_pattern
+        assert draft == "SFMTA PAYBYPHONE"
+        missed = preview(draft)
+        assert (missed.matches, missed.csv_only, missed.plaid_merchant) == (1, True, "SFMTA")
+        both = preview("SFMTA")
+        assert (both.matches, both.csv_only, both.plaid_merchant) == (3, False, None)
+
+    def test_before_linking_csv_rows_are_all_there_is(self, db, cats):
+        manual = make_account(db, manual=True)
+        row = make_transaction(
+            db, manual, source="csv", name="BLUE BOTTLE COFFEE        SAN FRANCISCO CA"
+        )
+        preview = txns.preview_one_click_rule(
+            db,
+            row.id,
+            merchant_pattern="BLUE BOTTLE COFFEE SAN FRANCISCO",
+            category_id=cats["dining"].id,
+        )
+        assert (preview.matches, preview.csv_only) == (1, False)
+
+    def test_control_characters_never_reach_the_rule(self, db, cats, coffee):
+        preview = txns.preview_one_click_rule(
+            db, coffee["source"].id, merchant_pattern="Blue\x00", category_id=cats["home"].id
+        )
+        assert preview.matches == 6
+        result = txns.create_one_click_rule(
+            db,
+            coffee["source"].id,
+            merchant_pattern="Blue\x00 Bottle\x07",
+            category_id=cats["home"].id,
+            apply_to_past=False,
+        )
+        assert db.get(Rule, result.rule_id).merchant_pattern == "Blue Bottle"
 
     def test_the_new_rule_outranks_the_one_that_matched(self, db, card, cats):
         costco = make_rule(db, cats["groceries"], merchant_pattern="COSTCO")

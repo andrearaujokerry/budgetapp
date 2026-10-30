@@ -10,6 +10,7 @@ from decimal import Decimal
 import pytest
 from starlette.datastructures import QueryParams
 
+from budgetapp.services import spending
 from budgetapp.services import transactions as txns
 from budgetapp.services.transactions import TransactionFilter
 from tests.factories import (
@@ -115,6 +116,54 @@ class TestFilterParsing:
         assert txns.parse_sort("amount") == "amount"
         assert txns.parse_sort("name") == "-date"
 
+    def test_ids_are_plain_ascii_numbers(self):
+        # str.isdigit() accepts "²", which int() refuses: that used to be a 500 page.
+        assert [txns.parse_id(v) for v in ("7", " 7 ", 7, str(2**63 - 1))] == [7, 7, 7, 2**63 - 1]
+        for value in ("²", "٣", "１２", "1_0", "+3", "-3", "0", "3.0", "", None, str(2**63)):
+            assert txns.parse_id(value) is None, value
+        filt = F(category=["²", "4", "٣"], account="²")
+        assert filt.categories == ("4",) and filt.account_id is None
+        assert [txns.parse_page(v) for v in ("²", "１２", "1000000")] == [1, 1, 1]
+
+    def test_control_characters_are_dropped(self):
+        # PostgreSQL refuses NUL in text: "?q=%00" used to be a 500 page.
+        filt = F(
+            q="cof\x00fee\x07",
+            merchant="Blue\x00 Bottle",
+            tag="wo\x00rk",
+            member="SAM\x00 RIVERA",
+            category=["3\x00"],
+            account="7\x00",
+            **{"from": "2026-10-01\x00", "min": "1\x000"},
+        )
+        assert (filt.q, filt.merchant, filt.tag, filt.member) == (
+            "coffee",
+            "Blue Bottle",
+            "work",
+            "SAM RIVERA",
+        )
+        assert filt.categories == ("3",) and filt.account_id == 7
+        assert (filt.range, filt.date_from) == ("custom", D("2026-10-01"))
+        assert filt.amount_min == Decimal("10.00") and filt.problems == ()
+        assert F(q="\x00").q == ""
+        assert txns.clean_text("a\x00b\r\nc\rd\te\x7f") == "ab\nc\nd\te"
+
+    def test_unknown_categories_are_dropped_and_explained(self):
+        # A bookmark from before a category was merged away: the picker can't show that id, so
+        # the list must not be narrowed by it out of sight.
+        filt = F(category=["3", "999", "uncategorized"], min="ten")
+        kept = filt.without_unknown_categories({3, 4})
+        assert kept.categories == ("3", "uncategorized")
+        assert kept.problems == (
+            filt.problems[0],
+            "Ignored a category that no longer exists (it may have been merged into another).",
+        )
+        assert filt.without_unknown_categories({3, 999}) is filt
+        both = F(category=["998", "999"]).without_unknown_categories({3})
+        assert both.categories == () and both.problems[0].startswith(
+            "Ignored 2 categories that no longer exist"
+        )
+
 
 # --------------------------------------------------------------------------- search
 
@@ -177,6 +226,23 @@ class TestEachFilter:
         assert names(run(db, F(q="%"))) == ["100% JUICE"]
         assert names(run(db, F(q="_"))) == ["A_B"]
 
+    @pytest.mark.parametrize(
+        "q",
+        [
+            "\\",
+            "'; DROP TABLE transactions; --",
+            '"',
+            "a%b_c\\d",
+            "−54.99",
+            "$1,200",
+            "x" * 500,
+            "😀",
+        ],
+    )
+    def test_odd_search_text_is_taken_literally(self, db, card, q):
+        make_transaction(db, card, name="PLAIN NAME", amount="10.00")
+        assert run(db, F(q=q)).total_count == 0
+
     def test_an_amount_word_matches_the_amount(self, db, card):
         make_transaction(db, card, name="REFUND", amount="-54.99")
         make_transaction(db, card, name="OTHER", amount="54.98")
@@ -205,7 +271,8 @@ class TestEachFilter:
         dates = txns.resolve_dates(db, F(range=preset), TODAY)
         assert dates.start == (D(start) if start else None)
         assert dates.end == (D(end) if end else None)
-        assert dates.label
+        assert dates.label and "posting" not in dates.label
+        assert dates.basis == spending.BASIS_SPEND_DATE  # calendar mode: the date shown
 
     def test_the_budget_period_follows_statement_mode(self, db, card):
         make_statement(db, card, "2026-09-27")
@@ -221,6 +288,63 @@ class TestEachFilter:
         set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=card.id)
         dates = txns.resolve_dates(db, F(range="period"), TODAY)
         assert (dates.start, dates.end) == (D("2026-10-01"), D("2026-10-31"))
+        # spending.period_spending still counts by posting date in statement mode.
+        assert dates.basis == spending.BASIS_POSTED_DATE
+        assert dates.label == "This month (Oct 2026), by posting date"
+
+    def test_the_statement_period_lists_what_budgets_count(self, db, card, cats):
+        # ARCHITECTURE §6: a cycle is (previous closing, closing] by posting date, and
+        # period_spending counts statement-mode periods by posting date. A charge authorized
+        # before the closing date but posted after it belongs to the new period.
+        make_statement(db, card, "2026-09-14")
+        make_statement(db, card, "2026-10-14")
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=card.id)
+        groceries = cats["groceries"]
+        make_transaction(
+            db,
+            card,
+            name="posted after closing",
+            amount="40.00",
+            date="2026-10-15",
+            authorized_date="2026-10-13",
+            category=groceries,
+        )
+        make_transaction(
+            db,
+            card,
+            name="posted on the closing date",
+            amount="7.00",
+            date="2026-10-14",
+            authorized_date="2026-10-14",
+            category=groceries,
+        )
+        make_transaction(
+            db,
+            card,
+            name="pending",
+            amount="5.00",
+            date="2026-10-20",
+            pending=True,
+            category=groceries,
+        )
+        filt = F(range="period", category=str(groceries.id))
+        page = run(db, filt)
+        assert page.dates == txns.DateRange(
+            D("2026-10-15"),
+            D("2026-11-14"),
+            "This statement period (Oct 15 – Nov 14, 2026), by posting date",
+            spending.BASIS_POSTED_DATE,
+        )
+        assert sorted(names(page)) == ["pending", "posted after closing"]
+        counted = spending.period_spending(db, txns.budget_period(db, TODAY))
+        assert counted.amount_for(groceries.id) == page.sums.net == Decimal("45.00")
+        exported = list(
+            csv.reader(io.StringIO("".join(txns.export_csv(db, filt, today=TODAY))[1:]))
+        )
+        assert sorted(r[3] for r in exported[1:]) == ["pending", "posted after closing"]
+        # Only the budget period switches basis: a custom range still means the dates shown.
+        custom = F(range="custom", category=str(groceries.id), **{"from": "2026-10-15"})
+        assert names(run(db, custom)) == ["pending"]
 
     def test_categories_including_uncategorized(self, db, card, cats):
         make_transaction(db, card, name="G", category=cats["groceries"])
@@ -255,6 +379,29 @@ class TestEachFilter:
         make_transaction(db, card, name="UBER EATS", merchant_name="Uber Eats")
         make_transaction(db, card, name="uber")
         assert sorted(names(run(db, F(merchant="UBER")))) == ["UBER *TRIP", "uber"]
+
+    def test_merchant_matches_amex_descriptions_with_runs_of_spaces(self, db, card):
+        # Amex CSV rows have no merchant name, and their Description keeps its padding; the
+        # details dialog's "All from this merchant" link carries it as it is.
+        padded = make_transaction(
+            db, card, source="csv", name="SFMTA PAYBYPHONE          SAN FRANCISCO CA"
+        )
+        make_transaction(db, card, source="csv", name="SFMTA PAYBYPHONE          OAKLAND CA")
+        for merchant in (
+            padded.name,
+            "sfmta paybyphone san francisco ca",
+            "  SFMTA\tPAYBYPHONE  SAN FRANCISCO CA ",
+        ):
+            assert names(run(db, F(merchant=merchant))) == [padded.name], merchant
+
+    def test_the_merchant_filter_sees_the_whitespace_python_sees(self, db, card):
+        # The URL value is collapsed with str.split(); the SQL side must collapse the same
+        # characters (no-break, em and ideographic spaces, next line).
+        odd = [chr(c) for c in (0x85, 0xA0, 0x1680, 0x2003, 0x2028, 0x202F, 0x3000)]
+        name = "CAFE" + "".join(f"{ch}{i}" for i, ch in enumerate(odd)) + odd[0] + " "
+        row = make_transaction(db, card, name=name)
+        assert " ".join(name.split()) == "CAFE 0 1 2 3 4 5 6"
+        assert names(run(db, F(merchant="cafe 0 1 2 3 4 5 6"))) == [row.name]
 
     def test_amount_bounds_are_inclusive_on_the_signed_amount(self, db, card):
         for amount in ("-50.00", "9.99", "10.00", "100.00", "100.01"):

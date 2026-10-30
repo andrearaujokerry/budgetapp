@@ -8,6 +8,8 @@
  *                                      enabled only when the parts add up to the cent
  *   [data-results][data-sort]          the filter form's hidden sort follows sort-header clicks
  *   [data-results] .tabs               the current view tab scrolls into sight (phones)
+ *   [data-results][data-status]        after #results is swapped, its text goes to the
+ *                                      #txn-results-status live region (screen readers)
  *
  * Money is handled in integer cents parsed from the text, never as floats.
  */
@@ -335,11 +337,25 @@
     });
   }
 
+  // A filter, sort or page change swaps #results: say how many transactions match now. The
+  // region is emptied first so the same text (e.g. after re-sorting) is announced again.
+  var announceTimer = null;
+  function announceResults(el) {
+    var status = doc.getElementById("txn-results-status");
+    var results = el && el.id === "results" ? el.querySelector("[data-results]") : null;
+    if (!status || !results) return;
+    var text = results.getAttribute("data-status") || "";
+    status.textContent = "";
+    window.clearTimeout(announceTimer);
+    announceTimer = window.setTimeout(function () { status.textContent = text; }, 150);
+  }
+
   doc.addEventListener("htmx:afterSettle", function (evt) {
     var el = evt.target;
     initSplits(el && el.querySelectorAll ? el : doc);
     syncSort();
     showCurrentTab();
+    announceResults(el);
     if (el && el.matches && el.matches("tr.txn-row") && returnTo === el.id && focusLost()) {
       focusRowMenu(el.id);
     }

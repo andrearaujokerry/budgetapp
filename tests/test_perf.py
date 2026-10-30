@@ -208,6 +208,8 @@ def test_transactions_page_and_export_with_five_years_of_data(
         "text search": ("/transactions?q=coffee", None),
         "text search (HTMX)": ("/transactions?q=coffee", HTMX),
         "category filter": (f"/transactions?category={data['groceries']}", None),
+        # Collapses whitespace in every row's merchant or description (Amex CSV padding).
+        "merchant filter": ("/transactions?merchant=Blue+Bottle+Coffee", None),
         "deep page, by amount": ("/transactions?sort=amount&page=300", None),
         # The heaviest dialog: its preview runs the draft rule over every transaction.
         "one-click rule dialog": (f"/transactions/{data['coffee']}/rule", HTMX),
@@ -226,6 +228,9 @@ def test_transactions_page_and_export_with_five_years_of_data(
     assert all("coffee" in (r.merchant_name or r.name).lower() for r in search.rows)
     groceries = results["category filter"].context["page"]
     assert 0 < groceries.total_count < data["count"]
+    coffee = results["merchant filter"].context["page"]
+    assert coffee.total_count > 700
+    assert all(r.merchant_name == "Blue Bottle Coffee" for r in coffee.rows)
     assert results["deep page, by amount"].context["page"].page == 300
     preview = results["one-click rule dialog"].context["preview"]
     assert preview.matches > 700  # every Blue Bottle Coffee charge in five years

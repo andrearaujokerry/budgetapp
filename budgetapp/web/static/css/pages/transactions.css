@@ -360,6 +360,15 @@
   color: var(--accent-text);
 }
 
+/* "Matches only CSV rows": new charges from Plaid may name the merchant differently. */
+.txn-rule-preview__hint {
+  margin-top: 8px;
+}
+
+.txn-rule-preview__hint .icon {
+  color: var(--warn-text);
+}
+
 .txn-split__head,
 .txn-split__part {
   display: grid;

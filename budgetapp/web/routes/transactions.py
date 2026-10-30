@@ -10,6 +10,7 @@ page with a plain form, so every link works without JavaScript too. Plain form p
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Iterator, Mapping
 from typing import Any
 from urllib.parse import urlencode, urlsplit
@@ -181,9 +182,9 @@ def _done(
 @router.get("/transactions")
 def transactions_page(request: Request, session: SessionDep) -> Response:
     params = request.query_params
-    filt = TransactionFilter.from_params(params)
-    sort = txns.parse_sort(params.get("sort"))
     categories = txns.load_categories(session)
+    filt = TransactionFilter.from_params(params).without_unknown_categories(categories)
+    sort = txns.parse_sort(params.get("sort"))
     result = txns.search(
         session, filt, page=txns.parse_page(params.get("page")), sort=sort, categories=categories
     )
@@ -215,20 +216,30 @@ def transactions_page(request: Request, session: SessionDep) -> Response:
 
 @router.get("/transactions/export.csv")
 def export_transactions(request: Request, session_factory: SessionFactoryDep) -> Response:
-    """The filtered rows as a CSV download (TXN-5), in the list's order, without paging."""
+    """The filtered rows as a CSV download (TXN-5), in the list's order, without paging.
+
+    The rows stream after this function returns, so the export has a session of its own. Its
+    queries start (and any error surfaces, as an error page) before the first byte is sent: the
+    first chunk is taken here. The started generator closes its session when it finishes, fails
+    or is discarded.
+    """
     params = request.query_params
-    filt = TransactionFilter.from_params(params)
     sort = txns.parse_sort(params.get("sort"))
     today = clock.today()
     with session_factory() as session:
+        filt = TransactionFilter.from_params(params).without_unknown_categories(
+            txns.load_categories(session)
+        )
         filename = txns.export_filename(filt, txns.resolve_dates(session, filt, today), today)
 
     def stream() -> Iterator[str]:
         with session_factory() as export_session:
             yield from txns.export_csv(export_session, filt, sort=sort, today=today)
 
+    rows = stream()
+    first = next(rows)
     return StreamingResponse(
-        stream(),
+        itertools.chain((first,), rows),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
@@ -512,10 +523,10 @@ def _rule_context(
 
 
 def _category_name(session: Session, value: Any) -> str | None:
-    text = str(value or "").strip()
-    if not text.isdigit():
+    category_id = txns.parse_id(value)
+    if category_id is None:
         return None
-    ref = txns.load_categories(session).get(int(text))
+    ref = txns.load_categories(session).get(category_id)
     return ref.name if ref else None
 
 
@@ -571,11 +582,11 @@ def save_rule(
         session.rollback()
         context = _rule_context(session, row, values, errors=err.errors)
         return _form_response(request, "rule", context, status_code=422, next_url=next_url)
-    if result.changed:
+    if result.changed or result.source_changed:
         alerts.evaluate_budgets(session, notifier)
     session.commit()
     category = txns.load_categories(session)[result.category_id].name
-    pattern = " ".join(values["merchant_pattern"].split())
+    pattern = " ".join(txns.clean_text(values["merchant_pattern"]).split())
     message = f"Rule saved: merchants containing “{pattern}” go to {category}."
     if result.applied:
         moved = (
@@ -585,4 +596,6 @@ def save_rule(
         if result.skipped_user:
             message += f"; {result.skipped_user:,} you categorized by hand stayed as they were"
         message += "."
+    elif result.source_changed:
+        message += " This transaction moved there; other past ones stayed as they were."
     return redirect(request, next_url, "success", message)

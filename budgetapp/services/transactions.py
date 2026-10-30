@@ -23,6 +23,7 @@ import dataclasses
 import datetime as dt
 import io
 import re
+from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -34,6 +35,7 @@ from sqlalchemy import (
     case,
     exists,
     func,
+    literal,
     not_,
     or_,
     select,
@@ -54,7 +56,7 @@ from budgetapp.models import (
     get_app_settings,
 )
 from budgetapp.money import ZERO, format_money, is_cents, parse_money_input, to_money
-from budgetapp.services import categorize, userstate
+from budgetapp.services import categorize, spending, userstate
 
 PER_PAGE = 50
 MAX_PER_PAGE = 200
@@ -116,6 +118,32 @@ PROCESSOR_PREFIXES = frozenset(
 )
 _DOMAIN_TOKEN = re.compile(r"\.(COM|NET|ORG|CO|IO|US)\b|^WWW\.", re.IGNORECASE)
 _STATE_CODE = re.compile(r"^[A-Z]{2}$")
+#: Amex pads the merchant part of a CSV Description before the city ("BLUE BOTTLE COFFEE     SAN
+#: FRANCISCO CA"); the first run of two or more spaces ends the merchant.
+_PADDING = re.compile(r"\s{2,}")
+#: C0 control characters and DEL, except tab and newline: invisible on the page, and PostgreSQL
+#: refuses NUL in text, so user text and URL parameters are cleaned of them first.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+#: Whitespace runs as ``str.split`` sees them (SQL side of the merchant filter).
+_SQL_WHITESPACE = "[\\s\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+"
+
+
+def clean_text(value: Any) -> str:
+    """``value`` as text without control characters (tab and newline stay; CR LF becomes LF)."""
+    text = "" if value is None else str(value)
+    return _CONTROL_CHARS.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
+
+
+def parse_id(value: Any) -> int | None:
+    """A database id from text (ASCII digits, 1 to 2**63 − 1), else ``None``.
+
+    ``str.isdigit`` alone is not enough: it accepts "²", which ``int`` refuses.
+    """
+    text = str(value).strip() if value is not None else ""
+    if not (text.isascii() and text.isdecimal()):
+        return None
+    number = int(text)
+    return number if 0 < number < 2**63 else None
 
 
 class TransactionNotFound(LookupError):
@@ -143,16 +171,20 @@ UNSET: Any = _Unset()
 
 
 def _getlist(params: Any, key: str) -> list[str]:
+    """Every value of ``key`` as text, without control characters (see :func:`clean_text`)."""
     if hasattr(params, "getlist"):
-        return [str(v) for v in params.getlist(key)]
-    if isinstance(params, list | tuple):  # (key, value) pairs, e.g. TransactionFilter.to_params()
-        return [str(v) for k, v in params if k == key]
-    value = params.get(key) if isinstance(params, Mapping) else None
-    if value is None:
-        return []
-    if isinstance(value, list | tuple):
-        return [str(v) for v in value]
-    return [str(value)]
+        values = list(params.getlist(key))
+    elif isinstance(params, list | tuple):  # (key, value) pairs, e.g. TransactionFilter.to_params()
+        values = [v for k, v in params if k == key]
+    else:
+        value = params.get(key) if isinstance(params, Mapping) else None
+        if value is None:
+            values = []
+        elif isinstance(value, list | tuple):
+            values = list(value)
+        else:
+            values = [value]
+    return [clean_text(v) for v in values]
 
 
 def _get(params: Any, key: str) -> str:
@@ -211,12 +243,11 @@ class TransactionFilter:
         tokens: list[str] = []
         for raw in _getlist(params, "category"):
             token = raw.strip().lower()
-            if token == UNCATEGORIZED_TOKEN:
-                pass
-            elif token.isdigit() and 0 < int(token) < 2**63:
-                token = str(int(token))
-            else:
-                continue
+            if token != UNCATEGORIZED_TOKEN:
+                category_id = parse_id(token)
+                if category_id is None:
+                    continue
+                token = str(category_id)
             if token not in tokens:
                 tokens.append(token)
         tokens = tokens[:MAX_CATEGORY_TOKENS]
@@ -233,8 +264,7 @@ class TransactionFilter:
         if show not in SHOWS:
             show = "all"
 
-        account = _get(params, "account")
-        account_id = int(account) if account.isdigit() and 0 < int(account) < 2**63 else None
+        account_id = parse_id(_get(params, "account"))
 
         credits_only = _get(params, "credits").lower() in ("1", "true", "on", "yes")
         if credits_only and amount_min is not None and amount_min > 0:
@@ -298,6 +328,23 @@ class TransactionFilter:
     def replace(self, **changes: Any) -> TransactionFilter:
         return dataclasses.replace(self, **changes)
 
+    def without_unknown_categories(self, known_ids: Iterable[int]) -> TransactionFilter:
+        """This filter without the category ids that no longer exist (a bookmark or link from
+        before a category was merged away), and a note in ``problems`` saying so. Otherwise the
+        list would be narrowed by a category the picker cannot show."""
+        known = {str(i) for i in known_ids}
+        kept = tuple(t for t in self.categories if t == UNCATEGORIZED_TOKEN or t in known)
+        dropped = len(self.categories) - len(kept)
+        if not dropped:
+            return self
+        note = (
+            "Ignored a category that no longer exists (it may have been merged into another)."
+            if dropped == 1
+            else f"Ignored {dropped} categories that no longer exist (they may have been merged "
+            "into others)."
+        )
+        return self.replace(categories=kept, problems=(*self.problems, note))
+
     @property
     def is_default(self) -> bool:
         """True when nothing narrows the list (the ``show`` view aside)."""
@@ -346,8 +393,8 @@ def parse_sort(value: str | None) -> str:
 
 def parse_page(value: str | None) -> int:
     """A page number ≥ 1 (anything else is page 1)."""
-    text = (value or "").strip()
-    return int(text) if text.isdigit() and 0 < int(text) < 10**6 else 1
+    number = parse_id(value)
+    return number if number is not None and number < 10**6 else 1
 
 
 # --------------------------------------------------------------------------- reference data
@@ -457,11 +504,14 @@ def filter_options(session: Session, *, today: dt.date | None = None) -> FilterO
 
 @dataclass(frozen=True, slots=True)
 class DateRange:
-    """The dates a filter covers (``None`` = open-ended) and how to say it."""
+    """The dates a filter covers (``None`` = open-ended), how to say it, and which date of a
+    transaction they apply to: ``spending.BASIS_SPEND_DATE`` (the date the list shows) or, for
+    the budget period in statement mode, ``spending.BASIS_POSTED_DATE`` (as Budgets count it)."""
 
     start: dt.date | None
     end: dt.date | None
     label: str
+    basis: str = spending.BASIS_SPEND_DATE
 
 
 def budget_period(session: Session, today: dt.date) -> periods.Period:
@@ -515,13 +565,22 @@ def _span_label(start: dt.date | None, end: dt.date | None) -> str:
 def resolve_dates(
     session: Session, filt: TransactionFilter, today: dt.date | None = None
 ) -> DateRange:
-    """The concrete dates of the filter's preset, measured from ``today``."""
+    """The concrete dates of the filter's preset, measured from ``today``.
+
+    Every preset covers spend dates, except the budget period (``period``): it uses the date
+    basis of ``spending.period_spending`` (the posting date in statement mode), so the list shows
+    exactly the rows Budgets count in that period.
+    """
     today = today or clock.today()
     preset = filt.range
     if preset == "period":
         period = budget_period(session, today)
+        basis = spending.basis_for_mode(get_app_settings(session).budget_period_mode)
         name = "This month" if period.kind == periods.MONTH else "This statement period"
-        return DateRange(period.start, period.end, f"{name} ({period.label})")
+        label = f"{name} ({period.label})"
+        if basis == spending.BASIS_POSTED_DATE:
+            label += ", by posting date"
+        return DateRange(period.start, period.end, label, basis)
     if preset == "last_month":
         year, month = periods.add_months(today.year, today.month, -1)
         month_period = periods.month_period(year, month)
@@ -545,9 +604,27 @@ def spend_date_expr() -> ColumnElement[dt.date]:
     return func.coalesce(Transaction.authorized_date, Transaction.date)
 
 
+def posted_date_expr() -> ColumnElement[dt.date]:
+    """``COALESCE(posted_date, date)``: the posting date, as ``spending.basis_date`` reads it for
+    statement-mode budget periods (a pending row is dated by its Plaid date)."""
+    return func.coalesce(Transaction.posted_date, Transaction.date)
+
+
+def basis_date_expr(basis: str) -> ColumnElement[dt.date]:
+    """The transaction date a :class:`DateRange` with this ``basis`` applies to."""
+    return posted_date_expr() if basis == spending.BASIS_POSTED_DATE else spend_date_expr()
+
+
 def merchant_expr() -> ColumnElement[str]:
     """The merchant as ``services.spending.top_merchants`` names it (else the description)."""
     return func.coalesce(Transaction.merchant_name, Transaction.name)
+
+
+def merchant_key_expr() -> ColumnElement[str]:
+    """:func:`merchant_expr` lower-cased with whitespace runs collapsed and trimmed, so the
+    merchant filter matches Amex CSV descriptions, which keep long runs of spaces."""
+    collapsed = func.regexp_replace(merchant_expr(), _SQL_WHITESPACE, " ", "g")
+    return func.lower(func.btrim(collapsed))
 
 
 def _like_escape(term: str) -> str:
@@ -643,11 +720,11 @@ def filter_conditions(
             conditions.append(Transaction.needs_review.is_(True))
 
     dates = resolve_dates(session, filt, today)
-    spend_date = spend_date_expr()
+    day = basis_date_expr(dates.basis)
     if dates.start is not None:
-        conditions.append(spend_date >= dates.start)
+        conditions.append(day >= dates.start)
     if dates.end is not None:
-        conditions.append(spend_date <= dates.end)
+        conditions.append(day <= dates.end)
 
     search = _search_condition(filt.q)
     if search is not None:
@@ -655,7 +732,8 @@ def filter_conditions(
     if filt.categories:
         conditions.append(_category_condition(resolve_category_ids(session, filt.categories)))
     if filt.merchant:
-        conditions.append(func.lower(merchant_expr()) == filt.merchant.lower())
+        merchant = " ".join(filt.merchant.split())
+        conditions.append(merchant_key_expr() == func.lower(literal(merchant)))
     if filt.amount_min is not None:
         conditions.append(Transaction.amount >= filt.amount_min)
     if filt.amount_max is not None:
@@ -1088,11 +1166,10 @@ def _get_for_update(session: Session, transaction_id: int) -> Transaction:
 
 
 def _category_id(session: Session, value: Any, errors: dict[str, str], field: str) -> int | None:
-    text = str(value).strip() if value is not None else ""
-    if not text.isdigit() or not 0 < int(text) < 2**63:
+    category_id = parse_id(value)
+    if category_id is None:
         errors[field] = "Choose a category."
         return None
-    category_id = int(text)
     if session.get(Category, category_id) is None:
         errors[field] = "That category no longer exists. Reload the page and choose another."
         return None
@@ -1101,7 +1178,7 @@ def _category_id(session: Session, value: Any, errors: dict[str, str], field: st
 
 def clean_tags(values: Iterable[Any], errors: dict[str, str]) -> list[str]:
     """Trim, drop empties and de-duplicate tags case-insensitively (first spelling kept)."""
-    tags = userstate.normalize_tags(values)
+    tags = userstate.normalize_tags(clean_text(v) for v in values)
     for tag in tags:
         if len(tag) > MAX_TAG_LENGTH:
             errors["tags"] = f"Keep each tag under {MAX_TAG_LENGTH} characters."
@@ -1133,7 +1210,8 @@ def update(
 
     A category choice sets ``category_source='user'`` and clears ``rule_id``; any change stamps
     ``user_edited_at``. Notes are trimmed (empty → none); tags are trimmed and de-duplicated
-    case-insensitively, keeping the first spelling. Takes the ledger lock first.
+    case-insensitively, keeping the first spelling. Control characters are dropped from both
+    (:func:`clean_text`). Takes the ledger lock first.
     """
     txn = _get_for_update(session, transaction_id)
     errors: dict[str, str] = {}
@@ -1142,8 +1220,7 @@ def update(
         new_category = _category_id(session, category_id, errors, "category_id")
     new_notes = None
     if notes is not UNSET:
-        new_notes = (str(notes) if notes is not None else "").replace("\r\n", "\n").strip()
-        new_notes = new_notes or None
+        new_notes = clean_text(notes).strip() or None
         if new_notes is not None and len(new_notes) > MAX_NOTES_LENGTH:
             errors["notes"] = f"Keep notes under {MAX_NOTES_LENGTH:,} characters."
     new_tags: list[str] = []
@@ -1247,7 +1324,7 @@ def validate_splits(
         else:
             value = to_money(raw_amount)
             total += value
-        note = " ".join((raw_note or "").split()) or None
+        note = " ".join(clean_text(raw_note).split()) or None
         if note is not None and len(note) > MAX_SPLIT_NOTE_LENGTH:
             errors[f"part-{i}-note"] = f"Keep the note under {MAX_SPLIT_NOTE_LENGTH} characters."
         if category_id is not None:
@@ -1318,9 +1395,13 @@ def clean_description(text: str | None) -> str:
     ``"SQ *DELFINA SAN FRANCISCO CA"`` → ``"DELFINA SAN FRANCISCO"``,
     ``"WHOLEFDS MKT 10234 SAN FRANCISCO CA"`` → ``"WHOLEFDS MKT"``,
     ``"UBER *TRIP HELP.UBER.COM CA"`` → ``"UBER"``: processor prefixes go, and the text stops at
-    the first store number, phone number or web address after the first word.
+    the first store number, phone number or web address after the first word. An Amex CSV
+    description stops where its padding starts: ``"BLUE BOTTLE COFFEE      SAN FRANCISCO CA"``
+    → ``"BLUE BOTTLE COFFEE"`` (the city would keep the rule from matching Plaid's merchant
+    names).
     """
-    collapsed = " ".join((text or "").split())
+    head = _PADDING.split(clean_text(text).strip(), maxsplit=1)[0]
+    collapsed = " ".join(head.split())
     if not collapsed:
         return ""
     body = collapsed
@@ -1396,12 +1477,24 @@ def one_click_draft(session: Session, transaction_id: int) -> RuleDraft:
 
 @dataclass(frozen=True, slots=True)
 class RulePreview:
-    """What a one-click rule would do to past transactions (every row, as applying it does)."""
+    """What a one-click rule would do to past transactions (every row, as applying it does).
+
+    ``csv_only`` is True when every match came from an Amex CSV file although Plaid rows exist:
+    new charges arrive from Plaid and may name the merchant differently, so the rule might never
+    match them. ``plaid_merchant`` is then the name Plaid gives the Plaid rows whose description
+    contains the text (``"SFMTA"`` for ``"SFMTA PAYBYPHONE"``), when there are any.
+    """
 
     matches: int
     will_change: int
     user_edited: int
     payments: int
+    csv_only: bool = False
+    plaid_merchant: str | None = None
+
+
+def _clean_pattern(value: Any) -> str:
+    return " ".join(clean_text(value).split())
 
 
 def preview_one_click_rule(
@@ -1413,7 +1506,7 @@ def preview_one_click_rule(
     txn = session.get(Transaction, transaction_id)
     if txn is None:
         raise TransactionNotFound(transaction_id)
-    pattern = " ".join((merchant_pattern or "").split())
+    pattern = _clean_pattern(merchant_pattern)
     errors: dict[str, str] = {}
     target = _category_id(session, category_id, errors, "category_id")
     if not pattern or target is None or len(pattern) > categorize.MAX_PATTERN_LENGTH:
@@ -1442,11 +1535,27 @@ def preview_one_click_rule(
         Transaction.category_id,
         Transaction.category_source,
     )
-    matches = will_change = user_edited = payments = 0
+    matches = will_change = user_edited = payments = from_plaid = 0
+    any_plaid = False
+    plaid_names: Counter[str] = Counter()
     for row in session.execute(select(*columns)):
+        any_plaid = any_plaid or row.source == "plaid"
         if not categorize.rule_matches(draft, row):
+            # A Plaid row the rule misses although its description has the text: Plaid names
+            # the merchant differently (the rule reads merchant_name when there is one).
+            if (
+                row.source == "plaid"
+                and row.merchant_name
+                and (
+                    categorize.text_matches(pattern, row.name, "contains")
+                    or categorize.text_matches(pattern, row.original_description, "contains")
+                )
+            ):
+                plaid_names[row.merchant_name] += 1
             continue
         matches += 1
+        if row.source == "plaid":
+            from_plaid += 1
         if row.category_source == "user":
             user_edited += 1
             continue
@@ -1455,16 +1564,22 @@ def preview_one_click_rule(
             payments += 1
         if decision.category_id != row.category_id:
             will_change += 1
-    return RulePreview(matches, will_change, user_edited, payments)
+    csv_only = bool(matches) and not from_plaid and any_plaid
+    plaid_merchant = plaid_names.most_common(1)[0][0] if csv_only and plaid_names else None
+    return RulePreview(matches, will_change, user_edited, payments, csv_only, plaid_merchant)
 
 
 @dataclass(frozen=True, slots=True)
 class OneClickResult:
+    """``changed`` and ``skipped_user`` count past transactions (only when ``applied``);
+    ``source_changed`` says whether the transaction the rule was made from changed category."""
+
     rule_id: int
     category_id: int
     applied: bool
     changed: int
     skipped_user: int
+    source_changed: bool = False
 
 
 def create_one_click_rule(
@@ -1478,8 +1593,12 @@ def create_one_click_rule(
     """ "Always categorize like this" (CAT-3): a rule "merchant contains ``merchant_pattern``" →
     ``category_id`` made with :func:`categorize.create_rule`, placed just before the first rule
     that matched this transaction so it takes effect, and remembering this transaction as its
-    origin. With ``apply_to_past`` every past transaction it matches is re-categorized, except
-    the ones the user categorized by hand. Raises :class:`categorize.RuleValidationError`.
+    origin.
+
+    The transaction it was made from follows the rule at once (when the rule matches it and the
+    user did not categorize it by hand). With ``apply_to_past`` every other past transaction it
+    matches is re-categorized too, again except the ones the user categorized by hand. Raises
+    :class:`categorize.RuleValidationError`.
     """
     txn = _get_for_update(session, transaction_id)
     errors: dict[str, str] = {}
@@ -1487,22 +1606,30 @@ def create_one_click_rule(
     if target is None:
         raise categorize.RuleValidationError(errors)
     priority, _ = _one_click_priority(session, txn)
+    category_before = txn.category_id
     result = categorize.create_rule(
         session,
         category_id=target,
-        merchant_pattern=" ".join((merchant_pattern or "").split()) or None,
+        merchant_pattern=_clean_pattern(merchant_pattern) or None,
         match_type="contains",
         priority=priority,
         source_transaction_id=txn.id,
         apply_to_existing=apply_to_past,
     )
     applied = result.applied
+    if (
+        applied is None
+        and txn.category_source != "user"
+        and categorize.rule_matches(result.rule, txn)
+    ):
+        categorize.recategorize(session, transaction_ids=[txn.id])
     return OneClickResult(
         rule_id=result.rule.id,
         category_id=target,
         applied=applied is not None,
         changed=applied.changed if applied is not None else 0,
         skipped_user=applied.skipped_user if applied is not None else 0,
+        source_changed=txn.category_id != category_before,
     )
 
 
@@ -1707,6 +1834,10 @@ def export_csv(
     ``= + - @``, a tab or a carriage return gets a leading apostrophe (CSV injection). Suspected
     duplicates are left out unless the filter shows only them. The text starts with a UTF-8 byte
     order mark so spreadsheet apps read accented names correctly.
+
+    Every query has started by the time the header is yielded, so a caller that takes the first
+    chunk before sending anything (the export route) reports a failure as an error page rather
+    than as a cut-off download.
     """
     sort = parse_sort(sort)
     today = today or clock.today()
@@ -1728,7 +1859,6 @@ def export_csv(
         csv.writer(buffer, lineterminator="\r\n").writerows(rows)
         return buffer.getvalue()
 
-    yield "﻿" + chunk([EXPORT_COLUMNS])
     query = (
         select(
             Transaction.id,
@@ -1750,7 +1880,9 @@ def export_csv(
         .order_by(*_order_by(sort))
         .execution_options(yield_per=batch_size)
     )
-    for partition in session.execute(query).partitions():
+    result = session.execute(query)
+    yield "﻿" + chunk([EXPORT_COLUMNS])
+    for partition in result.partitions():
         lines = []
         for r in partition:
             amount = to_money(r.amount)

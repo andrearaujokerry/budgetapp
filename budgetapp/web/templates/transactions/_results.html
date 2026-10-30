@@ -4,7 +4,13 @@
     any_transactions, today, urls. -#}
 {% import "components/ui.html" as ui %}
 {%- set sort_labels = {'-date': 'newest first', 'date': 'oldest first', '-amount': 'largest amount first', 'amount': 'smallest amount first'} -%}
-<div class="txn-results__body" data-results data-sort="{{ '' if sort == '-date' else sort }}">
+{#- What screen readers hear after the list changes (#txn-results-status, WCAG 4.1.3). -#}
+{%- if page.total_count == 0 -%}
+{%- set status = 'No transactions yet.' if not any_transactions else ('No possible duplicates.' if filt.show == 'duplicates' else ('Nothing needs review.' if filt.show == 'review' and filt.is_default else 'No matches for these filters.')) -%}
+{%- else -%}
+{%- set status = '{:,}'.format(page.total_count) ~ (' transaction, ' if page.total_count == 1 else ' transactions, ') ~ page.dates.label ~ '.' ~ ((' Page ' ~ page.page ~ ' of ' ~ page.pages ~ ', ' ~ sort_labels[sort] ~ '.') if page.pages > 1 else '') -%}
+{%- endif -%}
+<div class="txn-results__body" data-results data-sort="{{ '' if sort == '-date' else sort }}" data-status="{{ status }}">
 {%- for problem in filt.problems %}
 {{ ui.banner('warn', problem) }}
 {%- endfor %}

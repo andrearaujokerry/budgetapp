@@ -11,10 +11,11 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from markupsafe import Markup
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from budgetapp.models import Rule, Transaction
 from budgetapp.services import alerts, userstate
+from budgetapp.services import transactions as txns
 from tests.factories import (
     card_payments,
     get_category,
@@ -28,6 +29,7 @@ from tests.web.conftest import HTMX
 from tests.web.csp import csp_problems
 
 TODAY = "2026-10-29"
+FILTERS = {"HX-Trigger": "txn-filters"}  # a request from the filter bar (gets HX-Replace-Url)
 
 
 @pytest.fixture(autouse=True)
@@ -259,6 +261,101 @@ class TestListPage:
             and "Ignored the minimum amount" in response.text
         )
 
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "range=custom&from=2026-02-30",
+            "min=abc&max=1e9",
+            "page=999999999999",
+            "sort=bogus",
+            "category=99999999999999999999",
+            "category=-1",
+            "account=0",
+            "q=%25%5F",
+            "range=custom&from=%3Cscript%3E",
+            # PostgreSQL refuses NUL in text; int() refuses "²" although isdigit() accepts it.
+            "q=%00",
+            "merchant=a%00b",
+            "tag=a%00",
+            "member=a%00",
+            "page=%C2%B2",
+            "category=%C2%B2",
+            "account=%C2%B2",
+        ],
+    )
+    def test_odd_parameters_never_break_the_page(self, client, db, card, query):
+        make_transaction(db, card, name="PLAIN")
+        for headers in (None, HTMX):
+            response = client.get(f"/transactions?{query}", headers=headers)
+            assert response.status_code == 200, query
+            clean(response)
+        export = client.get(f"/transactions/export.csv?{query}")
+        assert export.status_code == 200 and export.text.startswith("﻿Date,"), query
+
+    def test_control_characters_are_dropped_from_the_filters(self, client, db, card):
+        make_transaction(db, card, name="BLUE BOTTLE", tags=["work"])
+        make_transaction(db, card, name="PHILZ")
+        response = client.get("/transactions?q=blue%00&tag=wo%00rk", headers=HTMX | FILTERS)
+        assert [r.name for r in response.context["page"].rows] == ["BLUE BOTTLE"]
+        assert response.headers["HX-Replace-Url"] == "/transactions?q=blue&tag=work"
+
+    def test_a_category_that_no_longer_exists_is_dropped_and_explained(self, client, db, card):
+        # A bookmark or a link from before a category was merged away (CAT-1).
+        make_transaction(db, card, name="ANYTHING")
+        response = client.get("/transactions?category=987654&q=any")
+        html = response.text
+        assert "Ignored a category that no longer exists" in html
+        assert "data-catpick-summary>All categories<" in html
+        assert response.context["filt"].categories == ()
+        assert [r.name for r in response.context["page"].rows] == ["ANYTHING"]
+        assert 'href="/transactions/export.csv?q=any"' in html
+        partial = client.get("/transactions?category=987654&q=any", headers=HTMX | FILTERS)
+        assert partial.headers["HX-Replace-Url"] == "/transactions?q=any"
+        export = client.get("/transactions/export.csv?category=987654")
+        assert [r[3] for r in list(csv.reader(io.StringIO(export.text[1:])))[1:]] == ["ANYTHING"]
+
+    def test_the_result_count_is_announced_to_screen_readers(self, client, db, card):
+        # WCAG 2.2 SC 4.1.3: after a filter, sort or page swap, a status message says how many
+        # transactions match. The live region sits outside #results; transactions.js fills it
+        # from #results' data-status.
+        for i in range(51):
+            make_transaction(db, card, name=f"T{i}", date="2026-10-01")
+        html = client.get("/transactions").text
+        live = '<p id="txn-results-status" class="sr-only" role="status"></p>'
+        assert live in html and html.index(live) < html.index('<div id="results"')
+        partial = client.get("/transactions?sort=amount&page=2", headers=HTMX).text
+        assert live not in partial
+        assert (
+            'data-status="51 transactions, All dates. Page 2 of 2, smallest amount first."'
+            in partial
+        )
+        one = client.get("/transactions?q=T50", headers=HTMX).text
+        assert 'data-status="1 transaction, All dates."' in one
+        none = client.get("/transactions?q=nothing", headers=HTMX).text
+        assert 'data-status="No matches for these filters."' in none
+
+    def test_user_text_is_escaped_on_every_page_dialog_and_partial(self, client, db, card):
+        row = make_transaction(
+            db,
+            card,
+            name="<img src=x onerror=alert(1)>",
+            merchant_name='M"><i>',
+            notes="</textarea><b>x",
+            tags=['"><svg onload=1>'],
+        )
+        for url in (
+            "/transactions",
+            f"/transactions/{row.id}",
+            f"/transactions/{row.id}/edit",
+            f"/transactions/{row.id}/split",
+            f"/transactions/{row.id}/rule",
+            f"/transactions/{row.id}/category",
+        ):
+            for headers in (None, HTMX):
+                html = client.get(url, headers=headers).text
+                assert "<img src=x" not in html and "<svg onload" not in html, url
+                assert '"><i>' not in html and "</textarea><b>" not in html, url
+
     def test_no_results_for_the_filters(self, client, db, card):
         make_transaction(db, card, name="SOMETHING")
         html = client.get("/transactions?q=nothing-like-this").text
@@ -333,6 +430,25 @@ class TestCategoryEdit:
         assert response.status_code == 200 and row_ids(response.text) == [txn.id]
         assert "no longer exists" in toasts(response.text)[0]
         assert 'class="toast toast--over"' in response.text
+        assert reload(db, txn).category_id == cats["home"].id
+
+    @pytest.mark.parametrize("value", ["²", "\x00", "1\x00"])
+    def test_odd_category_values_are_refused_not_fatal(self, client, db, card, cats, value):
+        txn = make_transaction(db, card, category=cats["home"])
+        inline = client.post(
+            f"/transactions/{txn.id}/category", data={"category_id": value}, headers=HTMX
+        )
+        assert inline.status_code == 200 and toasts(inline.text) == ["Choose a category."]
+        dialog = client.post(
+            f"/transactions/{txn.id}/category", data={"category_id": value, "dialog": "1"}
+        )
+        assert dialog.status_code == 422
+        preview = client.get(
+            f"/transactions/{txn.id}/rule/preview",
+            params={"merchant_pattern": "x", "category_id": value},
+            headers=HTMX,
+        )
+        assert preview.status_code == 200 and "Type part of a merchant name" in preview.text
         assert reload(db, txn).category_id == cats["home"].id
 
     def test_the_phone_dialog(self, client, db, card, cats):
@@ -455,6 +571,18 @@ class TestNotesAndTags:
         assert reload(db, txn).notes == "keep"
         plain = client.post(f"/transactions/{txn.id}/edit", data={"notes": "x" * 2001})
         assert plain.status_code == 422 and plain.template.name == "transactions/form_page.html"
+
+    def test_control_characters_are_dropped_not_fatal(self, client, db, card):
+        # PostgreSQL refuses NUL in text: this used to be a 500 page.
+        txn = make_transaction(db, card)
+        response = client.post(
+            f"/transactions/{txn.id}/edit",
+            data={"notes": "a\x00b", "tags": ["wo\x00rk", ""]},
+            headers=HTMX,
+        )
+        assert response.status_code == 200 and toasts(response.text) == ["Notes and tags saved."]
+        stored = reload(db, txn)
+        assert (stored.notes, list(stored.tags)) == ("ab", ["work"])
 
     def test_plain_post_redirects_with_a_toast(self, client, db, card):
         txn = make_transaction(db, card)
@@ -665,8 +793,13 @@ class TestOneClickRule:
         ]
         assert budget_calls == [1]
 
-    def test_without_applying(self, client, db, card, cats):
+    def test_without_applying_only_this_transaction_moves(
+        self, client, db, card, cats, budget_calls
+    ):
         txn = make_transaction(
+            db, card, merchant_name="Uber", category=cats["dining"], category_source="plaid"
+        )
+        past = make_transaction(
             db, card, merchant_name="Uber", category=cats["dining"], category_source="plaid"
         )
         response = client.post(
@@ -675,7 +808,62 @@ class TestOneClickRule:
             follow_redirects=False,
         )
         assert response.status_code == 303 and response.headers["location"] == "/transactions"
-        assert reload(db, txn).category_id == cats["dining"].id
+        assert reload(db, txn).category_id == cats["home"].id
+        assert reload(db, past).category_id == cats["dining"].id
+        assert toasts(client.get("/transactions").text) == [
+            "Rule saved: merchants containing “Uber” go to Home. This transaction moved there; "
+            "other past ones stayed as they were."
+        ]
+        assert budget_calls == [1]
+
+    def test_the_preview_warns_when_only_csv_rows_match(self, client, db, card, cats):
+        csv_row = make_transaction(
+            db,
+            card,
+            source="csv",
+            name="BLUE BOTTLE COFFEE        SAN FRANCISCO CA",
+            category=cats["dining"],
+            category_source="amex",
+        )
+        make_transaction(db, card, name="BLUE BOTTLE COFFEE", merchant_name="Blue Bottle Coffee")
+        dialog = client.get(f"/transactions/{csv_row.id}/rule", headers=HTMX)
+        assert 'value="BLUE BOTTLE COFFEE"' in dialog.text  # the padding cut off the city
+        assert "Matches <strong>2 transactions</strong>" in dialog.text
+        assert "matches only rows imported from Amex CSV files" not in dialog.text
+        city = client.get(
+            f"/transactions/{csv_row.id}/rule/preview",
+            params={"merchant_pattern": "BLUE BOTTLE COFFEE SAN FRANCISCO", "category_id": ""},
+            headers=HTMX,
+        )
+        assert "Type part of a merchant name" in city.text  # no category chosen yet
+        city = client.get(
+            f"/transactions/{csv_row.id}/rule/preview",
+            params={
+                "merchant_pattern": "BLUE BOTTLE COFFEE SAN FRANCISCO",
+                "category_id": cats["dining"].id,
+            },
+            headers=HTMX,
+        )
+        assert "It matches only rows imported from Amex CSV files" in city.text
+        assert "shorten the text to the merchant's name" in city.text
+        clean(city)
+
+    def test_the_preview_names_the_merchant_plaid_uses(self, client, db, card, cats):
+        csv_row = make_transaction(
+            db,
+            card,
+            source="csv",
+            name="SFMTA PAYBYPHONE          SAN FRANCISCO CA",
+            category=cats["shopping"],
+            category_source="amex",
+        )
+        make_transaction(db, card, name="SFMTA PAYBYPHONE", merchant_name="SFMTA")
+        dialog = client.get(f"/transactions/{csv_row.id}/rule", headers=HTMX).text
+        assert 'value="SFMTA PAYBYPHONE"' in dialog
+        assert (
+            "Plaid names new charges from this merchant “SFMTA”, which this text misses: "
+            "change it to match that name." in dialog
+        )
 
     def test_errors_come_back_in_the_form(self, client, db, card, cats):
         txn = make_transaction(db, card, merchant_name="Uber")
@@ -785,7 +973,40 @@ class TestDetails:
 # --------------------------------------------------------------------------- export
 
 
+class TestMerchantLink:
+    def test_all_from_this_merchant_finds_a_csv_row(self, client, db, card):
+        # Amex CSV rows have no merchant name and keep the padding in their Description; the
+        # link carries it as it is, and the filter must still find the row (and its siblings).
+        name = "SFMTA PAYBYPHONE          SAN FRANCISCO CA"
+        row = make_transaction(db, card, source="csv", name=name)
+        sibling = make_transaction(db, card, source="csv", name=name)
+        make_transaction(db, card, source="csv", name="SFMTA PAYBYPHONE          OAKLAND CA")
+        for page in (
+            client.get(f"/transactions/{row.id}", headers=HTMX).text,
+            client.get(f"/transactions/{row.id}").text,
+        ):
+            href = re.search(r'href="(/transactions\?merchant=[^"]+)"', page).group(1)
+            response = client.get(href.replace("&amp;", "&"))
+            assert sorted(r.id for r in response.context["page"].rows) == [row.id, sibling.id]
+            assert response.context["filt"].merchant == "SFMTA PAYBYPHONE SAN FRANCISCO CA"
+
+
 class TestExport:
+    def test_a_failing_export_is_an_error_page_not_a_cut_off_file(
+        self, make_app, make_client, db, card, monkeypatch
+    ):
+        # The rows stream after the route returns; its queries must start (and fail) first, so
+        # the browser gets an error page instead of a 200 and a truncated or empty file.
+        make_transaction(db, card, name="A")
+        monkeypatch.setattr(
+            txns, "filter_conditions", lambda *args, **kwargs: [text("1 / (SELECT 0) = 1")]
+        )
+        client = make_client(make_app(), raise_server_exceptions=False)
+        response = client.get("/transactions/export.csv")
+        assert response.status_code == 500
+        assert response.headers["content-type"].startswith("text/html")
+        assert "content-disposition" not in response.headers
+
     def test_download_follows_the_filters(self, client, db, card, cats):
         make_transaction(
             db, card, name="=SUM(A1)", amount="12.50", date="2026-10-20", category=cats["dining"]
