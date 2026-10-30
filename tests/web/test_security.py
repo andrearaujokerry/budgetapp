@@ -371,6 +371,11 @@ def test_the_template_check_catches_violations():
     assert not csp_problems('{# never <style> or onclick= here #}<p style="--x: 1">')
     assert not csp_problems("{% if key[:5] == 'hx-on' %}{{ fail('javascript: URL') }}{% endif %}")
     assert csp_problems("{{ x }}<b onclick=go()>", rendered=True)
+    # user text, escaped inside an attribute value, is not an attribute (reported by TXN, CAT, CSV)
+    escaped = "<p title=\"&lt;img src=x onerror=alert(1)&gt;\" data-x='a onload=b'>"
+    assert not csp_problems(escaped, rendered=True)
+    assert csp_problems('<p title="a > b" onclick="go()">', rendered=True)
+    assert csp_problems("<p title='x' onmouseover=go()>", rendered=True)
 
 
 @pytest.mark.parametrize(
