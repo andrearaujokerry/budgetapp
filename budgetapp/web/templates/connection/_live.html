@@ -1,0 +1,110 @@
+{#- The live part of the Connection page: each linked connection (status, update-mode actions,
+    details, cards) and the recent syncs. GET /connection with HX-Request answers with this
+    fragment; it polls itself while a sync runs (every 4 s) or a follow-up sync is queued
+    (every 10 s), stops when neither is true, and refreshes on the connection-changed event (Sync
+    now in the top bar). It sends plaid=1|0, whether the page loaded Plaid's script (page_plaid),
+    so a Link action can't arrive by polling into a page that can't open Link. Every control has
+    a stable id, so htmx puts keyboard focus back after each swap. Context as for
+    connection/index.html. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "connection/_macros.html" as cx -%}
+{%- set o = overview -%}
+<div id="connection-live" class="stack stack--xl" hx-get="/connection" hx-trigger="{{ (poll ~ ', ') if poll else '' }}{{ changed_event }} from:body" hx-swap="outerHTML" hx-vals='{"plaid": "{{ 1 if page_plaid else 0 }}"}'>
+{%- for item in o.items %}
+{%- set s = item.status %}
+<section class="section" aria-labelledby="item-{{ item.id }}-title">
+<div class="section__header">
+<div>
+<h2 class="section__title" id="item-{{ item.id }}-title">{{ item.name }}</h2>
+<p class="section__subtitle">Linked {{ item.linked_at|date_long }} through Plaid · read-only</p>
+</div>
+{{ cx.item_pill(item) }}
+</div>
+
+{%- if item.needs_reconnect %}
+{% call ui.banner("over", item.error_display_message or item.error_help or "American Express needs you to sign in again through Plaid.", title="Reconnect needed.") %}
+{{ ui.button("Reconnect", variant="danger", size="sm", icon="link", data_link_mode="update", data_item_id=item.id, id="reconnect-" ~ item.id, disabled=not link_enabled) }}
+{% endcall %}
+{%- elif s.state == "error" %}
+{{ ui.banner("over", item.error_display_message or item.error_help or "The last sync didn't finish; the next one tries again.", title="The last sync failed" ~ (" (" ~ item.error_code ~ ")" if item.error_code else "") ~ ".") }}
+{%- elif s.state == "stale" %}
+{{ ui.banner("warn", "No successful sync for over a day and a half. Sync now, or check that the Mac was awake and online.", title="Your data may be out of date.") }}
+{%- endif %}
+{%- if s.consent_warning and not item.needs_reconnect %}
+{% call ui.banner("over" if s.consent_days_left <= 0 else "warn", "American Express asks you to confirm access once a year. Renewing takes a minute in a Plaid window and keeps this connection.", title=cx.consent_text(s) ~ ".") %}
+{{ ui.button("Renew consent", size="sm", icon="refresh", data_link_mode="update", data_item_id=item.id, id="renew-" ~ item.id, disabled=not link_enabled) }}
+{% endcall %}
+{%- endif %}
+{%- if not item.liabilities_consented %}
+{% call ui.banner("info", "Plaid can also share the statement balance, minimum payment and due date. You confirm in a short Plaid window; the connection stays the same.", title="Statement details aren't shared.") %}
+{{ ui.button("Grant access to statement details", size="sm", icon="receipt", data_link_mode="liabilities", data_item_id=item.id, id="grant-" ~ item.id, disabled=not link_enabled) }}
+{% endcall %}
+{%- endif %}
+
+{% call ui.card() %}
+{%- set history %}
+{%- if item.history_complete_at %}All received ({{ item.history_complete_at|date_long }})
+{%- elif busy[item.id] == "backfill" %}Plaid is still sending older transactions; the app checks again shortly
+{%- elif item.transactions_update_status == "INITIAL_UPDATE_COMPLETE" %}Recent transactions are in; older ones follow
+{%- else %}Waiting for Plaid to prepare your transactions{% endif %}
+{%- endset %}
+{%- set statements %}
+{%- if not item.liabilities_consented %}Not shared
+{%- elif item.liabilities_status == "ok" %}Shared
+{%- elif item.liabilities_status == "unsupported" %}American Express doesn't provide them for this card
+{%- elif item.liabilities_status == "error" %}Couldn't be read last time; the next sync tries again
+{%- else %}Shared; read on the next sync{% endif %}
+{%- endset %}
+{%- set plaid_update %}
+{%- if s.plaid_last_update_at %}{{ cx.stamp(s.plaid_last_update_at, now) }}{% else %}Not reported yet{% endif %}
+{%- if item.plaid_last_failed_update_at and (not s.plaid_last_update_at or item.plaid_last_failed_update_at > s.plaid_last_update_at) %}<span class="text-warn"> · its last attempt failed (Plaid retries by itself)</span>{% endif %}
+{%- endset %}
+{%- set consent %}{{ cx.consent_text(s) }}{% if not s.consent_expires_at %} <span class="muted">(estimated: a year after you last confirmed)</span>{% endif %}{% endset %}
+{{ ui.kv([
+  ("Last successful sync", cx.stamp(s.last_sync_success_at, now)),
+  ("Plaid's last update from Amex", plaid_update),
+  ("History", history),
+  ("Consent", consent),
+  ("Statement details", statements),
+]) }}
+{% endcall %}
+
+{%- for a in item.accounts %}
+{%- set limit %}{% if a.credit_limit is not none %}{{ ui.money(a.credit_limit, cents=false) }}{% else %}<span class="muted">No preset limit</span>{% endif %}{% endset %}
+{%- set due_tone = none %}
+{%- if a.is_overdue %}
+{%- set due_text = "Overdue" ~ (" since " ~ (a.payment_due_date|date_short) if a.payment_due_date else "") %}
+{%- set due_tone = "over" %}
+{%- elif a.payment_due_date %}
+{%- set due_text = "Due " ~ (a.payment_due_date|date_long) %}
+{%- if (a.payment_due_date - today).days <= 7 and a.payment_due_date >= today %}{% set due_tone = "warn" %}{% endif %}
+{%- elif item.liabilities_consented %}
+{%- set due_text = "No payment due date" %}
+{%- else %}
+{%- set due_text = "Not shared" %}
+{%- endif %}
+{%- set footer %}
+<p class="account-asof">Balances as of {{ cx.stamp(a.balances_as_of, now, empty="—") }}
+{%- if a.liabilities_as_of %} · Statement details as of {{ cx.stamp(a.liabilities_as_of, now) }}{% endif %}</p>
+{%- endset %}
+{% call ui.card(a.display_name, subtitle=(a.official_name if a.official_name and a.official_name != a.display_name else none), id="account-" ~ a.id, footer=footer) %}
+{%- if a.notice %}
+{{ ui.banner("warn", a.notice, title="Check this card.") }}
+{%- endif %}
+<div class="grid grid--4{{ ' mt-4' if a.notice }}">
+{{ ui.stat("Current balance", ui.money(a.current_balance), sub=("Available " ~ (a.available_balance|money)) if a.available_balance is not none else none, icon="credit-card") }}
+{{ ui.stat("Statement balance", ui.money(a.statement_balance), sub=("Statement of " ~ (a.statement_issue_date|date_long)) if a.statement_issue_date else ("Not shared" if not item.liabilities_consented else "No statement yet"), icon="receipt") }}
+{{ ui.stat("Minimum payment", ui.money(a.minimum_payment), sub=due_text, tone=due_tone, icon="calendar") }}
+{{ ui.stat("Credit limit", limit, sub=("Last payment " ~ (a.last_payment_amount|money) ~ (" on " ~ (a.last_payment_date|date_short) if a.last_payment_date else "")) if a.last_payment_amount is not none else none, icon="target") }}
+</div>
+{% endcall %}
+{%- endfor %}
+</section>
+{%- endfor %}
+
+{% include "connection/_runs.html" %}
+</div>
+{%- if partial|default(false) and o.linked %}
+{%- set oob = true %}
+{% include "connection/_sync_button.html" %}
+{%- endif %}

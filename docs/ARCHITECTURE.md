@@ -495,6 +495,9 @@ applies.
    nothing: same account, amount within `max($1, 20%)`, `COALESCE(authorized_date, date)` within
    7 days, similar description; best score first; posted candidates preferred for a pending
    source. The match inherits the state and the tombstone records `consumed_by_transaction_id`.
+   Then unconsumed tombstones without user state are matched to the rows still unmatched by the
+   same rules, only to record `consumed_by_transaction_id`: the row is the same charge (a posting
+   Plaid didn't link, a re-delivery after account churn), not a new one (section 11, ALR-3).
 6. **Reconciliation** with CSV rows (below), then the cursor update.
 
 ### CSV ↔ Plaid reconciliation (SYNC-8)
@@ -619,10 +622,11 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   no `plaid.access_token.production` in Keychain, no unexpired
   `plaid.link_in_progress.production` marker and no unsaved production token in a recovery file
   (`secrets.production_link_blockers`) — checked and the marker set under the link lock.
-  The marker is cleared after a successful exchange (once `store_access_token` has returned
-  normally) or when the user cancels Link; otherwise it expires after 4 hours (a Link token's
-  lifetime). `./run setup --env production --access-token` marks a stored token's recovery
-  files `*.saved`.
+  The marker records a random attempt id that goes back to the page with the Link token; only
+  that attempt clears it: after its successful exchange (once `store_access_token` has returned
+  normally), a definite refusal, or Link's `onExit`. Otherwise it expires after 4 hours (a Link
+  token's lifetime). `./run setup --env production --access-token` marks a stored token's
+  recovery files `*.saved`.
 - **Re-attach.** If Keychain holds a production token but the database has no Item (lost or
   restored database), the Connection page offers "Re-attach existing connection" (rebuild the row
   from `/item/get` and `/accounts/get`, sync from a null cursor, reconcile) — never a new link.
@@ -631,15 +635,21 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   enabled on the dashboard's US OAuth institutions page) and
   `search_institutions('American Express', ['liabilities'])`. A Link attempt that fails these
   checks creates no access token and uses no connection.
-- **Exchange.** In production a public token whose `onSuccess` institution already has an Item
-  is not exchanged. The public token stays in memory until the access token is in Keychain (read
-  back) and the Item row is committed; transport failures are retried within the token's 30-minute
-  life; one code path only; recovery file if the Keychain write fails (section 3).
+- **Exchange.** In production a public token is not exchanged while any trace of a connection
+  exists (an Item row, the Keychain token, an unsaved recovery file) or when `onSuccess` names an
+  institution that clearly isn't American Express. One exchange or re-attach runs at a time (a
+  session-level advisory lock held until the Item row is committed; a second one is refused), and
+  it keeps the link-in-progress marker while it runs. The public token stays in memory until the
+  access token is in Keychain (read back) and the Item row is committed; transport failures are
+  retried within the token's 30-minute life; one code path only; recovery file if the Keychain
+  write fails (section 3), and if no file can be written either, the token is shown once for the
+  user to keep.
 - **After linking:** `/item/get` (consent expiry, `consented_products`), `/accounts/get`,
   attach a manual CSV account if one exists, `/liabilities/get` only if Liabilities was consented
   (otherwise the page offers an update-mode session to add it), then the first sync and backfill.
-- Link `onExit`/`onEvent` treat `CLOSE_OAUTH` and `FAIL_OAUTH` as "not linked" and clear the
-  marker.
+- Link's `onExit` (Link closed without linking) clears its own attempt's marker. The
+  `CLOSE_OAUTH` and `FAIL_OAUTH` events are logged as "not linked" but never clear it: the Amex
+  window closed or timed out while Link itself stays open and can still succeed.
 
 ## 8. Sync engine (SYNC-2, SYNC-5, SYNC-6, SYNC-7, REL-1)
 
@@ -652,7 +662,8 @@ sync_item(item_id, trigger):
   start = item.transactions_cursor            # None → omit cursor
   fetch every page until has_more is false; on TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION
      or a transport error, discard the pages and restart from `start` (bounded retries)
-  NOT_READY → record success with no changes; keep the cursor null
+  NOT_READY → record success with no changes; keep the cursor null (and, while it is null,
+     last_sync_success_at: no data has arrived yet)
   ONE transaction: ledger lock → apply algorithm (section 6) → reconcile_item →
      cursor compare-and-set → item healthy, error cleared, history_complete_at, cutover
   record sync_run success with counts (own transaction)
@@ -777,7 +788,9 @@ back transaction or savepoint sends nothing, and no notification runs while a lo
   file).
 - **Consent (SYNC-6):** renewal due within `consent_reminder_days`, once per due date.
 - **Large charges (ALR-3):** only rows inserted by a sync, dated within the last 7 days, after the
-  initial history load; once per charge and not again when it posts.
+  initial history load; once per charge and not again when it posts. The sync outcome lists only
+  new charges: a row that replaces one the app already had (a posting, linked or matched, or a
+  re-delivery after account churn) is left out.
 - **Backups:** failed or stale, once a day.
 
 ## 12. Testing (MNT-2)

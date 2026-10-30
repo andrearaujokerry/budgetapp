@@ -12,8 +12,12 @@ class SyncOutcome:
 
     * ``status``: ``success`` | ``error`` | ``skipped`` (another sync held the lock) |
       ``not_ready`` (Plaid's ``NOT_READY``: recorded as a success with no changes).
-    * ``inserted_transaction_ids``: rows this sync inserted (ALR-3 large-charge alerts look only at
-      these, dated within the last 7 days).
+    * ``inserted_transaction_ids``: rows this sync inserted for charges the app had not seen
+      before (ALR-3 large-charge alerts look only at these, dated within the last 7 days). A row
+      that replaces one the app already had is left out, so each charge appears once: a posted
+      charge naming its pending row, one matched to a removed charge (with or without the user's
+      edits), or a re-delivery after Plaid re-issued an account. ``added`` still counts every
+      inserted row.
     * ``initial_history_load``: True while the Item has never completed its historical pull,
       including the run that first sees ``HISTORICAL_UPDATE_COMPLETE``; large-charge alerts skip
       such runs so two years of backfill do not notify.
