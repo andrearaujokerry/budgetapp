@@ -19,6 +19,10 @@ Locks (ARCHITECTURE §6 "Locks"):
 * :func:`ledger_lock` — global ``pg_advisory_xact_lock`` taken FIRST in every transaction that
   writes transactions, splits or tombstones.
 * :func:`link_lock` — ``pg_advisory_xact_lock`` around the production new-link guard.
+* :data:`LINK_WORK_KEY` — a session-level lock that ``services.linking`` holds on a connection of
+  its own through a whole production exchange or re-attach (one at a time).
+
+Every advisory lock key is registered here, so no two features ever share one.
 """
 
 from __future__ import annotations
@@ -49,10 +53,11 @@ log = logging.getLogger(__name__)
 DRIVER = "postgresql+psycopg"
 
 #: int4 namespaces for advisory locks (two-key form): (namespace, object id).
-LOCK_NS_SYNC = 0x62610001  # per Item: (LOCK_NS_SYNC, plaid_items.id)
-LOCK_NS_GLOBAL = 0x62610002  # (LOCK_NS_GLOBAL, LEDGER_KEY | LINK_KEY)
-LEDGER_KEY = 1
-LINK_KEY = 2
+LOCK_NS_SYNC = 0x62610001  # per Item: (LOCK_NS_SYNC, plaid_items.id); sync, restore, upgrade
+LOCK_NS_GLOBAL = 0x62610002  # (LOCK_NS_GLOBAL, one of the keys below)
+LEDGER_KEY = 1  # transaction-level: every write to transactions, splits or tombstones
+LINK_KEY = 2  # transaction-level: the production new-link guard
+LINK_WORK_KEY = 3  # session-level: a production exchange or re-attach (services.linking)
 
 MIGRATIONS_LOCATION = "budgetapp:migrations"
 

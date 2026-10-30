@@ -28,6 +28,7 @@ from budgetapp.models import (
 )
 from budgetapp.services import (
     alerts,
+    backup,
     csv_import,
     reconcile,
     spending,
@@ -1094,6 +1095,26 @@ def test_a_concurrent_sync_is_recorded_as_skipped(linked, fake_plaid, session_fa
     assert linked.runs()[-1].status == "skipped"
     assert fake_plaid.calls_to("transactions_sync") == []
     assert linked.sync().added == 1  # the lock was released
+
+
+def test_a_restore_or_upgrade_holding_the_sync_locks_makes_a_sync_skip(
+    linked, fake_plaid, session_factory, monkeypatch
+):
+    """OPS's restore and upgrade hold every Item's sync lock (``backup.hold_sync_locks``, the
+    keys of ``db.sync_lock``); a sync that starts meanwhile records ``skipped`` and touches
+    nothing (ARCHITECTURE §6 Locks, §10 Restore)."""
+    fake_plaid.add_transaction(linked.fake_item)
+    engine = session_factory.kw["bind"].engine
+    # The Item exists only in this test's open transaction, which the lock holder's own
+    # connection can't see; name it, as backup.item_ids would once it is committed.
+    monkeypatch.setattr(backup, "item_ids", lambda _engine: [linked.item.id])
+    with backup.hold_sync_locks(engine) as held:
+        assert held.items == (linked.item.id,)
+        out = linked.sync(trigger="schedule")
+    assert out.status == "skipped"
+    assert [run.status for run in linked.runs()] == ["skipped"]
+    assert fake_plaid.calls_to("transactions_sync") == [] and linked.rows() == []
+    assert linked.sync().added == 1  # released when the restore ends
 
 
 def test_older_running_runs_are_marked_interrupted(linked, db):

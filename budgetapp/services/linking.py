@@ -11,7 +11,7 @@ Amex link can also break the first. So in production:
   token; only that attempt's own Link exit (``onExit``) or exchange clears it
   (:func:`link_exited`, :func:`exchange`). Link's ``CLOSE_OAUTH`` / ``FAIL_OAUTH`` events leave it:
   Link is still open after them and can still succeed.
-* :func:`exchange` holds an advisory lock on its own connection (:data:`LINK_WORK_KEY`) from the
+* :func:`exchange` holds an advisory lock on its own connection (:data:`db.LINK_WORK_KEY`) from the
   checks to the Item commit, so a second exchange is refused rather than run alongside. It never
   exchanges while any trace of a connection exists (an Item row, a production token in Keychain,
   an unsaved recovery file) or when Link reports an institution that clearly isn't American
@@ -74,10 +74,6 @@ log = logging.getLogger(__name__)
 
 #: The public token lives 30 minutes; retries stop a little before that.
 EXCHANGE_WINDOW = 25 * 60.0
-#: Advisory lock (two-key form in ``db.LOCK_NS_GLOBAL``, whose keys 1 and 2 are ``db.LEDGER_KEY``
-#: and ``db.LINK_KEY``), held on a connection of its own through a whole production exchange or
-#: re-attach: Plaid's exchange, the Keychain write and the Item commit.
-LINK_WORK_KEY = 3
 #: Plaid's id for American Express (RESEARCH T3.1). Link's own metadata is trusted first.
 AMEX_INSTITUTION_ID = "ins_10"
 DEFAULT_SANDBOX_INSTITUTION = "ins_109508"
@@ -300,12 +296,13 @@ def _claim_marker(store: secrets.SecretStore | None, attempt: str | None) -> str
 
 @contextmanager
 def _link_work_lock(session_factory: sessionmaker[Session]) -> Iterator[bool]:
-    """Hold :data:`LINK_WORK_KEY` for the ``with`` block on a connection of its own (like
-    ``db.sync_lock``); yields False, without waiting, while another exchange or re-attach runs."""
+    """Hold :data:`db.LINK_WORK_KEY` for the ``with`` block on a connection of its own (like
+    ``db.sync_lock``): through a whole production exchange or re-attach (Plaid's exchange, the
+    Keychain write and the Item commit). Yields False, without waiting, while another one runs."""
     bind = session_factory.kw["bind"]
     engine = bind.engine if isinstance(bind, Connection) else bind
     conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
-    key = (db.LOCK_NS_GLOBAL, LINK_WORK_KEY)
+    key = (db.LOCK_NS_GLOBAL, db.LINK_WORK_KEY)
     acquired = False
     try:
         acquired = bool(conn.execute(select(func.pg_try_advisory_lock(*key))).scalar())
@@ -702,7 +699,7 @@ def exchange(
 ) -> LinkResult:
     """Turn Link's public token into a saved Item (ARCHITECTURE §7 "Exchange"); one code path.
 
-    Production: under :data:`LINK_WORK_KEY` (a second exchange at the same time is refused with
+    Production: under :data:`db.LINK_WORK_KEY` (a second exchange at the same time is refused with
     :class:`LinkBusy`), refused before anything reaches Plaid while any trace of a connection exists
     or when Link reports another institution (:func:`_exchange_problem`). While it runs it keeps the
     link-in-progress marker (of ``attempt``, the id :func:`new_link_token` returned), and clears it
@@ -1047,7 +1044,7 @@ def recover_orphaned_items(
     """Re-create the database rows of connections whose token is in Keychain but whose Item row is
     missing: rebuilt from ``/item/get`` and ``/accounts/get``; the caller then syncs from a null
     cursor (which reconciles). Production re-attaches THE token, and only while no Item exists.
-    Never a new link. Runs under :data:`LINK_WORK_KEY` (a second request at the same time — a
+    Never a new link. Runs under :data:`db.LINK_WORK_KEY` (a second request at the same time — a
     double click — gets :class:`LinkBusy`). The Item keeps Plaid's ``created_at`` as its link date,
     so the consent estimate doesn't restart from today when Amex leaves the expiry empty."""
     with _link_work_lock(session_factory) as acquired:

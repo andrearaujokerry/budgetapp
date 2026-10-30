@@ -96,6 +96,13 @@ class TestSyncLock:
             drop_scratch_database(settings, other)
 
 
+def test_every_global_lock_key_is_registered_once():
+    """``db`` lists every key of ``LOCK_NS_GLOBAL``; features take them from there."""
+    keys = {name: getattr(dbmod, name) for name in ("LEDGER_KEY", "LINK_KEY", "LINK_WORK_KEY")}
+    assert sorted(keys.values()) == [1, 2, 3]
+    assert len({dbmod.LOCK_NS_SYNC, dbmod.LOCK_NS_GLOBAL}) == 2
+
+
 class TestLedgerLock:
     def test_serializes_writers(self, engine, session_factory):
         holder = session_factory()
