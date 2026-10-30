@@ -615,3 +615,35 @@ class TestReapply:
         assert not holds_ledger_lock(db)
         rules.reapply(db, ReapplyScope(), dry_run=True)
         assert holds_ledger_lock(db)
+
+
+def test_an_id_beyond_bigint_is_no_rule(db):
+    with pytest.raises(RuleNotFound):
+        rules.get_rule(db, 2**63)
+    with pytest.raises(RuleNotFound):
+        rules.preview(db, draft(get_category(db, "Travel"), merchant_pattern="X"), rule_id=2**64)
+
+
+def test_a_refund_previews_exactly_what_saving_changes(db):
+    """A refund never lands in a credits category: preview and save both send it to the
+    merchant's last spending category (the refund rule), so their counts agree."""
+    account = make_account(db)
+    shopping = get_category(db, "Shopping")
+    credits = get_category(db, "Credits & Rewards")
+    make_transaction(
+        db, account, name="ZARA", merchant_name="Zara", amount="80.00", category=shopping
+    )
+    refund = make_transaction(
+        db,
+        account,
+        name="ZARA REFUND",
+        merchant_name="Zara",
+        amount="-80.00",
+        transaction_code="refund",
+        category=shopping,
+    )
+    d = draft(credits, merchant_pattern="zara", apply_to_existing=True)
+    preview = rules.preview(db, d)
+    saved = rules.create(db, d)
+    assert preview.would_change_count == saved.applied.changed == 1  # the charge, not the refund
+    assert state(db, refund)[0] == shopping.id

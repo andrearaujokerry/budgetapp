@@ -1,6 +1,6 @@
 {#- The mapping table for one source (swapped when the filters change). -#}
 {%- import "components/ui.html" as ui -%}
-<div class="stack">
+<div class="stack"{% if focus_results|default(false) %} tabindex="-1" autofocus{% endif %}>
 {%- if listing.unmapped_in_use %}
 {{ ui.banner("info", "Pick a category for each, or leave them to use their group’s category. Then re-apply rules to update past transactions.", title=listing.unmapped_in_use|pluralize(listing.source_label ~ " category", listing.source_label ~ " categories") ~ " in your transactions " ~ ("has" if listing.unmapped_in_use == 1 else "have") ~ " no mapping of " ~ ("its" if listing.unmapped_in_use == 1 else "their") ~ " own.") }}
 {%- endif %}

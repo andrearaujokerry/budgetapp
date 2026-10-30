@@ -28,7 +28,9 @@ Services never commit; the route or command does.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -60,7 +62,12 @@ from budgetapp.models import (
 from budgetapp.money import ZERO
 from budgetapp.periods import Period, budget_period_for
 from budgetapp.services import spending, userstate
-from budgetapp.services.categorize import CREDIT_KEY_SUFFIX, amex_category_keys, looks_like_fee
+from budgetapp.services.categorize import (
+    CREDIT_KEY_SUFFIX,
+    Categorizer,
+    amex_category_keys,
+    looks_like_fee,
+)
 
 #: How each kind is explained to the user (Categories page, pickers).
 KIND_LABELS: dict[str, str] = {
@@ -98,9 +105,22 @@ COLOR_NAMES: dict[str, str] = {
 }
 MAX_NAME_LENGTH = 60
 MAX_ICON_LENGTH = 16
+#: Ids are ``BIGINT``: a larger number can't be a row (and PostgreSQL would refuse to compare it).
+MAX_ID = 2**63 - 1
+#: Invisible characters an emoji is built from: the zero-width joiner (woman + ZWJ + laptop is
+#: one "technologist" emoji) and the tag characters of subdivision flags (Scotland, Wales). Other
+#: format characters (bidi controls, zero-width spaces) stay refused: they could reorder or hide
+#: the text around the icon.
+_EMOJI_JOINER = "\u200d"
+_EMOJI_TAGS = ("\U000e0020", "\U000e007f")
 _HEX_COLOR = re.compile(r"#(?:[0-9a-f]{3}|[0-9a-f]{6})")
 _NAME_INDEX = "uq_categories_lower_name"
 _UNSET: Any = object()
+
+
+def is_valid_id(value: object) -> bool:
+    """A positive whole number that fits an id column (anything else names no row)."""
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= MAX_ID
 
 
 class CategoryNotFound(LookupError):
@@ -199,8 +219,8 @@ class CategoryOverview:
 
 
 def get_category(session: Session, category_id: int) -> Category:
-    """The category, or :class:`CategoryNotFound`."""
-    category = session.get(Category, category_id)
+    """The category, or :class:`CategoryNotFound` (also for an id no row can have)."""
+    category = session.get(Category, category_id) if is_valid_id(category_id) else None
     if category is None:
         raise CategoryNotFound(category_id)
     return category
@@ -317,11 +337,18 @@ def _clean_name(value: str | None, errors: dict[str, str]) -> str:
     return name
 
 
+def _icon_char_ok(char: str) -> bool:
+    return char.isprintable() or char == _EMOJI_JOINER or _EMOJI_TAGS[0] <= char <= _EMOJI_TAGS[1]
+
+
 def _clean_icon(value: str | None, errors: dict[str, str]) -> str | None:
+    """An emoji (joined and flag emoji included) or a few printable characters, with at least
+    one visible character (a letter, digit, punctuation or symbol; not only joiners or marks)."""
     icon = (value or "").strip()
     if not icon:
         return None
-    if len(icon) > MAX_ICON_LENGTH or not icon.isprintable():
+    visible = any(unicodedata.category(c)[0] in "LNPS" for c in icon)
+    if len(icon) > MAX_ICON_LENGTH or not visible or not all(_icon_char_ok(c) for c in icon):
         errors["icon"] = "Use one emoji or a few characters."
     return icon
 
@@ -465,9 +492,36 @@ def set_hidden(session: Session, category_id: int, hidden: bool) -> Category:
 # --------------------------------------------------------------------------- merging
 
 
+#: What a merge does with budgets (``BudgetMerge.action``).
+BUDGET_ACTIONS = ("none", "move", "keep_target", "take_source", "drop")
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetMerge:
+    """What a merge does with the source's budget rows (a category has one budget at a time).
+
+    * ``none``: the source has no budget rows.
+    * ``move``: the target has no budget rows at all, so the source's rows (its history) move.
+    * ``keep_target``: the target has a budget now; it keeps it and the source's rows are dropped.
+    * ``take_source``: the target has budget rows but no budget now, and the source has one: the
+      target gets the source's current budget (amount, period, rollover) from the start of the
+      current budget period, like a budget edit; the source's rows are dropped.
+    * ``drop``: neither has a budget now; the source's old rows are dropped.
+    """
+
+    action: str
+    #: The source's budget rows (moved for ``move``, dropped otherwise).
+    source_rows: int
+    #: ``take_source`` only: the budget the target gets, and from when.
+    period: str | None = None
+    amount: Decimal | None = None
+    rollover: bool = False
+    effective_from: dt.date | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class MergeCounts:
-    """What a merge moves (or dropped, for budgets the target already has)."""
+    """What a merge moves (or drops, for budget rows; ``budgets`` says why)."""
 
     transactions: int
     splits: int
@@ -477,21 +531,26 @@ class MergeCounts:
     budgets_dropped: int
     alerts: int
     tombstones: int
+    budgets: BudgetMerge = BudgetMerge("none", 0)
 
     @property
-    def is_empty(self) -> bool:
-        return not any(
+    def moves_anything(self) -> bool:
+        """Some reference moves to the target (dropped budget rows don't count)."""
+        return any(
             (
                 self.transactions,
                 self.splits,
                 self.rules,
                 self.mappings,
                 self.budgets_moved,
-                self.budgets_dropped,
                 self.alerts,
                 self.tombstones,
             )
         )
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.moves_anything and not self.budgets_dropped
 
 
 @dataclass(frozen=True, slots=True)
@@ -549,24 +608,132 @@ def _merge_pair(
         raise CategoryError(
             {"target_id": "Choose a different category: it can't merge into itself."}
         )
-    target = session.get(Category, target_id)
+    target = session.get(Category, target_id) if is_valid_id(target_id) else None
     if target is None:
         raise CategoryError({"target_id": "That category no longer exists. Choose another one."})
     return source, target
 
 
+def _period_ends(session: Session) -> tuple[Period, dict[str, dt.date]]:
+    """The current budget period, and the last day each period type's current amount covers."""
+    period = current_period(session)
+    return period, {"monthly": period.end, "annual": dt.date(clock.today().year, 12, 31)}
+
+
+def _latest_row(session: Session, category_id: int, period: str, on: dt.date) -> Budget | None:
+    """The category's ``period`` row in force on ``on`` (latest ``effective_from <= on``)."""
+    return session.scalars(
+        select(Budget)
+        .where(
+            Budget.category_id == category_id,
+            Budget.period == period,
+            Budget.effective_from <= on,
+        )
+        .order_by(Budget.effective_from.desc())
+        .limit(1)
+    ).first()
+
+
+def _budget_now(session: Session, category_id: int, ends: Mapping[str, dt.date]) -> Budget | None:
+    """The category's budget this period: the monthly or annual row in force with an amount.
+
+    A period's amount is the row with the latest ``effective_from`` up to the period's end
+    (ARCHITECTURE §5); an amount-null row means "no budget from this date on".
+    """
+    found = None
+    for period, end in ends.items():
+        row = _latest_row(session, category_id, period, end)
+        if row is None or row.amount is None:
+            continue
+        if found is None or row.effective_from > found.effective_from:
+            found = row
+    return found
+
+
+def _budget_plan(session: Session, source: Category, target: Category) -> BudgetMerge:
+    rows = _count(session, Budget.category_id, source.id)
+    if not rows:
+        return BudgetMerge("none", 0)
+    if not _count(session, Budget.category_id, target.id):
+        return BudgetMerge("move", rows)
+    period, ends = _period_ends(session)
+    if _budget_now(session, target.id, ends) is not None:
+        return BudgetMerge("keep_target", rows)
+    live = _budget_now(session, source.id, ends)
+    if live is None:
+        return BudgetMerge("drop", rows)
+    return BudgetMerge(
+        "take_source",
+        rows,
+        period=live.period,
+        amount=live.amount,
+        rollover=live.rollover and live.period == "monthly",
+        effective_from=period.start,
+    )
+
+
+def _give_budget(session: Session, category_id: int, plan: BudgetMerge) -> None:
+    """Give the category ``plan``'s budget from ``plan.effective_from`` on, like a budget edit.
+
+    The row at that date is created or updated; rows of the same period type dated later in the
+    current period (they could only end the budget again) are removed; and if the other period
+    type has an amount on that date, it ends there (one active period type, ARCHITECTURE §5).
+    """
+    assert plan.period is not None and plan.effective_from is not None
+    start = plan.effective_from
+    _period, ends = _period_ends(session)
+    session.execute(
+        delete(Budget).where(
+            Budget.category_id == category_id,
+            Budget.period == plan.period,
+            Budget.effective_from > start,
+            Budget.effective_from <= ends[plan.period],
+        ),
+        execution_options={"synchronize_session": False},
+    )
+    _set_budget_row(session, category_id, plan.period, start, plan.amount, plan.rollover)
+    other = "annual" if plan.period == "monthly" else "monthly"
+    before = _latest_row(session, category_id, other, start)
+    if before is not None and before.amount is not None:
+        _set_budget_row(session, category_id, other, start, None, False)
+
+
+def _set_budget_row(
+    session: Session,
+    category_id: int,
+    period: str,
+    start: dt.date,
+    amount: Decimal | None,
+    rollover: bool,
+) -> None:
+    row = session.scalars(
+        select(Budget).where(
+            Budget.category_id == category_id,
+            Budget.period == period,
+            Budget.effective_from == start,
+        )
+    ).first()
+    if row is None:
+        row = Budget(scope="category", category_id=category_id, period=period, effective_from=start)
+        session.add(row)
+    row.amount = amount
+    row.rollover = rollover
+    session.flush()
+
+
 def _merge_counts(session: Session, source: Category, target: Category) -> MergeCounts:
-    budgets = _count(session, Budget.category_id, source.id)
-    target_has_budgets = _count(session, Budget.category_id, target.id) > 0
+    plan = _budget_plan(session, source, target)
+    moved = plan.source_rows if plan.action == "move" else 0
     return MergeCounts(
         transactions=_count(session, Transaction.category_id, source.id),
         splits=_count(session, TransactionSplit.category_id, source.id),
         rules=_count(session, Rule.category_id, source.id),
         mappings=_count(session, CategoryMapping.category_id, source.id),
-        budgets_moved=0 if target_has_budgets else budgets,
-        budgets_dropped=budgets if target_has_budgets else 0,
+        budgets_moved=moved,
+        budgets_dropped=plan.source_rows - moved,
         alerts=_count(session, AlertEvent.category_id, source.id),
         tombstones=len(_tombstones_mentioning(session, source.id)),
+        budgets=plan,
     )
 
 
@@ -584,9 +751,11 @@ def merge_categories(session: Session, source_id: int, target_id: int) -> MergeR
     Every reference moves: transactions (their category source, rule and user edits stay as they
     were), split parts, rules, Plaid/Amex mappings, alert events, and category ids inside
     tombstones' ``user_state`` (so an edit carried to a future replacement row lands in
-    ``target``). Budgets: the target keeps its own budget rows; the source's rows move only when
-    the target has none at all, and are dropped otherwise (moving them could replace the target's
-    amount from a later date, or give one category both a monthly and an annual budget).
+    ``target``). Budgets (:class:`BudgetMerge`): the target keeps its own budget rows. The
+    source's rows move only when the target has none at all; otherwise they are dropped, and a
+    target with no budget this period takes the source's current budget from the start of the
+    period. (Moving rows next to the target's could replace its amount from a later date, or give
+    one category both a monthly and an annual budget.)
 
     Expires every object in the session afterwards (their references moved). The caller commits.
     """
@@ -606,16 +775,19 @@ def merge_categories(session: Session, source_id: int, target_id: int) -> MergeR
             update(column.class_).where(column == s).values({column.key: t}),
             execution_options={"synchronize_session": False},
         )
-    if counts.budgets_dropped:
-        session.execute(
-            delete(Budget).where(Budget.category_id == s),
-            execution_options={"synchronize_session": False},
-        )
-    else:
+    plan = counts.budgets
+    if plan.action == "move":
         session.execute(
             update(Budget).where(Budget.category_id == s).values(category_id=t),
             execution_options={"synchronize_session": False},
         )
+    elif plan.action != "none":
+        session.execute(
+            delete(Budget).where(Budget.category_id == s),
+            execution_options={"synchronize_session": False},
+        )
+    if plan.action == "take_source":
+        _give_budget(session, t, plan)
     for tombstone in _tombstones_mentioning(session, s):
         tombstone.user_state = userstate.remap_category_ids(tombstone.user_state, s, t)
     session.flush()
@@ -659,7 +831,7 @@ class MappingError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class MappingRow:
-    """One external category and where it goes."""
+    """One external category (or its ``|credit`` variant) and where it goes."""
 
     source: str
     key: str  #: the mapping key (as stored, or as found in transactions when not mapped)
@@ -669,9 +841,14 @@ class MappingRow:
     is_group: bool  #: the group's own key (the fallback for its other codes)
     for_credits: bool  #: a ``|credit`` key: tried first for credits (negative amounts)
     category_id: int | None  #: its own mapping; ``None`` = not mapped
-    #: What applies while it has no mapping of its own (the group's), ``None`` = Uncategorized.
+    #: What applies while it has no mapping of its own: the mapping of the first key that
+    #: categorization tries next (ARCHITECTURE §5); ``None`` = Uncategorized.
     fallback_category_id: int | None
+    #: Transactions counted on this row: those with this code, and for a ``|credit`` row the
+    #: credits whose lookup reaches a ``|credit`` mapping (so the row shows where they go).
     transaction_count: int
+    #: The key ``fallback_category_id`` comes from (``None`` = Uncategorized).
+    fallback_key: str | None = None
 
     @property
     def is_mapped(self) -> bool:
@@ -680,6 +857,26 @@ class MappingRow:
     @property
     def effective_category_id(self) -> int | None:
         return self.category_id if self.category_id is not None else self.fallback_category_id
+
+    @property
+    def fallback_from(self) -> str | None:
+        """Where the fallback comes from: ``charges`` (the same code's own mapping, for its
+        credits), ``group`` (the group's mapping) or ``group_credits`` (the group's credit
+        mapping); ``None`` = nothing (Uncategorized)."""
+        if self.fallback_key is None:
+            return None
+        base, credit = _split_credit(self.fallback_key)
+        if _canon(self.source, base) == _canon(self.source, self.code):
+            return "charges"
+        return "group_credits" if credit else "group"
+
+    @property
+    def slug(self) -> str:
+        """A stable name for the row that is safe in an HTML id."""
+        canon = _canon(self.source, self.key)
+        words = re.sub(r"[^a-z0-9]+", "-", canon.casefold()).strip("-")[:40]
+        digest = hashlib.sha1(f"{self.source}|{canon}".encode()).hexdigest()[:8]
+        return f"{self.source}-{words}-{digest}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -698,9 +895,9 @@ class MappingList:
     source: str
     groups: tuple[MappingGroup, ...]
     only_used: bool
-    #: Codes found in transactions that have no mapping of their own.
+    #: Rows with transactions that have no mapping of their own.
     unmapped_in_use: int
-    #: Rows in the full list (before ``only_used``) and codes found in transactions.
+    #: Rows in the full list (before ``only_used``) and rows with transactions.
     total_rows: int
     used_rows: int
 
@@ -720,8 +917,14 @@ class MappingChange:
     label: str
     old_category_id: int | None
     new_category_id: int | None
-    #: Transactions with this external category (they change only when categories are re-applied).
+    #: Past transactions whose mapping lookup reaches this key, before or after the change.
     transaction_count: int
+    #: Of those, the ones whose category you didn't set that re-applying categories would move
+    #: (they keep their category until then).
+    reapply_count: int = 0
+    #: Where the key's transactions go now when it has no mapping of its own (``None`` =
+    #: Uncategorized).
+    fallback_category_id: int | None = None
 
 
 def _check_source(source: str) -> None:
@@ -744,6 +947,18 @@ def _humanize(code: str) -> str:
     words = [w if w in _ACRONYMS else w.lower() for w in code.split("_") if w]
     text = " ".join(words)
     return text[:1].upper() + text[1:]
+
+
+def _primaries(session: Session, source: str) -> set[str]:
+    """Group codes: Plaid's primaries (also unknown ones found in transactions); none for Amex."""
+    if source != "plaid_pfc":
+        return set()
+    found = session.scalars(
+        select(Transaction.pfc_primary)
+        .where(Transaction.source == "plaid", Transaction.pfc_primary.is_not(None))
+        .distinct()
+    )
+    return set(PFC_PRIMARIES) | {p for p in found if p}
 
 
 def _group_of(source: str, base: str, primaries: Iterable[str]) -> str:
@@ -777,12 +992,64 @@ def _raw_keys(source: str, row: Any) -> tuple[str, ...]:
     return tuple(k for k in (row.pfc_detailed, row.pfc_primary) if k)
 
 
-def _key_counts(session: Session, source: str, mapped: set[str]) -> dict[str, tuple[str, int]]:
-    """Transactions per most specific external key: ``canonical key → (spelling, count)``.
+def _lookup_order(keys: tuple[str, ...], credit: bool) -> list[str]:
+    """The keys categorization tries, in order: for a credit (a negative amount that isn't a fee
+    reversal) the ``|credit`` keys first — ``sub|credit, group|credit, sub, group`` (§5)."""
+    if credit:
+        return [k + CREDIT_KEY_SUFFIX for k in keys] + list(keys)
+    return list(keys)
 
-    A credit (negative amount, not a fee reversal) counts on the key's ``|credit`` row when that
-    mapping exists, because that is the mapping it uses.
-    """
+
+def _chain(source: str, key: str, group: str) -> list[str]:
+    """The keys categorization tries after ``key`` when ``key`` has no mapping of its own."""
+    base, credit = _split_credit(key)
+    is_group = _canon(source, base) == _canon(source, group)
+    if credit:
+        return [group] if is_group else [group + CREDIT_KEY_SUFFIX, base, group]
+    return [] if is_group else [group]
+
+
+def _first_mapped(
+    source: str, keys: Iterable[str], mapped: Mapping[str, int]
+) -> tuple[str | None, int | None]:
+    """The first of ``keys`` with a mapping and its category, or ``(None, None)``."""
+    for key in keys:
+        category_id = mapped.get(_canon(source, key))
+        if category_id is not None:
+            return key, category_id
+    return None, None
+
+
+def _row_key(
+    source: str, keys: tuple[str, ...], credit: bool, mapped: Mapping[str, int] | set[str]
+) -> str:
+    """The editor row a transaction counts on: its code's row, or for a credit whose lookup
+    reaches a ``|credit`` mapping, its code's ``|credit`` row (listed even when not mapped), so
+    the row the transaction is counted on shows the category it really gets."""
+    if credit:
+        credit_keys = [k + CREDIT_KEY_SUFFIX for k in keys]
+        if any(_canon(source, k) in mapped for k in credit_keys):
+            return credit_keys[0]
+    return keys[0]
+
+
+def _stored(session: Session, source: str) -> tuple[dict[str, int], dict[str, str]]:
+    """The stored mappings: ``canonical key → category id`` and ``canonical key → spelling``."""
+    mapped: dict[str, int] = {}
+    spelling: dict[str, str] = {}
+    for m in session.scalars(
+        select(CategoryMapping).where(CategoryMapping.source == source).order_by(CategoryMapping.id)
+    ):
+        canon = _canon(source, m.external_key)
+        mapped.setdefault(canon, m.category_id)
+        spelling.setdefault(canon, m.external_key)
+    return mapped, spelling
+
+
+def _key_counts(
+    session: Session, source: str, mapped: Mapping[str, int]
+) -> dict[str, tuple[str, int]]:
+    """Transactions per editor row (:func:`_row_key`): ``canonical key → (spelling, count)``."""
     txn_source = "csv" if source == "amex_csv" else "plaid"
     cols = (
         (Transaction.external_category,)
@@ -811,7 +1078,6 @@ def _key_counts(session: Session, source: str, mapped: set[str]) -> dict[str, tu
         keys = _raw_keys(source, row)
         if not keys:
             continue
-        credit_key = keys[0] + CREDIT_KEY_SUFFIX
         fee = looks_like_fee(
             SimpleNamespace(
                 name=row.name,
@@ -819,50 +1085,25 @@ def _key_counts(session: Session, source: str, mapped: set[str]) -> dict[str, tu
                 transaction_code=row.transaction_code,
             )
         )
-        add(credit_key if not fee and _canon(source, credit_key) in mapped else keys[0], row.n)
+        add(_row_key(source, keys, not fee, mapped), row.n)
     return counts
-
-
-def _first_mapped(source: str, keys: Iterable[str], mapped: Mapping[str, int]) -> int | None:
-    for key in keys:
-        category_id = mapped.get(_canon(source, key))
-        if category_id is not None:
-            return category_id
-    return None
 
 
 def list_mappings(session: Session, source: str, *, only_used: bool = False) -> MappingList:
     """Every external category of ``source`` with its count and mapping, grouped.
 
-    The list holds the stored mappings plus every code found in transactions (mapped or not) and
-    each group's own row. With ``only_used``, it keeps the codes found in transactions and the
-    group rows that unmapped ones fall back to.
+    The list holds the stored mappings plus every row transactions count on (mapped or not) and
+    each group's own row. Each row shows its own mapping or the one it falls back to, in the
+    order categorization tries them (ARCHITECTURE §5), so it tells where its transactions go.
+    With ``only_used``, it keeps the rows with transactions, plus the group rows and fallback
+    rows that unmapped ones use.
     """
     _check_source(source)
-    stored = session.scalars(
-        select(CategoryMapping).where(CategoryMapping.source == source).order_by(CategoryMapping.id)
-    )
-    mapped: dict[str, int] = {}
-    spelling: dict[str, str] = {}
-    for m in stored:
-        canon = _canon(source, m.external_key)
-        mapped.setdefault(canon, m.category_id)
-        spelling.setdefault(canon, m.external_key)
-    counts = _key_counts(session, source, set(mapped))
+    mapped, spelling = _stored(session, source)
+    counts = _key_counts(session, source, mapped)
     for canon, (key, _n) in counts.items():
         spelling.setdefault(canon, key)
-
-    primaries = set(PFC_PRIMARIES)
-    if source == "plaid_pfc":
-        primaries.update(
-            p
-            for p in session.scalars(
-                select(Transaction.pfc_primary)
-                .where(Transaction.source == "plaid", Transaction.pfc_primary.is_not(None))
-                .distinct()
-            )
-            if p
-        )
+    primaries = _primaries(session, source)
 
     # group (canonical) -> its members (canonical keys); every group also lists its own key.
     members: dict[str, list[str]] = {}
@@ -880,22 +1121,19 @@ def list_mappings(session: Session, source: str, *, only_used: bool = False) -> 
     def make_row(canon: str, group: str) -> MappingRow:
         key = spelling[canon]
         base, credit = _split_credit(key)
-        is_group = _canon(source, base) == _canon(source, group)
-        if credit:
-            chain = [group] if is_group else [group + CREDIT_KEY_SUFFIX, base, group]
-        else:
-            chain = [] if is_group else [group]
+        fallback_key, fallback = _first_mapped(source, _chain(source, key, group), mapped)
         return MappingRow(
             source=source,
             key=key,
             code=base,
             label=_label(source, base, group),
             group=group,
-            is_group=is_group,
+            is_group=_canon(source, base) == _canon(source, group),
             for_credits=credit,
             category_id=mapped.get(canon),
-            fallback_category_id=_first_mapped(source, chain, mapped),
+            fallback_category_id=fallback,
             transaction_count=counts[canon][1] if canon in counts else 0,
+            fallback_key=fallback_key,
         )
 
     all_rows = {
@@ -906,8 +1144,15 @@ def list_mappings(session: Session, source: str, *, only_used: bool = False) -> 
     built: list[MappingGroup] = []
     for group_canon, rows in all_rows.items():
         if only_used:
-            needs_group = any(r.transaction_count and not r.is_mapped for r in rows)
-            rows = [r for r in rows if r.transaction_count or (r.is_group and needs_group)]
+            unmapped = [r for r in rows if r.transaction_count and not r.is_mapped]
+            needed = {_canon(source, r.fallback_key) for r in unmapped if r.fallback_key}
+            rows = [
+                r
+                for r in rows
+                if r.transaction_count
+                or (r.is_group and not r.for_credits and unmapped)
+                or _canon(source, r.key) in needed
+            ]
             if not any(r.transaction_count for r in rows):
                 continue
         rows = sorted(rows, key=lambda r: (not r.is_group, r.code.casefold(), r.for_credits))
@@ -942,44 +1187,74 @@ def normalize_mapping_key(source: str, key: str) -> str:
     return base + (CREDIT_KEY_SUFFIX if credit else "")
 
 
-def _transactions_with_key(session: Session, source: str, key: str) -> int:
-    base, _credit = _split_credit(key)
-    canon = _canon(source, base)
-    if source == "plaid_pfc":
-        return int(
-            session.scalar(
-                select(func.count()).where(
-                    Transaction.source == "plaid",
-                    (Transaction.pfc_detailed == base)
-                    | ((Transaction.pfc_detailed.is_(None)) & (Transaction.pfc_primary == base)),
-                )
-            )
-            or 0
-        )
-    total = 0
-    query = (
-        select(Transaction.external_category, func.count())
-        .where(Transaction.source == "csv", Transaction.external_category.is_not(None))
-        .group_by(Transaction.external_category)
-    )
-    for raw, n in session.execute(query):
-        keys = amex_category_keys(raw)
-        if keys and _canon(source, keys[0]) == canon:
-            total += n
-    return total
+#: What categorization reads from a transaction (``Categorizer.decide`` takes these rows).
+_DECIDE_COLUMNS = (
+    Transaction.id,
+    Transaction.account_id,
+    Transaction.source,
+    Transaction.amount,
+    Transaction.name,
+    Transaction.merchant_name,
+    Transaction.original_description,
+    Transaction.transaction_code,
+    Transaction.pfc_primary,
+    Transaction.pfc_detailed,
+    Transaction.external_category,
+    Transaction.category_id,
+    Transaction.category_source,
+)
+
+
+def _mapping_effect(
+    session: Session,
+    source: str,
+    key: str,
+    before: Mapping[str, int],
+    after: Mapping[str, int],
+) -> tuple[int, int]:
+    """Past transactions whose mapping lookup reaches ``key`` before or after a change (its own
+    rows, and those of codes that fall back to it), and how many of them — leaving out the ones
+    whose category you set — re-applying categories would move (full precedence: payments,
+    rules, mappings, the refund rule)."""
+    canon = _canon(source, key)
+    txn_source = "csv" if source == "amex_csv" else "plaid"
+    categorizer: Categorizer | None = None
+    reached = moving = 0
+    for row in session.execute(select(*_DECIDE_COLUMNS).where(Transaction.source == txn_source)):
+        keys = _raw_keys(source, row)
+        if not keys:
+            continue
+        order = _lookup_order(keys, row.amount < 0 and not looks_like_fee(row))
+        first_before, _ = _first_mapped(source, order, before)
+        first_after, _ = _first_mapped(source, order, after)
+        hits = {_canon(source, k) for k in (first_before, first_after) if k is not None}
+        if canon not in hits:
+            continue
+        reached += 1
+        if row.category_source == "user":
+            continue
+        if categorizer is None:
+            categorizer = Categorizer.load(session)
+        if categorizer.decide(row).category_id != row.category_id:
+            moving += 1
+    return reached, moving
 
 
 def set_mapping(session: Session, source: str, key: str, category_id: int | None) -> MappingChange:
     """Map an external category to a category, or (``None``) remove its own mapping.
 
-    Without its own mapping a code uses its group's, else Uncategorized. Amex keys match ignoring
+    Without its own mapping a code uses the next key categorization tries (its group's, else
+    Uncategorized; for credits the group's ``|credit`` mapping first). Amex keys match ignoring
     case, so an existing mapping spelled differently is updated rather than duplicated. New
     transactions use the change at once; past ones when categories are re-applied.
     """
     key = normalize_mapping_key(source, key)
-    if category_id is not None and session.get(Category, category_id) is None:
+    if category_id is not None and (
+        not is_valid_id(category_id) or session.get(Category, category_id) is None
+    ):
         raise MappingError("That category no longer exists. Reload the page and try again.")
     canon = _canon(source, key)
+    before, _spelling = _stored(session, source)
     existing = [
         m
         for m in session.scalars(
@@ -1000,14 +1275,18 @@ def set_mapping(session: Session, source: str, key: str, category_id: int | None
     else:
         session.add(CategoryMapping(source=source, external_key=key, category_id=category_id))
     session.flush()
+    after, _spelling = _stored(session, source)
     base, _credit = _split_credit(key)
-    primaries = set(PFC_PRIMARIES)
-    group = _group_of(source, base, primaries)
+    group = _group_of(source, base, _primaries(session, source))
+    _fallback_key, fallback = _first_mapped(source, _chain(source, key, group), after)
+    reached, moving = _mapping_effect(session, source, key, before, after)
     return MappingChange(
         source=source,
         key=key,
         label=_label(source, base, group),
         old_category_id=old,
         new_category_id=category_id,
-        transaction_count=_transactions_with_key(session, source, key),
+        transaction_count=reached,
+        reapply_count=moving,
+        fallback_category_id=fallback,
     )

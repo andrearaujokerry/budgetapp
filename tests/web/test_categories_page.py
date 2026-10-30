@@ -6,6 +6,8 @@ from __future__ import annotations
 import datetime as dt
 import html
 import re
+from decimal import Decimal
+from html.parser import HTMLParser
 from types import SimpleNamespace
 
 import pytest
@@ -416,8 +418,9 @@ class TestMappingsTab:
         assert response.status_code == 200
         assert response.template.name == "categories/_mapping_group.html"
         assert response.text.lstrip().startswith('<tbody class="mapping-group">')
+        # Two past rows have the code; the one the user categorized never moves, so 1 is counted.
         assert toasts(response.text) == [
-            "Charities now goes to Gifts & Donations. 2 past transactions keep their category"
+            "Charities now goes to Gifts & Donations. 1 past transaction keeps its old category"
             " until you re-apply rules."
         ]
         mapping = db.scalars(
@@ -444,7 +447,7 @@ class TestMappingsTab:
         )
         assert response.status_code == 200
         assert toasts(response.text)[0].startswith(
-            "Coffee is no longer mapped: it uses its group's category."
+            "Coffee is no longer mapped: it now goes to Dining & Drinks."
         )
         assert "Uses Dining &amp; Drinks (from its group)" in response.text
 
@@ -480,3 +483,215 @@ class TestMappingsTab:
         response = client.post("/categories/mappings", data=data, follow_redirects=False)
         assert response.status_code == 303
         assert response.headers["location"] == "/categories/mappings?source=amex_csv&show=all"
+
+
+# --------------------------------------------------------------------------- review fixes
+
+
+class TestNotMapped:
+    """Every row offers "Not mapped", which removes its own mapping."""
+
+    def test_a_mapped_row_can_be_unmapped_again(self, client, db, world):
+        gifts = get_category(db, "Gifts & Donations")
+        data = {"source": "amex_csv", "key": "Other-Charities", "show": "used"}
+        client.post("/categories/mappings", data={**data, "category_id": gifts.id}, headers=HTMX)
+        page = client.get("/categories/mappings?source=amex_csv&show=used").text
+        form = re.search(r'value="Other-Charities">.*?</form>', page, re.S).group(0)
+        assert '<option value="">Not mapped</option>' in form
+        assert re.search(rf'<option value="{gifts.id}"[^>]* selected', form)
+
+        response = client.post(
+            "/categories/mappings", data={**data, "category_id": ""}, headers=HTMX
+        )
+        assert toasts(response.text)[0] == (
+            "Charities is no longer mapped: it now goes to Other. 1 past transaction keeps its"
+            " old category until you re-apply rules."
+        )
+        stored = select(CategoryMapping).where(CategoryMapping.external_key == "Other-Charities")
+        assert db.scalars(stored).all() == []
+
+    def test_group_rows_offer_it_too(self, client, world):
+        page = client.get("/categories/mappings?source=amex_csv&show=all").text
+        form = re.search(r'value="Travel">.*?</form>', page, re.S).group(0)
+        assert '<option value="">Not mapped</option>' in form
+
+
+class TestMappingToasts:
+    def test_a_group_change_counts_the_rows_that_fall_back_to_it(self, client, db, world):
+        world.charity.category_id = get_category(db, "Other").id  # Other-Charities: unmapped
+        world.charity.category_source = "amex"
+        db.flush()
+        gifts = get_category(db, "Gifts & Donations")
+        data = {"source": "amex_csv", "key": "Other", "show": "used", "category_id": gifts.id}
+        response = client.post("/categories/mappings", data=data, headers=HTMX)
+        assert toasts(response.text) == [
+            "Other (general) now goes to Gifts & Donations. 1 past transaction keeps its old"
+            " category until you re-apply rules."
+        ]
+
+    def test_unverified_fees_credits_show_where_they_go(self, client, db, world):
+        make_transaction(
+            db,
+            world.account,
+            source="csv",
+            amount="-30.00",
+            name="CASH BACK REWARD",
+            external_category="Fees & Adjustments-Rewards Credit",
+        )
+        page = html.unescape(client.get("/categories/mappings?source=amex_csv&show=used").text)
+        credit = re.search(r"Credits</span> Rewards Credit</span>.*?</tr>", page, re.S).group(
+            0
+        )  # the subgroup's own credit row, listed although it isn't mapped
+        assert 'value="Fees & Adjustments-Rewards Credit|credit"' in credit
+        assert "Uses Credits & Rewards (its group’s credits)" in credit
+
+
+class TestMergeBudgetsAndLongNames:
+    def test_a_target_without_a_budget_now_takes_the_sources(self, client, db, world):
+        coffee = make_category(db, "Coffee")
+        make_budget(db, coffee, "50.00", effective_from=dt.date(2026, 1, 1))
+        make_budget(db, coffee, None, effective_from=dt.date(2026, 6, 1))
+        make_budget(db, world.pets, "100.00", effective_from=dt.date(2026, 1, 1))
+        url = f"/categories/{world.pets.id}/merge/preview?target_id={coffee.id}"
+        text = html.unescape(client.get(url, headers=HTMX).text)
+        assert (
+            "“Coffee” has no budget now, so it takes the budget of “Pets”: $100.00 a month, from"
+            " Oct 1, 2026." in text
+        )
+        assert "keeps its own budget" not in text
+        response = client.post(f"/categories/{world.pets.id}/merge", data={"target_id": coffee.id})
+        assert toasts(response.text) == [
+            "Merged “Pets” into “Coffee”: 1 transaction moved. It takes over the budget of"
+            " “Pets”: $100.00 a month."
+        ]
+        latest = db.scalars(
+            select(Budget)
+            .where(Budget.category_id == coffee.id)
+            .order_by(Budget.effective_from.desc())
+        ).first()
+        assert (latest.amount, latest.effective_from) == (Decimal("100.00"), dt.date(2026, 10, 1))
+
+    def test_names_in_the_merge_sentences_can_wrap(self, client, db, world):
+        target = make_category(db, "Kids activities, school supplies and after-school programs")
+        url = f"/categories/{world.pets.id}/merge?target_id={target.id}"
+        response = client.get(url, headers=HTMX)
+        assert '<form class="form merge-form"' in response.text
+        assert response.text.count(" cat--inline") == 2  # the intro and the preview
+        assert csp_problems(response.text, rendered=True) == []
+
+
+class TestKeyboardFocus:
+    """htmx puts focus back on an element with the same id after a swap; otherwise the response
+    names (autofocus) where focus goes."""
+
+    def test_a_tab_switch_moves_focus_to_the_new_panel(self, client, world):
+        assert "autofocus" not in client.get("/categories/mappings").text
+        tab = client.get("/categories/mappings", headers=HTMX).text
+        section = re.search(r'<section class="section mappings-panel"[^>]*>', tab).group(0)
+        assert 'tabindex="-1"' in section and "autofocus" in section
+        back = client.get("/categories", headers=HTMX).text
+        assert re.search(r'<section class="section categories-panel"[^>]*autofocus', back)
+        filters = {**HTMX, "HX-Target": "mappings-results"}
+        results = client.get("/categories/mappings?source=amex_csv", headers=filters).text
+        assert "autofocus" not in results  # the filter controls keep focus
+
+    def test_the_table_controls_keep_their_ids_across_a_dialog_save(self, client, world):
+        page = client.get("/categories").text
+        assert 'id="add-category"' in page
+        assert f'id="edit-category-{world.pets.id}"' in page
+        assert f'id="merge-category-{world.pets.id}"' in page
+        dialog = client.get(f"/categories/{world.pets.id}/edit", headers=HTMX).text
+        assert "autofocus" in re.search(r'<input[^>]*name="name"[^>]*>', dialog).group(0)
+        data = {"name": "Pets and vet", "kind": "expense", "color": "cat-4", "icon": ""}
+        saved = client.post(f"/categories/{world.pets.id}", data=data, headers=HTMX)
+        assert saved.headers["HX-Trigger"] == "dialog:close"
+        assert f'id="edit-category-{world.pets.id}"' in saved.text
+        assert 'id="add-category"' in saved.text
+
+    def test_an_error_focuses_the_first_field_to_fix(self, client, world):
+        data = {"name": "Kids", "kind": "expense", "icon": "\u202ex"}  # a bidi override
+        response = client.post("/categories", data=data, headers=HTMX)
+        assert response.status_code == 422
+        name = re.search(r'<input[^>]*name="name"[^>]*>', response.text).group(0)
+        icon = re.search(r'<input[^>]*name="icon"[^>]*>', response.text).group(0)
+        assert "autofocus" in icon and "autofocus" not in name
+        assert 'id="category-form-new-save"' in response.text
+        assert "autofocus" not in client.get("/categories/new").text
+
+    def test_a_mapping_select_keeps_its_id_after_the_save(self, client, world):
+        page = client.get("/categories/mappings?source=amex_csv&show=used").text
+        ids = re.findall(r'<select[^>]*id="(map-amex_csv-[^"]+)"', page)
+        assert len(ids) == len(set(ids)) == 2  # the Other group and Other-Charities
+        charities = next(i for i in ids if "charities" in i)
+        data = {
+            "source": "amex_csv",
+            "key": "Other-Charities",
+            "show": "used",
+            "category_id": world.dining.id,
+        }
+        response = client.post("/categories/mappings", data=data, headers=HTMX)
+        assert response.template.name == "categories/_mapping_group.html"
+        assert f'id="{charities}"' in response.text
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "data", "status"),
+    [
+        ("get", "/categories/99999999999999999999/edit", None, 404),
+        ("get", "/categories/99999999999999999999/merge", None, 404),
+        ("get", "/categories/{pets}/merge?target_id=99999999999999999999", None, 200),
+        ("get", "/categories/{pets}/merge/preview?target_id=99999999999999999999", None, 200),
+        ("post", "/categories/99999999999999999999/hidden", {"hidden": "1"}, 404),
+        ("post", "/categories/99999999999999999999", {"name": "x"}, 404),
+        ("post", "/categories/{pets}/merge", {"target_id": "99999999999999999999"}, 422),
+        (
+            "post",
+            "/categories/mappings",
+            {"source": "amex_csv", "key": "Other-Charities", "category_id": "9" * 20},
+            409,
+        ),
+    ],
+)
+def test_ids_beyond_bigint_are_missing_not_server_errors(client, world, method, path, data, status):
+    kwargs = {"headers": HTMX} if data is None else {"headers": HTMX, "data": data}
+    response = getattr(client, method)(path.format(pets=world.pets.id), **kwargs)
+    assert response.status_code == status
+
+
+class _Tags(HTMLParser):
+    """Every start tag and attribute name in a page (escaped text is data, not markup)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tags: set[str] = set()
+        self.attributes: set[str] = set()
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.add(tag)
+        self.attributes.update(name for name, _value in attrs)
+
+
+def test_hostile_names_and_patterns_are_escaped_everywhere(client, db, world):
+    hostile = '"><img src=x onerror=alert(1)>'
+    cat = make_category(db, "Cat " + hostile)
+    rule = make_rule(db, cat, name="Rule " + hostile, merchant_pattern=hostile)
+    make_transaction(db, world.account, name=hostile, merchant_name=hostile, category=cat)
+    make_transaction(
+        db, world.account, source="csv", amount="7.00", external_category="Weird-" + hostile
+    )
+    other = get_category(db, "Other")
+    pages = [
+        "/categories",
+        "/categories/mappings?source=amex_csv&show=used",
+        f"/categories/{cat.id}/edit",
+        f"/categories/{cat.id}/merge?target_id={other.id}",
+        "/rules",
+        f"/rules/{rule.id}/edit",
+    ]
+    for path in pages:
+        response = client.get(path)
+        assert response.status_code == 200, path
+        parsed = _Tags()
+        parsed.feed(response.text)
+        assert "img" not in parsed.tags, path
+        assert not [a for a in parsed.attributes if a.startswith("on")], path

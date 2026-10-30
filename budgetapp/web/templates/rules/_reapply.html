@@ -1,6 +1,7 @@
 {#- "Re-apply rules to past transactions" (CAT-4): choose which transactions, preview (a dry
     run), then apply exactly what was previewed. Swapped into #reapply. Needs `ra`
-    (routes/rules._reapply_context). -#}
+    (routes/rules._reapply_context). The Preview button keeps its id, so keyboard focus stays on
+    it after the swap; #reapply-status (outside the swap) announces the result. -#}
 {%- import "components/ui.html" as ui -%}
 {%- import "components/forms.html" as form -%}
 {%- set r = ra.result -%}
@@ -13,7 +14,7 @@
 {{ form.date_field("since", "From", value=ra.since, id="reapply-since", error=ra.errors.get("since"), help="Used with “Transactions since a date”.", wrapper_class="reapply-since") }}
 </div>
 <div class="form-actions">
-{{ ui.button("Preview changes", icon="eye", type="submit", spin=true) }}
+{{ ui.button("Preview changes", icon="eye", type="submit", spin=true, id="reapply-preview") }}
 </div>
 </form>
 {%- if r %}

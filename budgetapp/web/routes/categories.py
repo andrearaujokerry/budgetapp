@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+from budgetapp.money import format_money
 from budgetapp.services import categories
 from budgetapp.services.categories import (
     COLOR_NAMES,
@@ -97,10 +98,16 @@ def _form_context(
     if color and color not in COLOR_NAMES:
         swatches.append({"value": color, "name": f"Custom colour {color}"})
     ref = CategoryRef.of(category) if category is not None else None
+    errors = errors or {}
     return {
         "category": ref,
         "data": values,  # not "values": f.values would be the dict method in Jinja
-        "errors": errors or {},
+        "errors": errors,
+        # Keyboard focus: the first field with an error, or the name when the dialog opens.
+        "focus": next(
+            (k for k in ("name", "kind", "color", "icon") if k in errors),
+            "name" if in_dialog else None,
+        ),
         "swatches": swatches,
         "kind_options": KIND_OPTIONS,
         "in_dialog": in_dialog,
@@ -130,8 +137,8 @@ def _get_category(session: Session, category_id: int):
 @router.get("/categories")
 def categories_page(request: Request, session: SessionDep) -> Response:
     context = {**_base_context(session, "categories"), **_table_context(session)}
-    if is_htmx(request):
-        return _page(request, "categories/_view.html", context)
+    if is_htmx(request):  # a tab switch: focus moves to the new panel
+        return _page(request, "categories/_view.html", {**context, "focus_panel": True})
     return _page(request, "categories/index.html", context)
 
 
@@ -160,7 +167,7 @@ def mappings_page(
     if is_htmx(request):
         if request.headers.get("HX-Target") == "mappings-results":
             return _page(request, "categories/_mappings_results.html", context)
-        return _page(request, "categories/_view.html", context)
+        return _page(request, "categories/_view.html", {**context, "focus_panel": True})
     return _page(request, "categories/index.html", context)
 
 
@@ -190,7 +197,7 @@ def save_mapping(request: Request, session: SessionDep, form: FormDep) -> Respon
         return _page(
             request,
             "categories/_mappings_results.html",
-            context,
+            {**context, "focus_results": True},
             headers={"HX-Retarget": "#mappings-results", "HX-Reswap": "innerHTML"},
             oob=flash_oob("success", message),
         )
@@ -207,16 +214,20 @@ def _mappings_url(source: str, show: str) -> str:
 
 
 def _mapping_message(change: categories.MappingChange, names: dict[int, str]) -> str:
+    """The toast after a mapping change: where the key goes now, and how many past transactions
+    (its own and those of codes that fall back to it) re-applying rules would move."""
     what = change.label + (" (credits)" if change.key.endswith("|credit") else "")
     if change.new_category_id is None:
-        text = f"{what} is no longer mapped: it uses its group's category."
+        fallback = change.fallback_category_id
+        goes = names.get(fallback, "the next category") if fallback is not None else None
+        text = f"{what} is no longer mapped: it now goes to {goes or 'Uncategorized'}."
     else:
         text = f"{what} now goes to {names.get(change.new_category_id, 'the new category')}."
-    n = change.transaction_count
+    n = change.reapply_count
     if n == 1:
-        text += " 1 past transaction keeps its category until you re-apply rules."
+        text += " 1 past transaction keeps its old category until you re-apply rules."
     elif n:
-        text += f" {n:,} past transactions keep their category until you re-apply rules."
+        text += f" {n:,} past transactions keep their old category until you re-apply rules."
     return text
 
 
@@ -413,9 +424,10 @@ def merge(request: Request, category_id: int, session: SessionDep, form: FormDep
     session.commit()
     moved = result.counts.transactions
     detail = f": {moved:,} transaction{'s' if moved != 1 else ''} moved" if moved else ""
-    return redirect(
-        request,
-        "/categories",
-        "success",
-        f"Merged “{result.source.name}” into “{result.target.name}”{detail}.",
-    )
+    message = f"Merged “{result.source.name}” into “{result.target.name}”{detail}."
+    plan = result.counts.budgets
+    if plan.action == "take_source" and plan.amount is not None:
+        every = "month" if plan.period == "monthly" else "year"
+        amount = format_money(plan.amount)
+        message += f" It takes over the budget of “{result.source.name}”: {amount} a {every}."
+    return redirect(request, "/categories", "success", message)

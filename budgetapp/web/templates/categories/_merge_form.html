@@ -3,9 +3,9 @@
 {%- import "components/ui.html" as ui -%}
 {%- import "components/forms.html" as form -%}
 {%- set sid = m.source.id -%}
-<form class="form" id="merge-form-{{ sid }}" method="post" action="/categories/{{ sid }}/merge"
+<form class="form merge-form" id="merge-form-{{ sid }}" method="post" action="/categories/{{ sid }}/merge"
 {%- if m.in_dialog %} hx-post="/categories/{{ sid }}/merge" hx-target="this" hx-swap="outerHTML"{% endif %}>
-<p class="merge-intro">Everything in {{ ui.category_badge(m.source) }} moves to the category you choose: transactions, split parts, rules, Plaid and Amex mappings, budgets and alerts. Then “{{ m.source.name }}” is deleted.</p>
+<p class="merge-intro">Everything in {{ ui.category_badge(m.source, class="cat--inline") }} moves to the category you choose: transactions, split parts, rules, Plaid and Amex mappings, budgets and alerts. Then “{{ m.source.name }}” is deleted.</p>
 {{ form.category_select("target_id", m.targets, value=m.target_id, label="Merge into", include_hidden=true, placeholder="Choose a category…", required=true, id="merge-target-" ~ sid, error=m.errors.get("target_id"), hx_get="/categories/" ~ sid ~ "/merge/preview", hx_trigger="change", hx_target="#merge-preview-" ~ sid) }}
 <div class="merge-preview" id="merge-preview-{{ sid }}" aria-live="polite">{% include "categories/_merge_preview.html" %}</div>
 {%- if m.in_dialog %}

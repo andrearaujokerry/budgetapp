@@ -1,7 +1,7 @@
 {#- The categories table card (swapped after adding or editing a category). -#}
 {%- import "components/ui.html" as ui -%}
 {%- set actions -%}
-{{ ui.button("Add category", icon="plus", variant="primary", size="sm", href="/categories/new", hx_get="/categories/new", hx_target="#dialog-slot") }}
+{{ ui.button("Add category", icon="plus", variant="primary", size="sm", href="/categories/new", hx_get="/categories/new", hx_target="#dialog-slot", id="add-category") }}
 {%- endset -%}
 {%- set hidden = overview.hidden_count -%}
 {% call ui.card("Your categories", subtitle=(overview.categories|length) ~ " categories" ~ (" · " ~ hidden ~ " hidden" if hidden else ""), actions=actions, flush=true, id="categories-table-card") %}

@@ -37,7 +37,7 @@ from budgetapp.db import ledger_lock
 from budgetapp.models import Account, Category, Rule, Transaction
 from budgetapp.money import format_money
 from budgetapp.services import categorize
-from budgetapp.services.categories import CategoryRef
+from budgetapp.services.categories import CategoryRef, is_valid_id
 from budgetapp.services.categorize import (
     Categorizer,
     RecategorizeResult,
@@ -293,7 +293,8 @@ def summarize(rule: Any, account_label: str | None = None) -> str:
 
 
 def get_rule(session: Session, rule_id: int) -> Rule:
-    rule = session.get(Rule, rule_id)
+    """The rule, or :class:`RuleNotFound` (also for an id no row can have)."""
+    rule = session.get(Rule, rule_id) if is_valid_id(rule_id) else None
     if rule is None:
         raise RuleNotFound(rule_id)
     return rule

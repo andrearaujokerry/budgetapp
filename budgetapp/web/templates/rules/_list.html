@@ -1,4 +1,5 @@
-{#- The rules table in run order (swapped after moving or deleting a rule). -#}
+{#- The rules table in run order (swapped after moving or deleting a rule; `focus_id`, when
+    given, names the control that gets keyboard focus after the swap). -#}
 {%- import "components/ui.html" as ui -%}
 {%- set rule_total = rule_rows|length -%}
 {%- if rule_rows %}
@@ -24,7 +25,7 @@
 {%- else %}
 <div class="card">
 {% call ui.empty_state("No rules yet", "A rule puts the charges you choose, by merchant, description, amount or card, in a category before Plaid’s or Amex’s category is used.", icon="wand") %}
-<a class="btn btn--primary" href="/rules/new">{{ ui.icon("plus") }}<span>New rule</span></a>
+<a class="btn btn--primary" href="/rules/new" id="rules-empty-new"{% if focus_id|default(none) == "rules-empty-new" %} autofocus{% endif %}>{{ ui.icon("plus") }}<span>New rule</span></a>
 {% endcall %}
 </div>
 {%- endif %}

@@ -86,11 +86,17 @@ def rules_page(request: Request, session: SessionDep) -> Response:
     return _page(request, "rules/index.html", {**_list_context(session), **_reapply_context()})
 
 
-def _list_response(request: Request, session: Session, message: str) -> Response:
+def _list_response(
+    request: Request, session: Session, message: str, *, focus_id: str | None = None
+) -> Response:
+    """After a move or delete: HTMX gets the list (with ``focus_id`` focused) and a toast."""
     if not is_htmx(request):
         return redirect(request, "/rules", "success", message)
     return _page(
-        request, "rules/_list.html", _list_context(session), oob=flash_oob("success", message)
+        request,
+        "rules/_list.html",
+        {**_list_context(session), "focus_id": focus_id},
+        oob=flash_oob("success", message),
     )
 
 
@@ -117,12 +123,25 @@ def move(request: Request, rule_id: int, session: SessionDep, form: FormDep) -> 
         raise HTTPException(400, "Choose up or down.")
     moved = rules.move_rule(session, rule.id, str(direction))
     session.commit()
-    row = rules.get_row(session, rule.id)
+    rows = rules.list_rules(session)
+    row = next(r for r in rows if r.id == rule.id)
     if moved:
         message = f"“{row.title}” now runs {_ordinal(row.position)}."
     else:
         message = f"“{row.title}” already runs {'first' if direction == 'up' else 'last'}."
-    return _list_response(request, session, message)
+    focus_id = _move_focus(row, len(rows), str(direction))
+    return _list_response(request, session, message, focus_id=focus_id)
+
+
+def _move_focus(row: rules.RuleRow, total: int, direction: str) -> str:
+    """Keep focus on the button that was pressed, unless the move disabled it (the rule is now
+    first or last): then the other move button, or Edit when it is the only rule."""
+    at_edge = row.position == (1 if direction == "up" else total)
+    if not at_edge:
+        return f"rule-{row.id}-{direction}"
+    if total > 1:
+        return f"rule-{row.id}-{'down' if direction == 'up' else 'up'}"
+    return f"rule-{row.id}-edit"
 
 
 def _ordinal(n: int) -> str:
@@ -135,6 +154,7 @@ def _ordinal(n: int) -> str:
 @router.post("/rules/{rule_id:int}/delete")
 def delete(request: Request, rule_id: int, session: SessionDep) -> Response:
     rule = _get_rule(session, rule_id)
+    index = next(i for i, r in enumerate(rules.ordered_rules(session)) if r.id == rule.id)
     deleted = rules.delete_rule(session, rule.id)
     session.commit()
     message = f"Deleted “{deleted.summary}”."
@@ -145,7 +165,10 @@ def delete(request: Request, rule_id: int, session: SessionDep) -> Response:
             f"{'' if n != 1 else 's'} {'their' if n != 1 else 'its'} category until you re-apply"
             " rules."
         )
-    return _list_response(request, session, message)
+    # Focus moves to the rule that took its place (or the one before it, or "New rule").
+    left = rules.ordered_rules(session)
+    focus_id = f"rule-{left[min(index, len(left) - 1)].id}-edit" if left else "rules-empty-new"
+    return _list_response(request, session, message, focus_id=focus_id)
 
 
 # --------------------------------------------------------------------------- the form
@@ -253,13 +276,21 @@ def edit_rule(request: Request, rule_id: int, session: SessionDep) -> Response:
     return _page(request, "rules/form.html", _form_context(session, draft, rule_id=rule.id))
 
 
+def _existing_rule_id(session: Session, raw: str) -> int | None:
+    """The id of a rule that exists, from a query value (anything else is no rule)."""
+    text = raw.strip()
+    if not (text.isascii() and text.isdigit()):
+        return None
+    rule_id = int(text)
+    if not categories.is_valid_id(rule_id) or session.get(Rule, rule_id) is None:
+        return None
+    return rule_id
+
+
 @router.get("/rules/preview")
 def preview(request: Request, session: SessionDep) -> Response:
     query = request.query_params
-    rule_id = None
-    raw = query.get("rule_id", "")
-    if raw.isdigit() and session.get(Rule, int(raw)) is not None:
-        rule_id = int(raw)
+    rule_id = _existing_rule_id(session, query.get("rule_id", ""))
     if not is_htmx(request):
         if rule_id is not None:
             return redirect(request, f"/rules/{rule_id}/edit")
@@ -329,7 +360,8 @@ def reapply(request: Request, session: SessionDep, form: FormDep) -> Response:
     except ReapplyScopeError as err:
         context = _reapply_context(scope_key, since, errors=err.errors)
         if is_htmx(request):
-            return _page(request, "rules/_reapply.html", context, status_code=422)
+            status = _reapply_status(" ".join(err.errors.values()))
+            return _page(request, "rules/_reapply.html", context, status_code=422, oob=status)
         return _page(
             request, "rules/index.html", {**_list_context(session), **context}, status_code=422
         )
@@ -341,8 +373,28 @@ def reapply(request: Request, session: SessionDep, form: FormDep) -> Response:
     session.rollback()  # a dry run changes nothing; release the ledger lock now
     context = _reapply_context(scope.key, since, result=result)
     if is_htmx(request):
-        return _page(request, "rules/_reapply.html", context)
+        status = _reapply_status(_preview_sentence(result))
+        return _page(request, "rules/_reapply.html", context, oob=status)
     return _page(request, "rules/index.html", {**_list_context(session), **context})
+
+
+def _reapply_status(text: str) -> Markup:
+    """The re-apply panel's result, read out by screen readers (``#reapply-status`` stays on the
+    page while the panel is swapped, so the change is announced)."""
+    return Markup('<div hx-swap-oob="innerHTML:#reapply-status">{}</div>').format(text)
+
+
+def _preview_sentence(result: rules.ReapplyResult) -> str:
+    n, k = result.changed, result.skipped_user
+    text = f"Preview for {result.scope.description}: "
+    if n:
+        text += f"{n:,} transaction{'s' if n != 1 else ''} would change category"
+    else:
+        text += "nothing would change"
+    text += f"; {result.examined:,} checked"
+    if k:
+        text += f"; {k:,} you categorized yourself {'are' if k != 1 else 'is'} kept"
+    return text + ". Nothing has changed yet." if n else text + "."
 
 
 def _reapplied_message(result: rules.ReapplyResult) -> str:

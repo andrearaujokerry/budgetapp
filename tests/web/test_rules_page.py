@@ -550,3 +550,102 @@ class TestReapply:
         assert response.template.name == "rules/index.html"
         assert response.context["ra"]["result"].changed == 3
         assert csp_problems(response.text, rendered=True) == []
+
+
+# --------------------------------------------------------------------------- review fixes
+
+
+def reapply_status(text: str) -> str:
+    found = re.search(r'<div hx-swap-oob="innerHTML:#reapply-status">([^<]*)</div>', text)
+    return html.unescape(found.group(1))
+
+
+class TestKeyboardFocus:
+    """htmx puts focus back on an element with the same id after a swap; when a move or a
+    delete takes that element away (or disables it), the list names where focus goes."""
+
+    def test_every_rule_control_has_a_stable_id(self, client, world):
+        page = client.get("/rules").text
+        for suffix in ("up", "down", "edit", "delete"):
+            assert f'id="rule-{world.food.id}-{suffix}"' in page
+        assert f'id="rule-on-{world.food.id}"' in page
+        assert "autofocus" not in page
+
+    def test_a_move_keeps_focus_on_its_button_unless_it_is_now_disabled(self, client, world):
+        # Rides is 2nd: moving it up makes it first, so its Up button is disabled: Down instead.
+        response = client.post(
+            f"/rules/{world.rides.id}/move", data={"direction": "up"}, headers=HTMX
+        )
+        assert response.context["focus_id"] == f"rule-{world.rides.id}-down"
+        down = re.search(rf'<button[^>]*id="rule-{world.rides.id}-down"[^>]*>', response.text)
+        assert "autofocus" in down.group(0) and response.text.count("autofocus") == 1
+        # Flights is 3rd: moving it up leaves it 2nd, so focus stays on its Up button.
+        response = client.post(
+            f"/rules/{world.flights.id}/move", data={"direction": "up"}, headers=HTMX
+        )
+        assert response.context["focus_id"] == f"rule-{world.flights.id}-up"
+        # Food is now last: moving it down changes nothing, and Up gets focus.
+        response = client.post(
+            f"/rules/{world.food.id}/move", data={"direction": "down"}, headers=HTMX
+        )
+        assert response.context["focus_id"] == f"rule-{world.food.id}-up"
+
+    def test_a_lone_rule_keeps_focus_on_edit(self, client, db):
+        rule = make_rule(db, get_category(db, "Travel"), merchant_pattern="DELTA")
+        response = client.post(f"/rules/{rule.id}/move", data={"direction": "up"}, headers=HTMX)
+        assert response.context["focus_id"] == f"rule-{rule.id}-edit"
+
+    def test_after_a_delete_focus_goes_to_the_rule_in_its_place(self, client, world):
+        response = client.post(f"/rules/{world.food.id}/delete", headers=HTMX)
+        assert response.context["focus_id"] == f"rule-{world.rides.id}-edit"
+        response = client.post(f"/rules/{world.flights.id}/delete", headers=HTMX)  # the last one
+        assert response.context["focus_id"] == f"rule-{world.rides.id}-edit"
+        response = client.post(f"/rules/{world.rides.id}/delete", headers=HTMX)
+        assert response.context["focus_id"] == "rules-empty-new"
+        assert re.search(r'<a[^>]*id="rules-empty-new"[^>]*autofocus', response.text)
+
+    def test_the_reapply_preview_is_announced_and_keeps_focus(self, client, stale):
+        page = client.get("/rules").text
+        assert '<p class="sr-only" id="reapply-status" role="status"></p>' in page
+        data = {"scope": "all", "action": "preview"}
+        response = client.post("/rules/reapply", data=data, headers=HTMX)
+        assert 'id="reapply-preview"' in response.text  # the Preview button keeps focus
+        assert reapply_status(response.text) == (
+            "Preview for all past transactions: 3 transactions would change category; 3 checked;"
+            " 1 you categorized yourself is kept. Nothing has changed yet."
+        )
+        response = client.post("/rules/reapply", data={**data, "scope": "since"}, headers=HTMX)
+        assert response.status_code == 422
+        assert reapply_status(response.text) == "Enter the first date to update."
+
+    def test_nothing_to_change_is_announced_too(self, client, db):
+        response = client.post("/rules/reapply", data={"scope": "all"}, headers=HTMX)
+        assert reapply_status(response.text) == (
+            "Preview for all past transactions: nothing would change; 0 checked."
+        )
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("get", "/rules/99999999999999999999/edit"),
+        ("post", "/rules/99999999999999999999/active"),
+        ("post", "/rules/99999999999999999999/move"),
+        ("post", "/rules/99999999999999999999/delete"),
+        ("post", "/rules/99999999999999999999"),
+    ],
+)
+def test_ids_beyond_bigint_are_missing_not_server_errors(client, world, method, path):
+    assert getattr(client, method)(path, headers=HTMX).status_code == 404
+
+
+@pytest.mark.parametrize("raw", ["99999999999999999999999", "\u00b2", "-1", "1e3", ""])
+def test_a_preview_for_a_rule_that_cannot_exist_previews_a_new_rule(client, world, raw):
+    params = {
+        "rule_id": raw,
+        "merchant_pattern": "uber",
+        "category_id": str(world.transportation.id),
+    }
+    response = client.get("/rules/preview", params=params, headers=HTMX)
+    assert response.status_code == 200
+    assert response.context["pv"]["preview"].is_new

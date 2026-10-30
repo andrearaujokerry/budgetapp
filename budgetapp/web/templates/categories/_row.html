@@ -1,4 +1,6 @@
-{#- One category row (swapped after the hidden switch changes). Needs `c` (CategoryUsage). -#}
+{#- One category row (swapped after the hidden switch changes). Needs `c` (CategoryUsage).
+    The controls keep stable ids: after a swap (or a dialog save that swaps the table) htmx puts
+    keyboard focus back on the one that had it. -#}
 {%- import "components/ui.html" as ui -%}
 {%- import "components/forms.html" as form -%}
 {%- set kind_tones = {'expense': 'neutral', 'income': 'ok', 'transfer': 'muted'} -%}
@@ -26,8 +28,8 @@
 {%- endif -%}
 </td>
 <td class="table__actions">
-{{- ui.button("Edit " ~ c.name, icon="pencil", icon_only=true, variant="ghost", size="sm", href="/categories/" ~ c.id ~ "/edit", hx_get="/categories/" ~ c.id ~ "/edit", hx_target="#dialog-slot") -}}
+{{- ui.button("Edit " ~ c.name, icon="pencil", icon_only=true, variant="ghost", size="sm", href="/categories/" ~ c.id ~ "/edit", hx_get="/categories/" ~ c.id ~ "/edit", hx_target="#dialog-slot", id="edit-category-" ~ c.id) -}}
 {%- if c.is_system %}<span class="btn btn--ghost btn--icon btn--sm btn-placeholder" aria-hidden="true"></span>
-{%- else %}{{ ui.button("Merge " ~ c.name ~ " into another category", icon="merge", icon_only=true, variant="ghost", size="sm", href="/categories/" ~ c.id ~ "/merge", hx_get="/categories/" ~ c.id ~ "/merge", hx_target="#dialog-slot") }}{% endif -%}
+{%- else %}{{ ui.button("Merge " ~ c.name ~ " into another category", icon="merge", icon_only=true, variant="ghost", size="sm", href="/categories/" ~ c.id ~ "/merge", hx_get="/categories/" ~ c.id ~ "/merge", hx_target="#dialog-slot", id="merge-category-" ~ c.id) }}{% endif -%}
 </td>
 </tr>

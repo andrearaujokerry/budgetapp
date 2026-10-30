@@ -10,4 +10,5 @@
 {{ ui.banner("info", "Card payments always go to Card Payments, and a category you set yourself on a transaction never changes.", title="Rules never touch two things.") }}
 <div id="rules-list">{% include "rules/_list.html" %}</div>
 <section class="section" id="reapply">{% include "rules/_reapply.html" %}</section>
+<p class="sr-only" id="reapply-status" role="status"></p>
 {% endblock %}

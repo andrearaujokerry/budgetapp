@@ -1,7 +1,7 @@
 {#- "Your categories" tab: what the kinds mean, then the table. -#}
 {%- import "components/ui.html" as ui -%}
 {%- set kind_tones = {'expense': 'neutral', 'income': 'ok', 'transfer': 'muted'} -%}
-<section class="section categories-panel" aria-label="Your categories">
+<section class="section categories-panel" aria-label="Your categories"{% if focus_panel|default(false) %} tabindex="-1" autofocus{% endif %}>
 <ul class="kind-legend">
 {%- for k in kinds %}
 <li>{{ ui.badge(k.label, tone=kind_tones[k.key]) }}<span>{{ k.help }}</span></li>

@@ -487,3 +487,157 @@ class TestMerge:
         assert not db.scalar(lock, params)
         categories.merge_categories(db, empty.id, get_category(db, "Home").id)
         assert db.scalar(lock, params) == 1
+
+
+def budget_rows(db, category):
+    return db.execute(
+        select(Budget.period, Budget.amount, Budget.rollover, Budget.effective_from)
+        .where(Budget.category_id == category.id)
+        .order_by(Budget.effective_from, Budget.period)
+    ).all()
+
+
+class TestMergeBudgetsInEffect:
+    """The merged category keeps a budget if either side has one now (ARCHITECTURE §5: the
+    amount for a period is its latest row up to the period's end; null means "no budget")."""
+
+    def test_a_target_whose_budget_ended_takes_the_sources_current_budget(self, db):
+        coffee, cafes = make_category(db, "Coffee"), make_category(db, "Cafes")
+        make_budget(db, coffee, "50.00", effective_from=dt.date(2026, 1, 1))
+        make_budget(db, coffee, None, effective_from=dt.date(2026, 6, 1))  # removed in June
+        make_budget(db, cafes, "80.00", effective_from=dt.date(2026, 1, 1))
+        make_budget(db, cafes, "100.00", effective_from=dt.date(2026, 3, 1), rollover=True)
+        preview = categories.merge_preview(db, cafes.id, coffee.id)
+        plan = preview.counts.budgets
+        assert (plan.action, plan.period, plan.amount, plan.rollover, plan.effective_from) == (
+            "take_source",
+            "monthly",
+            Decimal("100.00"),
+            True,
+            dt.date(2026, 10, 1),
+        )
+        assert (preview.counts.budgets_moved, preview.counts.budgets_dropped) == (0, 2)
+        cafes_id = cafes.id
+        result = categories.merge_categories(db, cafes.id, coffee.id)
+        assert result.counts == preview.counts
+        assert budget_rows(db, coffee) == [
+            ("monthly", Decimal("50.00"), False, dt.date(2026, 1, 1)),
+            ("monthly", None, False, dt.date(2026, 6, 1)),
+            ("monthly", Decimal("100.00"), True, dt.date(2026, 10, 1)),
+        ]
+        assert not db.scalar(select(func.count()).where(Budget.category_id == cafes_id))
+
+    def test_a_budget_ended_this_period_is_replaced_in_place(self, db):
+        coffee, cafes = make_category(db, "Coffee"), make_category(db, "Cafes")
+        make_budget(db, coffee, "50.00", effective_from=dt.date(2026, 1, 1))
+        ended = make_budget(db, coffee, None, effective_from=dt.date(2026, 10, 1))
+        make_budget(db, cafes, "100.00", effective_from=dt.date(2026, 1, 1))
+        categories.merge_categories(db, cafes.id, coffee.id)
+        assert budget_rows(db, coffee) == [
+            ("monthly", Decimal("50.00"), False, dt.date(2026, 1, 1)),
+            ("monthly", Decimal("100.00"), False, dt.date(2026, 10, 1)),
+        ]
+        assert db.get(Budget, ended.id).amount == Decimal("100.00")
+
+    def test_an_annual_budget_carries_over_and_ends_the_monthly_one(self, db):
+        presents, gifts = make_category(db, "Presents"), make_category(db, "Gift ideas")
+        make_budget(db, presents, "50.00", effective_from=dt.date(2026, 1, 1))
+        make_budget(db, presents, None, effective_from=dt.date(2026, 10, 15))  # mid-month end
+        make_budget(db, gifts, "1200.00", effective_from=dt.date(2026, 1, 1), period="annual")
+        categories.merge_categories(db, gifts.id, presents.id)
+        assert budget_rows(db, presents) == [
+            ("monthly", Decimal("50.00"), False, dt.date(2026, 1, 1)),
+            ("annual", Decimal("1200.00"), False, dt.date(2026, 10, 1)),
+            ("monthly", None, False, dt.date(2026, 10, 1)),  # one active period type
+            ("monthly", None, False, dt.date(2026, 10, 15)),
+        ]
+
+    def test_neither_has_a_budget_now(self, db):
+        coffee, cafes = make_category(db, "Coffee"), make_category(db, "Cafes")
+        mine = make_budget(db, coffee, None, effective_from=dt.date(2026, 6, 1))
+        make_budget(db, cafes, "100.00", effective_from=dt.date(2026, 1, 1))
+        make_budget(db, cafes, None, effective_from=dt.date(2026, 5, 1))
+        preview = categories.merge_preview(db, cafes.id, coffee.id)
+        assert preview.counts.budgets.action == "drop"
+        categories.merge_categories(db, cafes.id, coffee.id)
+        assert [
+            b.id for b in db.scalars(select(Budget).where(Budget.category_id == coffee.id))
+        ] == [mine.id]
+
+    def test_a_target_with_a_budget_now_keeps_it(self, db):
+        coffee, cafes = make_category(db, "Coffee"), make_category(db, "Cafes")
+        make_budget(db, coffee, None, effective_from=dt.date(2026, 1, 1))
+        make_budget(db, coffee, "60.00", effective_from=dt.date(2026, 9, 1))  # started again
+        make_budget(db, cafes, "100.00", effective_from=dt.date(2026, 1, 1))
+        assert categories.merge_preview(db, cafes.id, coffee.id).counts.budgets.action == (
+            "keep_target"
+        )
+        categories.merge_categories(db, cafes.id, coffee.id)
+        assert [r.amount for r in budget_rows(db, coffee)] == [None, Decimal("60.00")]
+
+    def test_statement_mode_starts_the_budget_with_the_current_cycle(self, db):
+        account = make_account(db, statement_closing_day=27)
+        make_statement(db, account, "2026-09-27")
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id)
+        coffee, cafes = make_category(db, "Coffee"), make_category(db, "Cafes")
+        make_budget(db, coffee, None, effective_from=dt.date(2026, 1, 1))
+        make_budget(db, cafes, "100.00", effective_from=dt.date(2026, 1, 1))
+        result = categories.merge_categories(db, cafes.id, coffee.id)
+        assert result.counts.budgets.effective_from == dt.date(2026, 9, 28)
+        assert budget_rows(db, coffee)[-1] == (
+            "monthly",
+            Decimal("100.00"),
+            False,
+            dt.date(2026, 9, 28),
+        )
+
+
+class TestIcons:
+    @pytest.mark.parametrize(
+        "icon",
+        [
+            "\U0001f469\u200d\U0001f4bb",  # technologist: woman + ZWJ + laptop
+            "\U0001f9d1\u200d\U0001f373",  # cook
+            "\U0001f3f3\ufe0f\u200d\U0001f308",  # rainbow flag
+            "\U0001f468\u200d\U0001f469\u200d\U0001f467",  # family
+            # Scotland: a black flag and tag characters
+            "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f",
+            "\U0001f44d\U0001f3fd",  # thumbs up with a skin tone
+            "1\ufe0f\u20e3",  # keycap 1
+            "\U0001f43e",  # paw prints
+        ],
+    )
+    def test_joined_and_flag_emoji_are_one_icon(self, db, icon):
+        created = categories.create_category(db, f"Icon {len(icon)} {ord(icon[-1])}", icon=icon)
+        assert created.icon == icon
+
+    @pytest.mark.parametrize(
+        "icon",
+        [
+            "\u202eevil",  # right-to-left override
+            "a\u200bb",  # zero-width space
+            "x\u000ay",  # line feed
+            "\u0007",  # bell
+            "a\u2028b",  # line separator
+            "\u200d",  # a joiner alone
+            "\ufeffx",  # byte order mark
+            "\ufe0f",  # a variation selector alone
+        ],
+    )
+    def test_invisible_controls_are_refused(self, db, icon):
+        with pytest.raises(CategoryError) as err:
+            categories.create_category(db, "Odd icon", icon=icon)
+        assert err.value.errors == {"icon": "Use one emoji or a few characters."}
+
+
+def test_ids_beyond_bigint_name_no_category(db):
+    huge = 2**63
+    with pytest.raises(CategoryNotFound):
+        categories.get_category(db, huge)
+    with pytest.raises(CategoryNotFound):
+        categories.merge_categories(db, huge, get_category(db, "Home").id)
+    with pytest.raises(CategoryError) as err:
+        categories.merge_preview(db, get_category(db, "Home").id, huge)
+    assert "no longer exists" in err.value.errors["target_id"]
+    with pytest.raises(CategoryNotFound):
+        categories.set_hidden(db, -1, True)
