@@ -1,11 +1,15 @@
 {#- The live part of the Connection page: each linked connection (status, update-mode actions,
     details, cards) and the recent syncs. GET /connection with HX-Request answers with this
     fragment; it polls itself while a sync runs (every 4 s) or a follow-up sync is queued
-    (every 10 s), and stops when neither is true. Context as for connection/index.html. -#}
+    (every 10 s), stops when neither is true, and refreshes on the connection-changed event (Sync
+    now in the top bar). It sends plaid=1|0, whether the page loaded Plaid's script (page_plaid),
+    so a Link action can't arrive by polling into a page that can't open Link. Every control has
+    a stable id, so htmx puts keyboard focus back after each swap. Context as for
+    connection/index.html. -#}
 {%- import "components/ui.html" as ui -%}
 {%- import "connection/_macros.html" as cx -%}
 {%- set o = overview -%}
-<div id="connection-live" class="stack stack--xl"{% if poll %} hx-get="/connection" hx-trigger="{{ poll }}" hx-swap="outerHTML"{% endif %}>
+<div id="connection-live" class="stack stack--xl" hx-get="/connection" hx-trigger="{{ (poll ~ ', ') if poll else '' }}{{ changed_event }} from:body" hx-swap="outerHTML" hx-vals='{"plaid": "{{ 1 if page_plaid else 0 }}"}'>
 {%- for item in o.items %}
 {%- set s = item.status %}
 <section class="section" aria-labelledby="item-{{ item.id }}-title">
@@ -19,7 +23,7 @@
 
 {%- if item.needs_reconnect %}
 {% call ui.banner("over", item.error_display_message or item.error_help or "American Express needs you to sign in again through Plaid.", title="Reconnect needed.") %}
-{{ ui.button("Reconnect", variant="danger", size="sm", icon="link", data_link_mode="update", data_item_id=item.id, disabled=not link_enabled) }}
+{{ ui.button("Reconnect", variant="danger", size="sm", icon="link", data_link_mode="update", data_item_id=item.id, id="reconnect-" ~ item.id, disabled=not link_enabled) }}
 {% endcall %}
 {%- elif s.state == "error" %}
 {{ ui.banner("over", item.error_display_message or item.error_help or "The last sync didn't finish; the next one tries again.", title="The last sync failed" ~ (" (" ~ item.error_code ~ ")" if item.error_code else "") ~ ".") }}
@@ -28,12 +32,12 @@
 {%- endif %}
 {%- if s.consent_warning and not item.needs_reconnect %}
 {% call ui.banner("over" if s.consent_days_left <= 0 else "warn", "American Express asks you to confirm access once a year. Renewing takes a minute in a Plaid window and keeps this connection.", title=cx.consent_text(s) ~ ".") %}
-{{ ui.button("Renew consent", size="sm", icon="refresh", data_link_mode="update", data_item_id=item.id, disabled=not link_enabled) }}
+{{ ui.button("Renew consent", size="sm", icon="refresh", data_link_mode="update", data_item_id=item.id, id="renew-" ~ item.id, disabled=not link_enabled) }}
 {% endcall %}
 {%- endif %}
 {%- if not item.liabilities_consented %}
 {% call ui.banner("info", "Plaid can also share the statement balance, minimum payment and due date. You confirm in a short Plaid window; the connection stays the same.", title="Statement details aren't shared.") %}
-{{ ui.button("Grant access to statement details", size="sm", icon="receipt", data_link_mode="liabilities", data_item_id=item.id, disabled=not link_enabled) }}
+{{ ui.button("Grant access to statement details", size="sm", icon="receipt", data_link_mode="liabilities", data_item_id=item.id, id="grant-" ~ item.id, disabled=not link_enabled) }}
 {% endcall %}
 {%- endif %}
 

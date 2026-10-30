@@ -7,31 +7,43 @@ Amex link can also break the first. So in production:
 * :func:`new_link_token` issues a new-link token only when there is no ``plaid_items`` row, no
   production access token in Keychain, no unexpired link-in-progress marker and no unsaved token
   in a recovery file (``secrets.production_link_blockers``) — checked, and the marker set, under
-  ``db.link_lock``.
-* :func:`exchange` never exchanges a public token while an Item exists (a duplicate would use a
-  connection); it retries transport failures within the public token's 30-minute life; it saves
-  the access token in Keychain (write-once, read back) BEFORE writing the database; a failed
-  Keychain write leaves the token in a 0600 recovery file and stops with instructions.
+  ``db.link_lock``. The marker records a random *attempt* id that goes back to the page with the
+  token; only that attempt's own Link exit (``onExit``) or exchange clears it
+  (:func:`link_exited`, :func:`exchange`). Link's ``CLOSE_OAUTH`` / ``FAIL_OAUTH`` events leave it:
+  Link is still open after them and can still succeed.
+* :func:`exchange` holds an advisory lock on its own connection (:data:`LINK_WORK_KEY`) from the
+  checks to the Item commit, so a second exchange is refused rather than run alongside. It never
+  exchanges while any trace of a connection exists (an Item row, a production token in Keychain,
+  an unsaved recovery file) or when Link reports an institution that clearly isn't American
+  Express; it keeps the marker while it runs; it retries transport failures within the public
+  token's 30-minute life; it saves the access token in Keychain (write-once, read back) BEFORE
+  writing the database; a failed Keychain write leaves the token in a 0600 recovery file and stops
+  with instructions (or, when no file can be written either, shows the token once:
+  :class:`TokenNotSaved`).
 * Repairs and consent renewals use update mode (:func:`update_link_token`,
   :func:`complete_update`): same Item, same token, no connection used.
 * A token in Keychain without an Item row (lost or restored database) is re-attached
-  (:func:`recover_orphaned_items`), never linked again.
+  (:func:`recover_orphaned_items`, under the same lock), never linked again.
 
-Tokens are never logged, returned in messages or stored outside Keychain (SEC-2). Functions that
-need several transactions take a ``sessionmaker`` (like ``services.sync``).
+Tokens are never logged or stored outside Keychain (SEC-2), and never returned in messages except
+the one documented case above. Functions that need several transactions take a ``sessionmaker``
+(like ``services.sync``).
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import time
-from collections.abc import Callable, Mapping, Sequence
+import uuid
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, NamedTuple
 
-from sqlalchemy import func, select
+from sqlalchemy import Connection, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from budgetapp import clock, db, secrets
@@ -62,6 +74,12 @@ log = logging.getLogger(__name__)
 
 #: The public token lives 30 minutes; retries stop a little before that.
 EXCHANGE_WINDOW = 25 * 60.0
+#: Advisory lock (two-key form in ``db.LOCK_NS_GLOBAL``, whose keys 1 and 2 are ``db.LEDGER_KEY``
+#: and ``db.LINK_KEY``), held on a connection of its own through a whole production exchange or
+#: re-attach: Plaid's exchange, the Keychain write and the Item commit.
+LINK_WORK_KEY = 3
+#: Plaid's id for American Express (RESEARCH T3.1). Link's own metadata is trusted first.
+AMEX_INSTITUTION_ID = "ins_10"
 DEFAULT_SANDBOX_INSTITUTION = "ins_109508"
 SANDBOX_INSTITUTIONS = {
     "ins_109508": "First Platypus Bank",
@@ -106,6 +124,20 @@ class LinkRefused(LinkError):
 
 class LinkFailed(LinkError):
     """A link step failed; the message says what to do."""
+
+
+class LinkBusy(LinkRefused):
+    """Another window is finishing a link or a re-attach right now; nothing was done here."""
+
+
+class TokenNotSaved(LinkFailed):
+    """The connection exists at Plaid, but its access token could be saved neither in Keychain nor
+    in a recovery file (``secrets.TokenNotSavedError`` with no path). Its contract: show the token
+    to the user ONCE so it isn't lost. ``access_token`` carries it; the message never does."""
+
+    def __init__(self, message: str, access_token: str) -> None:
+        super().__init__(message)
+        self.access_token = access_token
 
 
 # --------------------------------------------------------------------------- Link metadata
@@ -189,61 +221,220 @@ def _item_count(session: Session) -> int:
     return session.scalar(select(func.count()).select_from(PlaidItem)) or 0
 
 
+@dataclass(frozen=True, slots=True)
+class LinkToken:
+    """A Plaid Link token. ``attempt``: for a production NEW link, the id of this link attempt,
+    kept in the link-in-progress marker. The page sends it back with Link's exit report and with
+    the exchange; only that attempt clears the marker (another tab's late exit can't)."""
+
+    token: str
+    attempt: str | None = None
+
+
+# The link-in-progress marker is ``secrets.set_link_in_progress``'s JSON (``created_at``,
+# ``expires_at``: ``secrets.get_link_in_progress`` reads it unchanged) plus ``attempt``. It is read
+# and written under ``db.link_lock`` so a compare-and-clear can't remove a newer attempt's marker.
+
+
+def _read_marker(store: secrets.SecretStore | None) -> dict[str, Any] | None:
+    """The stored marker: ``None`` when there is none, ``{}`` when unreadable (nobody owns it)."""
+    raw = (store or secrets.get_store()).get(secrets.link_in_progress_key())
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _set_marker(store: secrets.SecretStore | None, attempt: str) -> dt.datetime:
+    """Write the marker for ``attempt``; returns when it expires (a Link token's 4-hour life)."""
+    created = clock.now()
+    expires = created + secrets.LINK_TOKEN_LIFETIME
+    payload = {
+        "created_at": created.isoformat(),
+        "expires_at": expires.isoformat(),
+        "attempt": attempt,
+    }
+    secrets.set_secret(secrets.link_in_progress_key(), json.dumps(payload), store=store)
+    return expires
+
+
+def release_attempt(
+    session: Session, store: secrets.SecretStore | None, attempt: str | None
+) -> bool:
+    """Clear the link-in-progress marker if ``attempt`` set it (under the link lock; the caller
+    commits). A marker of another attempt, an unreadable one or a missing ``attempt`` is left alone
+    (it expires by itself). True when cleared."""
+    if not attempt:
+        return False
+    db.link_lock(session)
+    marker = _read_marker(store)
+    if not marker or marker.get("attempt") != attempt:
+        return False
+    secrets.clear_link_in_progress(store=store)
+    return True
+
+
+def _release(
+    session_factory: sessionmaker[Session], store: secrets.SecretStore | None, attempt: str | None
+) -> None:
+    if attempt:
+        with db.transaction(session_factory) as s:
+            release_attempt(s, store, attempt)
+
+
+def _claim_marker(store: secrets.SecretStore | None, attempt: str | None) -> str | None:
+    """While an exchange runs, the marker keeps new links away: (re)write it for this attempt
+    unless another attempt's unexpired marker is there. Returns the attempt that now owns it (a new
+    id when the caller had none), or ``None``. Call under ``db.link_lock``."""
+    marker = _read_marker(store)
+    live = marker is not None and secrets.get_link_in_progress(store=store) is not None
+    if live and (not attempt or marker.get("attempt") != attempt):
+        return None  # another Link session is open: its marker stays
+    owned = attempt or uuid.uuid4().hex
+    _set_marker(store, owned)
+    return owned
+
+
+@contextmanager
+def _link_work_lock(session_factory: sessionmaker[Session]) -> Iterator[bool]:
+    """Hold :data:`LINK_WORK_KEY` for the ``with`` block on a connection of its own (like
+    ``db.sync_lock``); yields False, without waiting, while another exchange or re-attach runs."""
+    bind = session_factory.kw["bind"]
+    engine = bind.engine if isinstance(bind, Connection) else bind
+    conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+    key = (db.LOCK_NS_GLOBAL, LINK_WORK_KEY)
+    acquired = False
+    try:
+        acquired = bool(conn.execute(select(func.pg_try_advisory_lock(*key))).scalar())
+        yield acquired
+    finally:
+        try:
+            if acquired and not conn.execute(select(func.pg_advisory_unlock(*key))).scalar():
+                conn.invalidate()
+        except Exception:
+            log.warning("could not release the link lock cleanly; discarding the connection")
+            conn.invalidate()
+        finally:
+            conn.close()
+
+
+def _clock_text(value: dt.datetime, today: dt.date) -> str:
+    """ "6:39 PM", "1:15 AM tomorrow" or "9:00 AM on Nov 2", in the Mac's time zone."""
+    local = value.astimezone()
+    text = local.strftime("%-I:%M %p")
+    if local.date() == today:
+        return text
+    if local.date() == today + dt.timedelta(days=1):
+        return f"{text} tomorrow"
+    return f"{text} on {local:%b} {local.day}"
+
+
+def link_blocks(settings: Settings, *, store: secrets.SecretStore | None = None) -> tuple[str, ...]:
+    """Why no production link can start right now, in plain words with local times (the page's
+    "Linking is paused" banner and the refusal itself). Empty when the guard of
+    ``secrets.production_link_blockers`` passes; its own text is the fallback."""
+    blockers = secrets.production_link_blockers(settings, store=store)
+    if not blockers:
+        return ()
+    today = clock.today()
+    reasons: list[str] = []
+    if secrets.get_access_token("production", store=store):
+        reasons.append(
+            "Keychain holds the access token of an earlier American Express connection: re-attach "
+            "it instead of linking again."
+        )
+    expires = secrets.get_link_in_progress(store=store)
+    if expires is not None:
+        started = sync_service.parse_timestamp((_read_marker(store) or {}).get("created_at"))
+        since = f" started at {_clock_text(started, today)}" if started else ""
+        reasons.append(
+            f"A Plaid link{since} may still be in progress in this or another tab or window: "
+            "finish it or close the Plaid window there. If it's already closed, linking unlocks "
+            f"at {_clock_text(expires, today)}."
+        )
+    for path in secrets.unsaved_production_tokens(settings):
+        reasons.append(
+            f"The access token of an earlier link is waiting in the recovery file {path}. Store "
+            "it with ./run setup --env production --access-token (it belongs to a connection "
+            "that already exists), then re-attach it here."
+        )
+    return tuple(reasons) or tuple(blockers)
+
+
 def new_link_token(
     session: Session,
     gateway: PlaidGateway,
     settings: Settings,
     *,
     store: secrets.SecretStore | None = None,
-) -> str:
+) -> LinkToken:
     """A Link token for a NEW Item (``products=['transactions']``, 730 days, Liabilities as an
     additional consented product; the gateway builds the exact request).
 
     Production: refused (:class:`LinkRefused`) unless the link guard passes, checked under the
-    link lock, which also covers setting the link-in-progress marker. The caller commits (that
-    releases the lock). Sandbox may hold several Items.
+    link lock, which also covers setting the link-in-progress marker for a new attempt id
+    (returned with the token). The caller commits (that releases the lock). Sandbox may hold
+    several Items and keeps no marker.
     """
     if not settings.is_production:
-        return gateway.create_link_token()
+        return LinkToken(gateway.create_link_token())
     db.link_lock(session)
     if _item_count(session):
         raise LinkRefused(
             "American Express is already linked. Use Reconnect or Renew instead: a second link "
             "would use another of your 10 Plaid connections and could break the first."
         )
-    blockers = secrets.production_link_blockers(settings, store=store)
-    if blockers:
-        raise LinkRefused(" ".join(blockers))
-    secrets.set_link_in_progress(store=store)
+    blocks = link_blocks(settings, store=store)
+    if blocks:
+        raise LinkRefused(" ".join(blocks))
+    attempt = uuid.uuid4().hex
+    _set_marker(store, attempt)
     try:
-        return gateway.create_link_token()
+        return LinkToken(gateway.create_link_token(), attempt)
     except BaseException:
         secrets.clear_link_in_progress(store=store)
         raise
 
 
+#: Link's ``onExit`` (reported as event "EXIT"): Link closed without linking.
+LINK_EXIT = "EXIT"
+
+
 def link_exited(
+    session: Session,
     settings: Settings,
     *,
     store: secrets.SecretStore | None = None,
     mode: str = "new",
-    error_code: str | None = None,
+    attempt: str | None = None,
     event: str | None = None,
+    error_code: str | None = None,
     status: str | None = None,
     link_session_id: str | None = None,
-) -> None:
-    """Link closed without linking (``onExit``, or the ``CLOSE_OAUTH`` / ``FAIL_OAUTH`` events):
-    logged as "not linked"; in production a new-link attempt's marker is cleared."""
+) -> bool:
+    """A report from Link that it didn't link, logged as "not linked".
+
+    ``event`` "EXIT" (or none) is ``onExit``: Link is closed, so a production new-link attempt's
+    marker is cleared — only if ``attempt`` set it. ``CLOSE_OAUTH`` / ``FAIL_OAUTH`` are only
+    events: the Amex window closed or timed out, but Link stays open and can still succeed, so the
+    marker stays. Under the link lock; the caller commits. True when the marker was cleared.
+    """
+    closed = event in (None, LINK_EXIT)
     log.info(
-        "Plaid Link closed without linking (%s mode; event %s, error %s, status %s, session %s)",
+        "Plaid Link %s without linking (%s mode; event %s, error %s, status %s, session %s)",
+        "closed" if closed else "reported an event",
         mode,
-        event or "EXIT",
+        event or LINK_EXIT,
         error_code or "none",
         status or "unknown",
         link_session_id or "unknown",
     )
-    if settings.is_production and mode == "new":
-        secrets.clear_link_in_progress(store=store)
+    if not (closed and settings.is_production and mode == "new"):
+        return False
+    return release_attempt(session, store, attempt)
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +509,19 @@ def _exchange_message(err: PlaidError) -> str:
     return f"Plaid couldn't finish linking ({detail}). Nothing was saved."
 
 
+def _expired_message(unlock_at: dt.datetime | None) -> str:
+    """Transport failures outlasted the public token: the outcome at Plaid is unknown."""
+    text = (
+        "Plaid couldn't be reached to finish linking, and the link expired before it could "
+        "finish. Plaid may or may not have created the connection; if it did, this app never "
+        "received its access token and can't recover it. Before linking again, check Plaid's "
+        "Dashboard (dashboard.plaid.com) for a new American Express Item."
+    )
+    if unlock_at is not None:
+        text += f" Linking stays paused until {_clock_text(unlock_at, clock.today())}."
+    return text
+
+
 def _exchange_with_retries(
     gateway: PlaidGateway,
     public_token: str,
@@ -325,6 +529,7 @@ def _exchange_with_retries(
     sleep: Callable[[float], None],
     monotonic: Callable[[], float],
     window: float,
+    unlock_at: Callable[[], dt.datetime | None] = lambda: None,
 ) -> tuple[ExchangeResult | None, PlaidError | None, bool]:
     """``(result, plaid_error, retried)``: transport failures are retried with backoff while the
     public token is still valid; a Plaid error is returned (never retried: a 429 here can be the
@@ -339,15 +544,63 @@ def _exchange_with_retries(
             return None, err, retried
         except PlaidTransportError as err:
             if monotonic() + delay > deadline:
-                raise LinkFailed(
-                    "Plaid couldn't be reached to finish linking, and the link has expired. If "
-                    "Plaid did create the connection, it shows on the Connection page once you "
-                    "re-attach it; otherwise link again later."
-                ) from err
+                raise LinkFailed(_expired_message(unlock_at())) from err
             log.warning("Exchange failed (%s); retrying in %.0f s", err.error_message, delay)
             retried = True
             sleep(delay)
             delay = min(delay * 2, 60.0)
+
+
+def _looks_like_amex(meta: LinkMetadata) -> bool:
+    """False only when Link names an institution that clearly isn't American Express (another id
+    AND a name without "American Express"/"Amex"); unknown or partial metadata passes."""
+    if not meta.institution_id or meta.institution_id == AMEX_INSTITUTION_ID:
+        return True
+    name = (meta.institution_name or "").casefold()
+    return not name or "american express" in name or "amex" in name
+
+
+def _exchange_problem(
+    session: Session,
+    settings: Settings,
+    store: secrets.SecretStore | None,
+    meta: LinkMetadata,
+) -> str | None:
+    """Why a production public token must NOT be exchanged (§7; exchanging is what uses one of the
+    10 connections): an Item row, a production token in Keychain, an unsaved recovery file (each
+    one an existing connection), or an institution that isn't American Express."""
+    existing = list(session.scalars(select(PlaidItem)))
+    if existing:
+        same = any(
+            meta.institution_id and item.institution_id == meta.institution_id for item in existing
+        )
+        return (
+            "This institution is already linked, " if same else "A connection already exists, "
+        ) + (
+            "so this new link was not completed (its token was not exchanged). Use Reconnect on "
+            "the existing connection instead."
+        )
+    if secrets.get_access_token("production", store=store):
+        return (
+            "Keychain already holds the access token of an earlier American Express connection, "
+            "so this new link was not completed (its token was not exchanged). Re-attach the "
+            "saved connection on this page instead."
+        )
+    files = secrets.unsaved_production_tokens(settings)
+    if files:
+        return (
+            f"The access token of an earlier link is waiting in the recovery file {files[0]}, so "
+            "this new link was not completed (its token was not exchanged). Store that token "
+            "with ./run setup --env production --access-token, then re-attach it here."
+        )
+    if not _looks_like_amex(meta):
+        return (
+            f"You picked {meta.institution_name} in Plaid, not American Express. This app links "
+            "only your American Express card, so the connection was not completed (its token was "
+            "not exchanged). Plaid may still count the attempt toward your 10 connections. Link "
+            "again and choose American Express."
+        )
+    return None
 
 
 def _details(gateway: PlaidGateway, token: str) -> tuple[dict | None, dict | None]:
@@ -374,14 +627,21 @@ def save_item(
     metadata: LinkMetadata,
     item_body: Mapping[str, Any] | None,
     accounts_body: Mapping[str, Any] | None,
+    *,
+    linked_at: dt.datetime | None = None,
 ) -> tuple[int, bool, int]:
-    """Create (or complete) the Item and its accounts in ONE transaction.
+    """Create (or complete) the Item and its accounts in ONE transaction, under the link lock (a
+    repeated request then finds the row and completes it instead of inserting a second one).
 
     Returns ``(item id, created, account count)``. Accounts come from ``/accounts/get``, else from
-    Link's metadata; the first sync completes them either way.
+    Link's metadata; the first sync completes them either way. ``linked_at``: when Plaid created
+    the Item, for one that is re-attached (also the start of the consent estimate when Amex leaves
+    the consent expiry empty); a new link is linked now.
     """
     now = clock.now()
+    since = min(linked_at, now) if linked_at is not None else now
     with db.transaction(session_factory) as s:
+        db.link_lock(s)
         item = s.scalars(
             select(PlaidItem).where(PlaidItem.plaid_item_id == plaid_item_id)
         ).one_or_none()
@@ -392,8 +652,8 @@ def save_item(
                 institution_id=metadata.institution_id,
                 institution_name=metadata.institution_name,
                 status="healthy",
-                linked_at=now,
-                last_consented_at=now,
+                linked_at=since,
+                last_consented_at=since,
             )
             s.add(item)
             s.flush()
@@ -435,66 +695,121 @@ def exchange(
     public_token: str,
     metadata: LinkMetadata | Mapping[str, Any] | None,
     *,
+    attempt: str | None = None,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     window: float = EXCHANGE_WINDOW,
 ) -> LinkResult:
     """Turn Link's public token into a saved Item (ARCHITECTURE §7 "Exchange"); one code path.
 
-    Production: refused (nothing exchanged, no connection used) while any Item exists — in
-    particular one at the same institution. The access token goes to Keychain (write-once, read
-    back) BEFORE the database; then the Item, its accounts and ``/item/get`` details are saved in
-    one transaction, and a lone manual CSV account is attached to a lone linked card. The caller
-    starts the post-link backfill (``sync.Backfill``).
+    Production: under :data:`LINK_WORK_KEY` (a second exchange at the same time is refused with
+    :class:`LinkBusy`), refused before anything reaches Plaid while any trace of a connection exists
+    or when Link reports another institution (:func:`_exchange_problem`). While it runs it keeps the
+    link-in-progress marker (of ``attempt``, the id :func:`new_link_token` returned), and clears it
+    once the token is safe or Plaid gave a definite no; an unknown outcome keeps it until it
+    expires. The access token goes to Keychain (write-once, read back) BEFORE the database; then the
+    Item, its accounts and ``/item/get`` details are saved in one transaction, and a lone manual CSV
+    account is attached to a lone linked card. The caller starts the post-link backfill
+    (``sync.Backfill``).
     """
     if not public_token or not isinstance(public_token, str):
         raise LinkRefused("Plaid Link didn't send a public token. Nothing was linked.")
     register_secret(public_token)
     meta = metadata if isinstance(metadata, LinkMetadata) else LinkMetadata.from_json(metadata)
-    if settings.is_production:
+    options = {"sleep": sleep, "monotonic": monotonic, "window": window}
+    if not settings.is_production:
+        return _complete_exchange(
+            session_factory, gateway, store, settings, public_token, meta, None, **options
+        )
+    with _link_work_lock(session_factory) as acquired:
+        if not acquired:
+            log.warning("Exchange refused: another link or re-attach is being completed")
+            raise LinkBusy(
+                "Another window is finishing a link right now, so this one was not completed "
+                "(its token was not exchanged). Reload this page in a moment to see the connection."
+            )
         with db.transaction(session_factory) as s:
             db.link_lock(s)
-            existing = list(s.scalars(select(PlaidItem)))
-        if existing:
-            same = any(
-                meta.institution_id and item.institution_id == meta.institution_id
-                for item in existing
+            problem = _exchange_problem(s, settings, store, meta)
+            if problem is None:
+                owned = _claim_marker(store, attempt)
+            else:
+                release_attempt(s, store, attempt)  # this attempt is over
+        if problem is not None:
+            log.warning(
+                "Exchange refused before reaching Plaid (institution %s)", meta.institution_id
             )
-            secrets.clear_link_in_progress(store=store)
-            raise LinkRefused(
-                (
-                    "This institution is already linked. "
-                    if same
-                    else "A connection already exists. "
-                )
-                + "The new link was not completed, so no Plaid connection was used. Use Reconnect "
-                "on the existing connection instead."
-            )
+            raise LinkRefused(problem)
+        return _complete_exchange(
+            session_factory, gateway, store, settings, public_token, meta, owned, **options
+        )
+
+
+def _complete_exchange(
+    session_factory: sessionmaker[Session],
+    gateway: PlaidGateway,
+    store: secrets.SecretStore,
+    settings: Settings,
+    public_token: str,
+    meta: LinkMetadata,
+    owned: str | None,
+    *,
+    sleep: Callable[[float], None],
+    monotonic: Callable[[], float],
+    window: float,
+) -> LinkResult:
+    """The exchange itself, once allowed; ``owned``: the attempt whose marker this run holds."""
     result, error, retried = _exchange_with_retries(
-        gateway, public_token, sleep=sleep, monotonic=monotonic, window=window
+        gateway,
+        public_token,
+        sleep=sleep,
+        monotonic=monotonic,
+        window=window,
+        unlock_at=lambda: secrets.get_link_in_progress(store=store) if owned else None,
     )
     if error is not None:
         log.warning("Exchange refused by Plaid: %s", error.error_code)
-        if settings.is_production and not retried:
-            secrets.clear_link_in_progress(store=store)  # a definite answer: nothing was created
+        if not retried:
+            _release(session_factory, store, owned)  # a definite answer: nothing was created
         raise LinkFailed(_exchange_message(error)) from error
     assert result is not None
+    production = settings.is_production
+    reattach = "re-attach" if production else "recover"
+    never_again = (
+        " Don't link again: that would use another of your 10 Plaid connections."
+        if production
+        else ""
+    )
     try:
         secrets.store_access_token(settings, result.item_id, result.access_token, store=store)
     except secrets.TokenNotSavedError as exc:
         log.error("The access token for Item %s could not be saved to Keychain", result.item_id)
+        setup = f"./run setup --env {settings.plaid_env} --access-token"
+        if exc.recovery_path is None and not production:
+            raise LinkFailed(
+                "The test Item was created, but its access token couldn't be saved, neither to "
+                "Keychain nor to a recovery file, so it can't be used. Create another test Item."
+            ) from exc
+        if exc.recovery_path is None:
+            raise TokenNotSaved(
+                "The connection was created, but its access token couldn't be saved, neither to "
+                "Keychain nor to a recovery file. Copy the token shown below into your password "
+                f"manager now: this is the only time it is shown. Then store it with {setup} and "
+                f"{reattach} the connection on this page.{never_again}",
+                result.access_token,
+            ) from exc
         raise LinkFailed(
-            f"The connection was created but its access token couldn't be saved to Keychain. "
-            f"{exc} Don't link again: run ./run setup --env {settings.plaid_env} --access-token, "
-            "then re-attach the connection here."
+            "The connection was created, but its access token couldn't be saved to Keychain. It "
+            f"was saved to {exc.recovery_path} (readable only by you). Store it with {setup}, "
+            f"then {reattach} the connection on this page.{never_again}"
         ) from exc
     except secrets.AccessTokenConflict as exc:
+        log.error("Keychain already held a different access token; Item %s", result.item_id)
         raise LinkFailed(
-            f"A different access token is already saved in Keychain, so the new one wasn't "
-            f"stored there. {exc} Re-attach the existing connection instead of linking again."
+            "The connection was created, but Keychain already holds a different access token. "
+            f"{exc} Re-attach the saved connection on this page instead.{never_again}"
         ) from exc
-    if settings.is_production:
-        secrets.clear_link_in_progress(store=store)
+    _release(session_factory, store, owned)  # the token is safe in Keychain (F1: only now)
     item_body, accounts_body = _details(gateway, result.access_token)
     item_id, created, count = save_item(
         session_factory, result.item_id, meta, item_body, accounts_body
@@ -732,7 +1047,23 @@ def recover_orphaned_items(
     """Re-create the database rows of connections whose token is in Keychain but whose Item row is
     missing: rebuilt from ``/item/get`` and ``/accounts/get``; the caller then syncs from a null
     cursor (which reconciles). Production re-attaches THE token, and only while no Item exists.
-    Never a new link."""
+    Never a new link. Runs under :data:`LINK_WORK_KEY` (a second request at the same time — a
+    double click — gets :class:`LinkBusy`). The Item keeps Plaid's ``created_at`` as its link date,
+    so the consent estimate doesn't restart from today when Amex leaves the expiry empty."""
+    with _link_work_lock(session_factory) as acquired:
+        if not acquired:
+            raise LinkBusy(
+                "Another window is re-attaching or linking right now. Reload this page in a moment."
+            )
+        return _recover_locked(session_factory, gateway, store, settings)
+
+
+def _recover_locked(
+    session_factory: sessionmaker[Session],
+    gateway: PlaidGateway,
+    store: secrets.SecretStore,
+    settings: Settings,
+) -> list[LinkResult]:
     if settings.is_production:
         with session_factory() as s:
             if _item_count(s):
@@ -765,7 +1096,12 @@ def recover_orphaned_items(
             accounts_body = None
         meta = LinkMetadata(data.get("institution_id"), data.get("institution_name"))
         item_id, created, count = save_item(
-            session_factory, plaid_item_id, meta, item_body, accounts_body
+            session_factory,
+            plaid_item_id,
+            meta,
+            item_body,
+            accounts_body,
+            linked_at=sync_service.parse_timestamp(data.get("created_at")),
         )
         attached, attach_needed = attach_after_link(session_factory)
         log.info("Re-attached Item %s", item_id)
@@ -1173,7 +1509,7 @@ def connection_overview(
     orphans: tuple[str, ...] = ()
     if not items:
         if settings.is_production:
-            blockers = tuple(secrets.production_link_blockers(settings, store=store))
+            blockers = link_blocks(settings, store=store)
             reattach = reattach_available(session, settings, store=store)
         else:
             orphans = tuple(orphaned_sandbox_items(session, store=store))

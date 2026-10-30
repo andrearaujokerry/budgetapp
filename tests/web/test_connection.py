@@ -12,12 +12,14 @@ import datetime as dt
 import html as html_lib
 import re
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 from budgetapp import secrets as app_secrets
+from budgetapp import web
 from budgetapp.config import load_settings
-from budgetapp.services import userstate
+from budgetapp.services import linking, userstate
 from budgetapp.web import security
 from tests.factories import (
     get_category,
@@ -238,7 +240,8 @@ def test_a_healthy_connection_shows_its_status_cards_and_runs(db, client):
     assert html.count('<tr>\n<td class="table__date">') == 20  # the last 20 runs only
     assert 'data-link-mode="update"' not in html and "Renew consent" not in words
     assert 'data-link-mode="liabilities"' not in html
-    assert 'id="connection-live" class="stack stack--xl">' in html  # nothing to poll for
+    live = re.search(r'<div id="connection-live"[^>]*>', html).group(0)
+    assert 'hx-trigger="connection-changed from:body"' in live  # nothing to poll for
 
 
 def test_a_due_date_within_a_week_is_highlighted_and_overdue_is_red(db, client):
@@ -467,9 +470,12 @@ def test_demo_data_shows_the_page_but_never_reaches_plaid(db, demo_client):
     assert "Demo data." in text(html)
     assert PLAID_SCRIPT not in response.text
     assert "plaid" not in response.headers["content-security-policy"]
-    assert re.search(r'data-link-mode="update" data-item-id="\d+" disabled', html)
+    assert re.search(r'data-link-mode="update" data-item-id="\d+" id="renew-\d+" disabled', html)
     assert re.search(
-        r'<button class="btn" type="submit" disabled><svg[^>]*>.*?</svg><span>Sync now', html, re.S
+        r'<button class="btn" type="submit" id="page-sync-button" disabled><svg[^>]*>.*?</svg>'
+        r"<span>Sync now",
+        html,
+        re.S,
     )
 
 
@@ -498,7 +504,8 @@ def test_htmx_gets_only_the_live_region(db, client):
     oob = '<form id="page-sync" method="post" action="/connection/sync" hx-swap-oob="true">'
     assert oob in response.text
     assert re.search(
-        r'id="page-sync"[^>]*hx-swap-oob="true">\s*<button class="btn" type="submit">',
+        r'id="page-sync"[^>]*hx-swap-oob="true">\s*'
+        r'<button class="btn" type="submit" id="page-sync-button">',
         response.text,
     )
     full = client.get("/connection").text
@@ -511,6 +518,90 @@ def test_the_live_region_polls_while_a_sync_runs(db, client):
     make_sync_run(db, item, status="running", started_at=NOW - dt.timedelta(seconds=5))
     html = client.get("/connection").text
     live = '<div id="connection-live" class="stack stack--xl" hx-get="/connection"'
-    assert f'{live} hx-trigger="every 4s" hx-swap="outerHTML">' in html
+    assert f'{live} hx-trigger="every 4s, connection-changed from:body" hx-swap="outerHTML"' in html
     assert '<span class="pill pill--syncing">' in html
-    assert re.search(r'<button class="btn" type="submit" disabled>', html)  # Sync now waits
+    assert re.search(r'<button class="btn" type="submit" id="page-sync-button" disabled>', html)
+
+
+# --------------------------------------------------------------------------- review fixes
+
+
+def test_the_paused_banner_explains_itself_in_plain_words_and_local_time(
+    db, prod_client, prod_plaid, production, secrets
+):
+    """A tab that ran Link was reloaded or closed (no onExit): linking stays paused for up to
+    4 hours, and the page says why and until when, in the Mac's time."""
+    linking.new_link_token(db, prod_plaid, production, store=secrets)
+    banner = text(main(page(prod_client)))
+    unlocks = (NOW + app_secrets.LINK_TOKEN_LIFETIME).astimezone().strftime("%-I:%M %p")
+    assert "Linking is paused." in banner
+    assert "close the Plaid window there" in banner and f"linking unlocks at {unlocks}" in banner
+    assert "UTC" not in banner and "marker" not in banner
+
+
+@pytest.mark.parametrize(
+    ("values", "ids"),
+    [
+        (
+            {
+                "status": "needs_reconnect",
+                "error_code": "ITEM_LOGIN_REQUIRED",
+                "consented_products": ["transactions"],
+            },
+            ("reconnect", "grant"),
+        ),
+        ({"consent_expires_at": NOW + dt.timedelta(days=5)}, ("renew",)),
+    ],
+    ids=["reconnect-and-grant", "renew"],
+)
+def test_every_control_of_the_live_region_keeps_one_id_across_polls(db, client, values, ids):
+    """htmx puts keyboard focus back after a swap only on an element with the same id; without
+    one, a keyboard user on Reconnect is thrown back to the page's start at every poll."""
+    item, _ = linked_item(db, **values)
+    partial = client.get("/connection?plaid=1", headers=HTMX)
+    assert partial.template.name == "connection/_live.html"
+    buttons = re.findall(r"<button[^>]*>", partial.text)
+    assert buttons and all(' id="' in b for b in buttons), buttons
+    for prefix in ids:
+        assert f'id="{prefix}-{item.id}"' in partial.text
+    assert 'id="page-sync-button"' in partial.text and 'id="page-sync-button"' in page(client)
+
+
+def test_a_link_action_arriving_by_polling_reloads_a_page_without_plaid(
+    db, prod_client, production, prod_plaid, secrets
+):
+    """A linked, healthy production page loads no Plaid script, and its CSP forbids loading one
+    later. When a poll finds that Reconnect is needed, the page reloads (HX-Refresh) instead of
+    swapping in a button that can't open Link."""
+    fake = prod_plaid.add_item(item_id="item-amex")
+    app_secrets.store_access_token(production, "item-amex", fake.access_token, store=secrets)
+    item, _ = linked_item(db, plaid_item_id="item-amex")
+    full = page(prod_client)
+    assert PLAID_SCRIPT not in full and """hx-vals='{"plaid": "0"}'""" in full
+    quiet = prod_client.get("/connection?plaid=0", headers=HTMX)
+    assert quiet.template.name == "connection/_live.html" and "HX-Refresh" not in quiet.headers
+    item.status, item.error_code = "needs_reconnect", "ITEM_LOGIN_REQUIRED"
+    db.flush()
+    swap = prod_client.get("/connection?plaid=0", headers=HTMX)
+    assert swap.headers.get("HX-Refresh") == "true" and swap.text == ""
+    reloaded = page(prod_client)
+    assert PLAID_SCRIPT in reloaded and """hx-vals='{"plaid": "1"}'""" in reloaded
+    polled = prod_client.get("/connection?plaid=1", headers=HTMX)
+    assert polled.template.name == "connection/_live.html"
+    assert re.search(r'data-link-mode="update" data-item-id="\d+" id="reconnect-\d+">', polled.text)
+
+
+def test_the_link_dialog_shows_nothing_behind_its_modal(prod_client):
+    """Errors and the one-time token box live in the page, outside the confirm dialog, and
+    link.js closes the dialog before it shows anything; the dialog's opener shows the busy state
+    while Link and the exchange run."""
+    html = page(prod_client)
+    dialog = re.search(r'<dialog[^>]*id="confirm-link".*?</dialog>', html, re.S).group(0)
+    assert 'id="link-error"' not in dialog and 'id="link-token-rescue"' not in dialog
+    assert 'id="link-token-rescue"' in html and "hidden" in re.search(
+        r'<div[^>]*id="link-token-rescue"[^>]*>', html
+    ).group(0)
+    source = (Path(web.__file__).parent / "static" / "js" / "link.js").read_text()
+    start = source[source.index("function start(button)") :]
+    assert start.index("dialog.close()") < start.index("showError(")
+    assert "setBusy([button, opener]" in start

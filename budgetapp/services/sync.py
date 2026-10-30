@@ -134,7 +134,7 @@ def _date(value: Any) -> dt.date | None:
     return dt.date.fromisoformat(str(value)[:10])
 
 
-def _timestamp(value: Any) -> dt.datetime | None:
+def parse_timestamp(value: Any) -> dt.datetime | None:
     """An aware datetime from Plaid's ISO 8601 text (``None`` when absent or unreadable)."""
     if not value:
         return None
@@ -388,6 +388,40 @@ def replacement_score(tomb: TransactionTombstone, txn: Transaction) -> Decimal |
     return score
 
 
+def match_replacements(
+    tombs: Iterable[TransactionTombstone], candidates: Iterable[Transaction]
+) -> list[tuple[TransactionTombstone, Transaction]]:
+    """One-to-one ``(tombstone, row)`` pairs by :func:`replacement_score`, best first (ties: the
+    newest tombstone, then the lowest row id). Rows are looked up only among the same account,
+    sign and spend dates within 7 days, so an account churn of thousands of rows stays fast."""
+    window = range(-REPLACEMENT_MAX_DAYS, REPLACEMENT_MAX_DAYS + 1)
+    buckets: dict[tuple[int, bool, dt.date], list[Transaction]] = {}
+    for txn in candidates:
+        key = (txn.account_id, txn.amount < 0, txn.authorized_date or txn.date)
+        buckets.setdefault(key, []).append(txn)
+    pairs: list[tuple[Decimal, int, int, TransactionTombstone, Transaction]] = []
+    for tomb in tombs:
+        day = tomb.authorized_date or tomb.date
+        negative = tomb.amount < 0
+        for offset in window:
+            key = (tomb.account_id, negative, day + dt.timedelta(days=offset))
+            for txn in buckets.get(key, ()):
+                score = replacement_score(tomb, txn)
+                if score is not None:
+                    pairs.append((score, -int(tomb.removed_at.timestamp()), txn.id, tomb, txn))
+    pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
+    used_tombs: set[str] = set()
+    used_rows: set[int] = set()
+    matched: list[tuple[TransactionTombstone, Transaction]] = []
+    for _, _, _, tomb, txn in pairs:
+        if tomb.plaid_transaction_id in used_tombs or id(txn) in used_rows:
+            continue
+        used_tombs.add(tomb.plaid_transaction_id)
+        used_rows.add(id(txn))
+        matched.append((tomb, txn))
+    return matched
+
+
 # --------------------------------------------------------------------------- the apply step
 
 
@@ -396,7 +430,8 @@ class _Applied:
     added: int
     modified: int
     removed: int
-    inserted_ids: tuple[int, ...]
+    #: the inserted rows that are new charges (not a replacement of a row the app already had)
+    new_charge_ids: tuple[int, ...]
     update_status: str | None
     history_completed_now: bool
 
@@ -479,7 +514,15 @@ def _flag(txn: Transaction, reason: str) -> None:
 
 
 class _Applier:
-    """Applies one folded batch inside the caller's transaction (§6 steps 2–5)."""
+    """Applies one folded batch inside the caller's transaction (§6 steps 2–5).
+
+    It also tells new charges from replacements: an inserted row *continues* a charge the app
+    already had when it names a known pending row or tombstone (step 3), inherits a tombstone's
+    edits (step 5), or matches an unconsumed tombstone without edits by the same rules (a posted
+    charge Plaid didn't link to its pending one, or a re-delivery after Plaid re-issued an
+    account). Only new charges reach ``SyncOutcome.inserted_transaction_ids`` (ALR-3 alerts once
+    per charge).
+    """
 
     def __init__(self, session: Session, item: PlaidItem, batch: Batch, now: dt.datetime) -> None:
         self.s = session
@@ -491,7 +534,7 @@ class _Applier:
         self.rows: dict[str, Transaction] = {}
         self.tombstones: dict[str, TransactionTombstone] = {}
         self.inserted: list[Transaction] = []
-        self.linked: set[int] = set()  # id() of inserted rows that took a predecessor's place
+        self.continued: set[int] = set()  # id() of inserted rows that replace a known charge
         self.deleted: set[str] = set()
         self.consumed: set[str] = set()  # tombstones a row of this batch has taken over
         self.consumptions: list[tuple[TransactionTombstone, Transaction]] = []
@@ -634,7 +677,8 @@ class _Applier:
         if predecessor is not None:
             self.consumptions.append((predecessor, txn))
             self.consumed.add(predecessor.plaid_transaction_id)
-            self.linked.add(id(txn))
+        if predecessor is not None or (link and (link in self.rows or link in self.tombstones)):
+            self.continued.add(id(txn))  # the pending charge it names was already here
         self.inserted.append(txn)
 
     # ---------------------------------------------------------------- step 4: deletes
@@ -700,41 +744,37 @@ class _Applier:
     # ---------------------------------------------------------------- step 5: replacements
 
     def apply_replacements(self) -> int:
-        candidates = [t for t in self.inserted if id(t) not in self.linked]
+        """Step 5: unconsumed tombstones from the last 30 days (this batch's too) and the rows
+        this batch inserted that replace nothing yet, matched one-to-one. Tombstones with edits go
+        first and hand their edits over; then those without edits are matched only to record the
+        replacement (``consumed_by_transaction_id``) — so the row is known as the same charge.
+        Returns how many rows inherited edits."""
+        candidates = [t for t in self.inserted if id(t) not in self.continued]
         if not candidates:
             return 0
-        tombs = list(
-            self.s.scalars(
-                select(TransactionTombstone).where(
-                    TransactionTombstone.consumed_by_transaction_id.is_(None),
-                    has_user_state(),
-                    TransactionTombstone.removed_at >= self.now - REPLACEMENT_WINDOW,
-                )
+        edited: list[TransactionTombstone] = []
+        plain: list[TransactionTombstone] = []
+        for tomb in self.s.scalars(
+            select(TransactionTombstone).where(
+                TransactionTombstone.consumed_by_transaction_id.is_(None),
+                TransactionTombstone.removed_at >= self.now - REPLACEMENT_WINDOW,
             )
-        )
-        pairs: list[tuple[Decimal, int, int, TransactionTombstone, Transaction]] = []
-        for tomb in tombs:
-            if userstate.from_json(tomb.user_state) is None:
-                continue
-            for txn in candidates:
-                score = replacement_score(tomb, txn)
-                if score is not None:
-                    pairs.append((score, -int(tomb.removed_at.timestamp()), txn.id, tomb, txn))
-        pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
-        used_tombs: set[str] = set()
-        used_rows: set[int] = set()
-        matched = 0
-        for _, _, _, tomb, txn in pairs:
-            if tomb.plaid_transaction_id in used_tombs or txn.id in used_rows:
-                continue
-            used_tombs.add(tomb.plaid_transaction_id)
-            used_rows.add(txn.id)
+        ):
+            if tomb.plaid_transaction_id in self.consumed:
+                continue  # a row of this batch took it over in step 3 (not flushed yet)
+            (plain if userstate.from_json(tomb.user_state) is None else edited).append(tomb)
+        carried = 0
+        for tomb, txn in match_replacements(edited, candidates):
             apply_carried_state(self.categorizer, txn, userstate.from_json(tomb.user_state))
             tomb.consumed_by_transaction_id = txn.id
-            matched += 1
-        if matched:
-            self.s.flush()
-        return matched
+            self.continued.add(id(txn))
+            carried += 1
+        rest = [t for t in candidates if id(t) not in self.continued]
+        for tomb, txn in match_replacements(plain, rest) if rest else ():
+            tomb.consumed_by_transaction_id = txn.id
+            self.continued.add(id(txn))
+        self.s.flush()
+        return carried
 
     # ---------------------------------------------------------------- history (CSV cutover)
 
@@ -1014,7 +1054,7 @@ def apply_item_snapshot(item: PlaidItem, body: Mapping[str, Any]) -> None:
     data = body.get("item") or {}
     item.item_snapshot = dict(body)
     if "consent_expiration_time" in data:
-        item.consent_expires_at = _timestamp(data.get("consent_expiration_time"))
+        item.consent_expires_at = parse_timestamp(data.get("consent_expiration_time"))
     products = data.get("consented_products")
     if isinstance(products, list):
         item.consented_products = sorted({str(p) for p in products})
@@ -1024,9 +1064,9 @@ def apply_item_snapshot(item: PlaidItem, body: Mapping[str, Any]) -> None:
         item.institution_name = data["institution_name"]
     transactions = ((body.get("status") or {}).get("transactions")) or {}
     if "last_successful_update" in transactions:
-        item.plaid_last_update_at = _timestamp(transactions.get("last_successful_update"))
+        item.plaid_last_update_at = parse_timestamp(transactions.get("last_successful_update"))
     if "last_failed_update" in transactions:
-        item.plaid_last_failed_update_at = _timestamp(transactions.get("last_failed_update"))
+        item.plaid_last_failed_update_at = parse_timestamp(transactions.get("last_failed_update"))
     error = data.get("error")
     if isinstance(error, Mapping) and error.get("error_code"):
         code = str(error["error_code"])
@@ -1224,7 +1264,7 @@ def _apply_batch(
             added=len(applier.inserted),
             modified=applier.modified,
             removed=applier.removed,
-            inserted_ids=tuple(t.id for t in applier.inserted),
+            new_charge_ids=tuple(t.id for t in applier.inserted if id(t) not in applier.continued),
             update_status=batch.update_status,
             history_completed_now=completed_now,
         )
@@ -1233,6 +1273,9 @@ def _apply_batch(
 def _record_not_ready(
     session_factory: sessionmaker[Session], item_id: int, update_status: str | None
 ) -> None:
+    """NOT_READY is recorded as a success with no changes (§8), but no data has arrived: while the
+    Item has no cursor yet its ``last_sync_success_at`` stays as it was, so ``--if-due`` keeps
+    polling and the 36-hour stale check counts from linking."""
     now = clock.now()
     with db.transaction(session_factory) as s:
         item = s.get(PlaidItem, item_id)
@@ -1242,7 +1285,8 @@ def _record_not_ready(
             item.error_message = None
             item.error_display_message = None
             item.transactions_update_status = update_status or NOT_READY
-            item.last_sync_success_at = now
+            if item.transactions_cursor is not None:
+                item.last_sync_success_at = now
 
 
 def sync_item(
@@ -1381,7 +1425,7 @@ def _sync_locked(
         added=applied.added if applied else 0,
         modified=applied.modified if applied else 0,
         removed=applied.removed if applied else 0,
-        inserted_transaction_ids=applied.inserted_ids if applied else (),
+        inserted_transaction_ids=applied.new_charge_ids if applied else (),
         initial_history_load=not history_was_complete,
         history_completed_now=applied.history_completed_now if applied else False,
         update_status=update_status,

@@ -1212,10 +1212,14 @@ def test_description_similarity():
 
 
 def test_timestamps_from_plaid():
-    assert sync._timestamp("2026-10-15T06:00:00Z") == dt.datetime(2026, 10, 15, 6, tzinfo=dt.UTC)
-    assert sync._timestamp(None) is None
-    assert sync._timestamp("not a time") is None
-    assert sync._timestamp("2026-10-15T06:00:00") == dt.datetime(2026, 10, 15, 6, tzinfo=dt.UTC)
+    assert sync.parse_timestamp("2026-10-15T06:00:00Z") == dt.datetime(
+        2026, 10, 15, 6, tzinfo=dt.UTC
+    )
+    assert sync.parse_timestamp(None) is None
+    assert sync.parse_timestamp("not a time") is None
+    assert sync.parse_timestamp("2026-10-15T06:00:00") == dt.datetime(
+        2026, 10, 15, 6, tzinfo=dt.UTC
+    )
 
 
 def test_describe_error_has_words_for_the_usual_codes():
@@ -1318,3 +1322,148 @@ def test_the_cursor_compare_and_set_rolls_back_a_batch_whose_cursor_moved(
     assert len(fake_plaid.calls_to("transactions_sync")) == 2  # refetched after the rollback
     assert linked.item.transactions_cursor not in (None, "x")
     assert len(linked.rows()) == 1
+
+
+# --------------------------------------------------------------------------- new charges (ALR-3)
+# SyncOutcome.inserted_transaction_ids lists only charges the app had not seen before, so an
+# ALR-3 evaluator built to its contract alerts once per charge (ARCHITECTURE §11).
+
+RECENT = NOW.date() - dt.timedelta(days=2)
+
+
+@pytest.fixture
+def alr3(monkeypatch) -> dict[str, int]:
+    """An evaluator that follows the documented ALR-3 contract (alerts.evaluate_after_sync): rows
+    in outcome.inserted_transaction_ids, dated within 7 days, never on an initial history load,
+    keyed on the pending id the posted row names (else its own id). Counts alerts per key."""
+    sent: dict[str, int] = {}
+
+    def evaluate(session, notifier, outcome):
+        if outcome.status != "success" or outcome.initial_history_load:
+            return []
+        for tid in outcome.inserted_transaction_ids:
+            row = session.get(Transaction, tid)
+            if row is None or row.amount < Decimal("1000"):
+                continue
+            if (NOW.date() - (row.authorized_date or row.date)).days > 7:
+                continue
+            key = row.pending_transaction_id or row.plaid_transaction_id
+            sent[key] = sent.get(key, 0) + 1
+        return []
+
+    monkeypatch.setattr(alerts, "evaluate_after_sync", evaluate)
+    return sent
+
+
+def test_a_re_delivery_after_account_churn_is_not_a_new_charge(linked, fake_plaid, alr3):
+    """RESEARCH T1.10: a card replacement can re-issue the account and re-deliver its history
+    under new ids. The same charge must not alert again."""
+    linked.sync()  # history complete from here on
+    big = fake_plaid.add_transaction(
+        linked.fake_item, amount="2500.00", date=RECENT, name="APPLE STORE", merchant_name="Apple"
+    )
+    first = linked.sync()
+    assert first.inserted_transaction_ids == (linked.row(big["transaction_id"]).id,)
+    new_pid = fake_plaid.churn_account(linked.fake_item, linked.account_pid)
+    churn = linked.sync()
+    again = linked.row(f"{big['transaction_id']}-{new_pid}")
+    assert churn.added == 1 and churn.inserted_transaction_ids == ()
+    assert linked.tombstone(big["transaction_id"]).consumed_by_transaction_id == again.id
+    assert alr3 == {big["transaction_id"]: 1}
+
+
+def test_an_unlinked_posting_is_not_a_new_charge(linked, fake_plaid, alr3):
+    """RESEARCH T1.4: Amex may leave pending_transaction_id null. With no edits to carry, the
+    posted row is still matched to the pending row it replaces."""
+    linked.sync()
+    pending = fake_plaid.add_pending(
+        linked.fake_item, amount="1800.00", date=RECENT, name="DELTA AIR", merchant_name="Delta"
+    )
+    first = linked.sync()
+    assert first.inserted_transaction_ids == (linked.row(pending["transaction_id"]).id,)
+    posted = fake_plaid.post_pending(linked.fake_item, pending["transaction_id"], link=False)
+    second = linked.sync()
+    row = linked.row(posted["transaction_id"])
+    assert row.pending_transaction_id is None and second.inserted_transaction_ids == ()
+    assert linked.tombstone(pending["transaction_id"]).consumed_by_transaction_id == row.id
+    assert alr3 == {pending["transaction_id"]: 1}
+
+
+def test_a_linked_posting_is_not_a_new_charge_either(linked, fake_plaid, alr3):
+    linked.sync()
+    pending = fake_plaid.add_pending(linked.fake_item, amount="1200.00", date=RECENT, name="HOTEL")
+    linked.sync()
+    fake_plaid.post_pending(linked.fake_item, pending["transaction_id"], amount="1250.00")
+    out = linked.sync()
+    assert out.added == 1 and out.inserted_transaction_ids == ()
+    assert alr3 == {pending["transaction_id"]: 1}
+
+
+def test_a_genuinely_new_charge_beside_an_account_churn_stays_new(linked, fake_plaid):
+    fake_plaid.add_transaction(linked.fake_item, amount="12.00", date=RECENT, name="BLUE BOTTLE")
+    linked.sync()
+    fake_plaid.churn_account(linked.fake_item, linked.account_pid)
+    fresh = fake_plaid.add_transaction(
+        linked.fake_item, amount="1500.00", date=RECENT, name="BEST BUY", merchant_name="Best Buy"
+    )
+    out = linked.sync()
+    assert out.added == 2
+    assert out.inserted_transaction_ids == (linked.row(fresh["transaction_id"]).id,)
+
+
+def test_matching_a_large_churn_compares_only_nearby_charges(linked, fake_plaid, db, monkeypatch):
+    """An account churn re-delivers the whole history. The matcher compares a removed charge only
+    with new rows of the same account and sign within 7 days, not with every row (2,600 rows were
+    6.8 million comparisons, about 18 s)."""
+    for n in range(600):
+        fake_plaid.add_transaction(
+            linked.fake_item,
+            amount=f"{(n % 40) + 3}.{(n * 7) % 100:02d}",
+            date=dt.date(2026, 10, 1) - dt.timedelta(days=n % 300),
+            name=f"MERCHANT {n % 60}",
+            merchant_name=f"Merchant {n % 60}",
+        )
+    linked.sync()
+    calls = {"n": 0}
+    real = sync.replacement_score
+
+    def counting(tomb, txn):
+        calls["n"] += 1
+        return real(tomb, txn)
+
+    monkeypatch.setattr(sync, "replacement_score", counting)
+    fake_plaid.churn_account(linked.fake_item, linked.account_pid)
+    out = linked.sync()
+    assert out.added == 600 and out.inserted_transaction_ids == ()
+    assert 0 < calls["n"] < 600 * 50  # every pair would be 360,000
+    unmatched = db.scalar(
+        select(func.count())
+        .select_from(TransactionTombstone)
+        .where(TransactionTombstone.consumed_by_transaction_id.is_(None))
+    )
+    assert unmatched == 0
+
+
+def test_not_ready_leaves_the_last_success_alone_until_data_arrives(
+    linked, fake_plaid, session_factory
+):
+    """No data has arrived yet: --if-due keeps polling (no 5-hour pause after a NOT_READY run),
+    and the 36-hour stale check counts from linking."""
+    fake_plaid.set_update_status(linked.fake_item, "NOT_READY")
+    assert linked.sync().status == "not_ready"
+    assert linked.item.last_sync_success_at is None
+    fake_plaid.set_update_status(linked.fake_item, "HISTORICAL_UPDATE_COMPLETE")
+    fake_plaid.add_transaction(linked.fake_item, amount="5.00")
+    result = sync.sync_all(
+        session_factory,
+        fake_plaid,
+        linked.store,
+        linked.settings,
+        trigger="schedule",
+        notifier=linked.notifier,
+        if_due=True,
+        sleep=no_sleep,
+    )
+    assert result.not_due == () and [o.added for o in result.outcomes] == [1]
+    linked.db.expire_all()
+    assert linked.db.get(PlaidItem, linked.item.id).last_sync_success_at == NOW

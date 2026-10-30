@@ -1,14 +1,20 @@
 """Connection page (SYNC-1 … SYNC-7): linking, the connection's status, update mode, Sync now.
 
 * ``GET /connection``: the page; with ``HX-Request`` only its live region (``#connection-live``,
-  polled while a sync or the backfill after linking runs). ``GET /connection/preflight``: the
-  production pre-flight institution check, loaded after the page.
+  polled while a sync or the backfill after linking runs, and refreshed on the
+  ``connection-changed`` event that Sync now sends). The region sends ``plaid=1|0``: whether the
+  page loaded Plaid's script; when a Link action (Reconnect, Renew, Grant) appears on a page
+  without it, the answer is ``HX-Refresh`` so the whole page reloads with Plaid's script and CSP.
+  ``GET /connection/preflight``: the production pre-flight institution check, loaded after the
+  page.
 * ``POST /connection/sync`` (the top-bar Sync now on every page) and ``GET /connection/sync-status``
   answer with ``components/sync_status.html`` (components README §2.4); a plain form post gets a
   303 to this page.
-* JSON endpoints for ``static/js/link.js`` (Plaid Link): ``POST /connection/link-token``,
-  ``/connection/exchange`` (a new link), ``/connection/update-complete`` (update mode: its public
-  token is never exchanged) and ``/connection/link-exit`` (Link closed without linking).
+* JSON endpoints for ``static/js/link.js`` (Plaid Link): ``POST /connection/link-token``
+  (``{link_token, attempt}``), ``/connection/exchange`` (a new link),
+  ``/connection/update-complete`` (update mode: its public token is never exchanged) and
+  ``/connection/link-exit`` (Link's onExit, which clears its own attempt's marker, and the
+  CLOSE_OAUTH / FAIL_OAUTH events, logged only).
 * Forms: ``POST /connection/sandbox-item`` (Sandbox: a test Item without Link),
   ``/connection/recover`` (re-attach a connection whose token is in Keychain but whose database
   row is missing), ``/connection/attach`` (move imported CSV history onto a linked card) and
@@ -87,6 +93,9 @@ SANDBOX_USER_OPTIONS = [
 # Polling of the live region: fast while a sync runs, slower while a follow-up waits.
 POLL_SYNCING = "every 4s"
 POLL_WAITING = "every 10s"
+#: Sent (HX-Trigger) when a sync starts or is found running, so the Connection page's live region
+#: refreshes and starts polling; other pages ignore it.
+CHANGED_EVENT = "connection-changed"
 
 
 # --------------------------------------------------------------------------- dependencies
@@ -257,6 +266,9 @@ def page_context(
         "plaid_problem": plaid_problem,
         "link_enabled": link_enabled,
         "plaid_script": plaid_script,
+        # whether the page loaded Plaid's script (a partial gets it from the live region's request)
+        "page_plaid": plaid_script,
+        "changed_event": CHANGED_EVENT,
         "busy": busy,
         "poll": poll,
         "checklist": linking.checklist(),
@@ -279,7 +291,14 @@ def connection_page(
 ) -> Response:
     context = page_context(request, session, settings, store, jobs)
     if is_htmx(request):  # the live region polling for news (and the header's Sync now)
+        flag = request.query_params.get("plaid")
+        if context["plaid_script"] and flag == "0":
+            # A Link action appeared (say Reconnect, after a sync failed) on a page loaded without
+            # Plaid's script, whose CSP also forbids loading it now: reload the whole page.
+            return Response(status_code=200, headers={"HX-Refresh": "true"})
         context["partial"] = True
+        if flag in ("0", "1"):
+            context["page_plaid"] = flag == "1"
         return render(request, "connection/_live.html", context, active_nav=NAV)
     return render(request, "connection/index.html", context, active_nav=NAV)
 
@@ -300,8 +319,11 @@ def preflight(request: Request, settings: SettingsDep) -> Response:
 # --------------------------------------------------------------------------- Sync now
 
 
-def _sync_answer(request: Request, session: Session, level: str, text: str) -> Response:
-    """The status partial plus a toast (HTMX), or a 303 back to this page (a plain form)."""
+def _sync_answer(
+    request: Request, session: Session, level: str, text: str, *, running: bool = False
+) -> Response:
+    """The status partial plus a toast (HTMX), or a 303 back to this page (a plain form).
+    ``running``: a sync runs now, so the Connection page's live region is told to refresh."""
     if is_htmx(request):
         return render(
             request,
@@ -309,6 +331,7 @@ def _sync_answer(request: Request, session: Session, level: str, text: str) -> R
             {"conn": connection_status(session)},
             active_nav=NAV,
             oob=flash_oob(level, text),
+            headers={"HX-Trigger": CHANGED_EVENT} if running else None,
         )
     return redirect(request, PAGE, level, text)
 
@@ -333,7 +356,7 @@ def sync_now(
             request, session, "info", "Nothing is linked yet. Link your card first."
         )
     if conn.syncing:
-        return _sync_answer(request, session, "info", "A sync is already running.")
+        return _sync_answer(request, session, "info", "A sync is already running.", running=True)
     gateway, problem = plaid_gateway(request)
     if gateway is None:
         return _sync_answer(request, session, "error", problem or KEYS_MISSING)
@@ -352,7 +375,7 @@ def sync_now(
         if not jobs.submit(refresh_key(item.item_id), task, replace=True):
             _abandon_run(session_factory, run_id)
             return _sync_answer(request, session, "error", NOT_STARTED)
-    return _sync_answer(request, session, "info", "Sync started")
+    return _sync_answer(request, session, "info", "Sync started", running=True)
 
 
 @router.get("/connection/sync-status")
@@ -375,7 +398,9 @@ def link_token(
     body: JsonDep,
 ) -> Response:
     """A Link token: ``mode`` "new" (guarded in production), "update" (Reconnect / Renew
-    consent) or "liabilities" (update mode asking for statement details)."""
+    consent) or "liabilities" (update mode asking for statement details). Answers
+    ``{link_token, attempt}``; ``attempt`` (production new links only) goes back with Link's exit
+    report and the exchange."""
     if is_demo(request):
         return _json_error(409, DEMO_MESSAGE)
     mode = body.get("mode")
@@ -384,10 +409,12 @@ def link_token(
     gateway, problem = plaid_gateway(request)
     if gateway is None:
         return _json_error(503, problem or KEYS_MISSING)
+    attempt: str | None = None
     try:
         if mode == "new":
-            token = linking.new_link_token(session, gateway, settings, store=store)
+            new = linking.new_link_token(session, gateway, settings, store=store)
             session.commit()  # releases the link lock
+            token, attempt = new.token, new.attempt
         else:
             item_id = _int(body.get("item_id"))
             if item_id is None:
@@ -410,7 +437,7 @@ def link_token(
     except PlaidGatewayError as exc:
         log.warning("Link token refused: %s %s", exc.error_code, exc.error_message)
         return _json_error(502, plaid_message(exc))
-    return JSONResponse({"link_token": token})
+    return JSONResponse({"link_token": token, "attempt": attempt})
 
 
 @router.post("/connection/exchange")
@@ -423,7 +450,10 @@ def exchange(
     jobs: JobsDep,
     body: JsonDep,
 ) -> Response:
-    """Link's ``onSuccess`` for a NEW link: save the connection, then sync its history."""
+    """Link's ``onSuccess`` for a NEW link: save the connection, then sync its history.
+
+    The one answer that carries an access token: :class:`linking.TokenNotSaved` (no Keychain and
+    no recovery file could keep it), whose token link.js shows once for the user to copy."""
     if is_demo(request):
         return _json_error(409, DEMO_MESSAGE)
     gateway, problem = plaid_gateway(request)
@@ -437,9 +467,12 @@ def exchange(
             settings,
             body.get("public_token"),  # type: ignore[arg-type]  (checked by exchange)
             body.get("metadata"),
+            attempt=_short(body.get("attempt")),
         )
     except linking.LinkRefused as exc:
         return _json_error(409, str(exc))
+    except linking.TokenNotSaved as exc:
+        return JSONResponse({"error": str(exc), "access_token": exc.access_token}, status_code=502)
     except linking.LinkFailed as exc:
         return _json_error(502, str(exc))
     except secrets.KeychainApprovalNeeded:
@@ -511,20 +544,27 @@ def update_complete(
 
 @router.post("/connection/link-exit")
 def link_exit(
-    request: Request, settings: SettingsDep, store: SecretStoreDep, body: JsonDep
+    request: Request,
+    session: SessionDep,
+    settings: SettingsDep,
+    store: SecretStoreDep,
+    body: JsonDep,
 ) -> Response:
-    """Link closed without linking (``onExit``, or ``CLOSE_OAUTH`` / ``FAIL_OAUTH``): logged as
-    "not linked"; a production new-link attempt's marker is cleared."""
+    """Link didn't link: ``onExit`` (event "EXIT"; a production new-link attempt's own marker is
+    cleared) or the ``CLOSE_OAUTH`` / ``FAIL_OAUTH`` events (logged only: Link is still open)."""
     error = body.get("error") if isinstance(body.get("error"), dict) else {}
     linking.link_exited(
+        session,
         settings,
         store=store,
         mode="new" if body.get("mode") == "new" else "update",
-        error_code=_short(error.get("error_code")),
+        attempt=_short(body.get("attempt")),
         event=_short(body.get("event")),
+        error_code=_short(error.get("error_code")),
         status=_short(body.get("status")),
         link_session_id=_short(body.get("link_session_id")),
     )
+    session.commit()  # releases the link lock
     return Response(status_code=204)
 
 
@@ -587,12 +627,19 @@ def recover(
         return redirect(request, PAGE, "error", problem or KEYS_MISSING)
     try:
         results = linking.recover_orphaned_items(session_factory, gateway, store, settings)
+    except linking.LinkBusy as exc:  # e.g. a double click: the first request is still working
+        return redirect(request, PAGE, "info", str(exc))
     except linking.LinkError as exc:
         return redirect(request, PAGE, "error", str(exc))
     except secrets.KeychainApprovalNeeded:
         return redirect(request, PAGE, "error", KEYCHAIN_MESSAGE)
     if not results:
-        return redirect(request, PAGE, "info", "There was no saved connection to re-attach.")
+        return redirect(
+            request,
+            PAGE,
+            "info",
+            "Nothing to re-attach: the saved connection is already here, or none was found.",
+        )
     for result in results:
         start_backfill(
             jobs,

@@ -21,7 +21,7 @@ from sqlalchemy import select
 from budgetapp import secrets as app_secrets
 from budgetapp.config import load_settings
 from budgetapp.models import Account, PlaidItem, SyncRun, Transaction, TransactionTombstone
-from budgetapp.services import reconcile, userstate
+from budgetapp.services import linking, reconcile, userstate
 from budgetapp.services.background import BackgroundJobs
 from budgetapp.web import flash as flash_module
 from budgetapp.web.routes import connection as routes
@@ -155,7 +155,7 @@ def test_sync_now_without_javascript_redirects_to_the_page(
     assert flashed(response) == [{"level": "info", "text": "Sync started"}]
     page = client.get("/connection")
     assert '<span class="pill pill--syncing">' in page.text
-    assert 'hx-get="/connection" hx-trigger="every 4s"' in page.text
+    assert 'hx-get="/connection" hx-trigger="every 4s, connection-changed from:body"' in page.text
 
 
 def test_sync_now_while_a_sync_runs_starts_nothing(db, client, jobs, fake_plaid, secrets, settings):
@@ -297,9 +297,10 @@ def test_a_plaid_refusal_is_returned_as_json(client, fake_plaid):
 def test_production_issues_one_new_link_token_under_the_guard(db, prod_client, prod_plaid, secrets):
     first = prod_client.post("/connection/link-token", json={"mode": "new"})
     assert first.status_code == 200 and first.json()["link_token"].startswith("link-production-")
+    assert first.json()["attempt"]  # goes back with Link's exit report and the exchange
     assert app_secrets.get_link_in_progress(store=secrets) is not None
     second = prod_client.post("/connection/link-token", json={"mode": "new"})
-    assert second.status_code == 409 and "link was started" in second.json()["error"]
+    assert second.status_code == 409 and "may still be in progress" in second.json()["error"]
     assert len(prod_plaid.calls_to("create_link_token")) == 1
 
 
@@ -398,11 +399,15 @@ def test_production_never_exchanges_a_second_link(db, prod_client, prod_plaid, s
 def test_a_production_link_clears_the_marker_and_blocks_the_next(
     db, prod_client, prod_plaid, secrets
 ):
-    assert prod_client.post("/connection/link-token", json={"mode": "new"}).is_success
+    attempt = prod_client.post("/connection/link-token", json={"mode": "new"}).json()["attempt"]
     fake_item = prod_plaid.add_item(item_id="the-amex")
     response = prod_client.post(
         "/connection/exchange",
-        json={"public_token": prod_plaid.public_token_for(fake_item), "metadata": AMEX},
+        json={
+            "public_token": prod_plaid.public_token_for(fake_item),
+            "metadata": AMEX,
+            "attempt": attempt,
+        },
     )
     assert response.status_code == 200
     assert app_secrets.get_link_in_progress(store=secrets) is None
@@ -482,14 +487,15 @@ def test_update_mode_for_an_unknown_item(client, jobs):
     assert response.status_code == 409
 
 
-def test_link_exit_is_logged_and_clears_a_production_marker(prod_client, secrets, caplog):
+def test_link_exit_is_logged_and_clears_its_own_production_marker(prod_client, secrets, caplog):
     caplog.set_level(logging.INFO, logger="budgetapp.services.linking")
-    app_secrets.set_link_in_progress(store=secrets)
+    attempt = prod_client.post("/connection/link-token", json={"mode": "new"}).json()["attempt"]
     response = prod_client.post(
         "/connection/link-exit",
         json={
             "mode": "new",
-            "event": "CLOSE_OAUTH",
+            "attempt": attempt,
+            "event": "EXIT",
             "status": "requires_oauth\x07",
             "error": {"error_code": "USER_CANCELLED"},
         },
@@ -552,7 +558,7 @@ def test_recovering_sandbox_items_the_database_lost(
     assert jobs.waiting_keys() == [f"backfill:{item.id}"]
     assert fake_plaid.calls_to("create_link_token") == []
     nothing = client.post("/connection/recover", follow_redirects=False)
-    assert flashed(nothing)[0]["text"] == "There was no saved connection to re-attach."
+    assert flashed(nothing)[0]["text"].startswith("Nothing to re-attach")
 
 
 def test_production_re_attaches_the_saved_token(db, prod_client, prod_app, prod_plaid, secrets):
@@ -657,3 +663,115 @@ def test_labels_from_the_browser_are_shortened_for_the_log():
     assert routes._short("CLOSE_OAUTH") == "CLOSE_OAUTH"
     assert routes._short("x" * 300) == "x" * 80
     assert routes._short("\n\t") is None and routes._short(5) is None
+
+
+# --------------------------------------------------------------------------- review fixes
+
+
+def test_close_oauth_reports_never_reopen_linking(prod_client, prod_plaid, secrets):
+    """The Amex window closed (CLOSE_OAUTH) or timed out (FAIL_OAUTH): Link itself is still open
+    and can still finish, so another tab must not get a new-link token."""
+    attempt = prod_client.post("/connection/link-token", json={"mode": "new"}).json()["attempt"]
+    for event in ("CLOSE_OAUTH", "FAIL_OAUTH"):
+        report = prod_client.post(
+            "/connection/link-exit", json={"mode": "new", "event": event, "attempt": attempt}
+        )
+        assert report.status_code == 204
+    assert app_secrets.get_link_in_progress(store=secrets) is not None
+    second = prod_client.post("/connection/link-token", json={"mode": "new"})  # another tab
+    assert second.status_code == 409
+    assert len(prod_plaid.calls_to("create_link_token")) == 1
+
+
+def test_an_exit_report_of_another_attempt_leaves_the_marker(prod_client, secrets):
+    prod_client.post("/connection/link-token", json={"mode": "new"})
+    for body in (
+        {"mode": "new", "event": "EXIT"},
+        {"mode": "new", "event": "EXIT", "attempt": "not-this-one"},
+    ):
+        assert prod_client.post("/connection/link-exit", json=body).status_code == 204
+    assert app_secrets.get_link_in_progress(store=secrets) is not None
+
+
+def test_the_exchange_endpoint_refuses_another_bank_in_production(prod_client, prod_plaid, secrets):
+    attempt = prod_client.post("/connection/link-token", json={"mode": "new"}).json()["attempt"]
+    chase = prod_plaid.add_item(item_id="chase", institution_id="ins_3", institution_name="Chase")
+    response = prod_client.post(
+        "/connection/exchange",
+        json={
+            "public_token": prod_plaid.public_token_for(chase),
+            "metadata": {"institution": {"institution_id": "ins_3", "name": "Chase"}},
+            "attempt": attempt,
+        },
+    )
+    assert response.status_code == 409 and "not American Express" in response.json()["error"]
+    assert prod_plaid.calls_to("exchange_public_token") == []
+    assert app_secrets.get_link_in_progress(store=secrets) is None
+
+
+def test_a_parked_token_never_comes_back_in_the_exchange_answer(prod_client, prod_plaid, secrets):
+    fake_item = prod_plaid.add_item(item_id="amex")
+    secrets.fail_on[("set", app_secrets.PRODUCTION_ACCESS_TOKEN)] = app_secrets.SecretStoreError(
+        "locked"
+    )
+    response = prod_client.post(
+        "/connection/exchange",
+        json={"public_token": prod_plaid.public_token_for(fake_item), "metadata": AMEX},
+    )
+    assert response.status_code == 502 and set(response.json()) == {"error"}
+    assert fake_item.access_token not in response.text
+    error = response.json()["error"]
+    assert "readable only by you" in error and "--access-token" in error
+    assert "Don't link again" in error and "show it to the user" not in error
+
+
+def test_a_token_nothing_could_save_is_shown_once_by_the_exchange_answer(
+    prod_client, prod_plaid, secrets, monkeypatch
+):
+    """The documented exception: Keychain and both recovery files failed, so the token exists
+    only in this answer; link.js shows it once for the user to copy."""
+    fake_item = prod_plaid.add_item(item_id="amex")
+    secrets.fail_on[("set", app_secrets.PRODUCTION_ACCESS_TOKEN)] = app_secrets.SecretStoreError(
+        "locked"
+    )
+
+    def unwritable(*_args, **_kwargs):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(app_secrets, "write_access_token_recovery_file", unwritable)
+    response = prod_client.post(
+        "/connection/exchange",
+        json={"public_token": prod_plaid.public_token_for(fake_item), "metadata": AMEX},
+    )
+    assert response.status_code == 502
+    data = response.json()
+    assert data["access_token"] == fake_item.access_token
+    assert fake_item.access_token not in data["error"] and "password manager" in data["error"]
+
+
+def test_sync_now_tells_the_connection_page_to_refresh(
+    db, client, demo_client, jobs, fake_plaid, secrets, settings
+):
+    """The top-bar Sync now answers with the pill only; on /connection the live region listens
+    for connection-changed, refreshes, and polls until the sync is done."""
+    assert "HX-Trigger" not in client.post("/connection/sync", headers=HTMX).headers  # not linked
+    linked(db, fake_plaid, secrets, settings)
+    started = client.post("/connection/sync", headers=HTMX)
+    assert started.headers["HX-Trigger"] == routes.CHANGED_EVENT == "connection-changed"
+    already = client.post("/connection/sync", headers=HTMX)  # e.g. started from another tab
+    assert already.headers["HX-Trigger"] == "connection-changed"
+    assert "HX-Trigger" not in demo_client.post("/connection/sync", headers=HTMX).headers
+    live = client.get("/connection?plaid=1", headers=HTMX).text
+    assert 'hx-trigger="every 4s, connection-changed from:body"' in live
+
+
+def test_a_second_re_attach_at_the_same_time_gets_a_plain_answer(client, monkeypatch):
+    def busy(*_args, **_kwargs):
+        raise linking.LinkBusy("Another window is re-attaching or linking right now.")
+
+    monkeypatch.setattr(linking, "recover_orphaned_items", busy)
+    response = client.post("/connection/recover", follow_redirects=False)
+    assert response.status_code == 303
+    assert flashed(response) == [
+        {"level": "info", "text": "Another window is re-attaching or linking right now."}
+    ]

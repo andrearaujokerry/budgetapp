@@ -33,6 +33,17 @@
 {{ ui.icon("alert", class="banner__icon") }}
 <div class="banner__body"><strong class="banner__title">Plaid Link didn't finish.</strong><span class="banner__text" data-link-error-text></span></div>
 </div>
+{#- Filled by link.js only when the exchange answers with an access token that nothing could save
+    (linking.TokenNotSaved): shown once, never stored by the page, kept until the page reloads. -#}
+<div class="banner banner--over link-rescue" id="link-token-rescue" hidden>
+{{ ui.icon("lock", class="banner__icon") }}
+<div class="banner__body stack stack--sm">
+<strong class="banner__title">Your access token, shown only this once</strong>
+<span class="banner__text">Copy all of it into your password manager now; the message above says what to do with it.</span>
+<label class="sr-only" for="link-token-rescue-value">Access token</label>
+<input class="input link-rescue__value" id="link-token-rescue-value" type="text" readonly autocomplete="off" spellcheck="false" value="">
+</div>
+</div>
 
 {%- if o.linked %}
 {% include "connection/_live.html" %}

@@ -1,6 +1,7 @@
 {#- The page header's Sync now (a plain form: it works without JS). The live region's HTMX answer
-    re-sends it out of band (oob=true), so it is enabled again once a sync has finished. -#}
+    re-sends it out of band (oob=true), so it is enabled again once a sync has finished; its
+    button keeps one id so keyboard focus survives the swap. -#}
 {%- import "components/ui.html" as ui -%}
 <form id="page-sync" method="post" action="/connection/sync"{% if oob|default(false) %} hx-swap-oob="true"{% endif %}>
-{{ ui.button("Sync now", icon="refresh", type="submit", disabled=(not link_enabled or overview.syncing)) }}
+{{ ui.button("Sync now", icon="refresh", type="submit", id="page-sync-button", disabled=(not link_enabled or overview.syncing)) }}
 </form>
