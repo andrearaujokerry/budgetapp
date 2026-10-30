@@ -25,7 +25,13 @@ from budgetapp.services import linking, reconcile, userstate
 from budgetapp.services.background import BackgroundJobs
 from budgetapp.web import flash as flash_module
 from budgetapp.web.routes import connection as routes
-from tests.factories import make_account, make_item, make_sync_run, make_tombstone
+from tests.factories import (
+    make_account,
+    make_item,
+    make_sync_run,
+    make_tombstone,
+    make_transaction,
+)
 from tests.fake_plaid import FakePlaidGateway
 from tests.web.conftest import HTMX
 from tests.web.csp import csp_problems
@@ -438,6 +444,25 @@ def test_after_linking_a_lone_csv_account_is_attached(db, client, jobs, fake_pla
     )
 
 
+def test_linking_moves_a_lone_csv_history_for_real(db, client, jobs, fake_plaid):
+    manual = make_account(db, manual=True)
+    row = make_transaction(db, manual, source="csv", amount="18.00")
+    fake_item = fake_plaid.add_item(item_id="it")
+    response = client.post(
+        "/connection/exchange",
+        json={"public_token": fake_plaid.public_token_for(fake_item), "metadata": AMEX},
+    )
+    assert response.status_code == 200
+    assert (
+        "Your imported history (1 transaction) now belongs to the card."
+        in flashed(response)[0]["text"]
+    )
+    db.expire_all()
+    card = db.scalars(select(Account).where(Account.item_id.is_not(None))).one()
+    assert row.account_id == card.id
+    assert db.scalars(select(Account).where(Account.item_id.is_(None))).all() == []
+
+
 # --------------------------------------------------------------------------- update mode, exits
 
 
@@ -594,7 +619,7 @@ def test_attaching_csv_history_to_a_card(db, client, monkeypatch):
     ]
 
 
-def test_attaching_needs_both_accounts_and_the_csv_package(db, client):
+def test_attaching_needs_both_accounts(db, client):
     manual = make_account(db, manual=True)
     card = make_account(db)
     missing = client.post("/connection/attach", data={"manual_id": "x"}, follow_redirects=False)
@@ -605,12 +630,61 @@ def test_attaching_needs_both_accounts_and_the_csv_package(db, client):
         follow_redirects=False,
     )
     assert flashed(wrong) == [{"level": "error", "text": "That imported account no longer exists."}]
-    stub = client.post(  # reconcile.attach_manual_account is the CSV package's
+    for odd in ("²", str(2**63), "9" * 5000, "-1"):  # never a 500
+        response = client.post(
+            "/connection/attach",
+            data={"manual_id": odd, "account_id": str(card.id)},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303 and flashed(response)[0]["level"] == "error"
+    assert db.get(Account, manual.id) is not None
+
+
+def test_attaching_moves_the_csv_history_and_reconciles_it(db, client):
+    """The real attach (CSV's reconcile.attach_manual_account): the imported rows move to the
+    card, the one Plaid already has merges into it, and once Plaid's history is complete a row
+    Plaid doesn't have is held for review."""
+    item = make_item(db, history_complete_at=NOW)
+    card = make_account(db, item)
+    plaid_row = make_transaction(
+        db,
+        card,
+        amount="25.00",
+        date="2026-10-10",
+        authorized_date="2026-10-09",
+        name="TARTINE BAKERY",
+    )
+    manual = make_account(db, manual=True)
+    twin = make_transaction(
+        db,
+        manual,
+        source="csv",
+        amount="25.00",
+        date="2026-10-09",
+        name="TARTINE BAKERY SAN FRANCISCO",
+        csv_reference="320262830000000001",  # posted 2026-10-10 (day 283)
+        notes="Birthday cake",
+    )
+    held = make_transaction(db, manual, source="csv", amount="9.99", date="2026-10-12")
+    twin_id, held_id, manual_id = twin.id, held.id, manual.id
+    response = client.post(
         "/connection/attach",
-        data={"manual_id": str(manual.id), "account_id": str(card.id)},
+        data={"manual_id": str(manual_id), "account_id": str(card.id)},
         follow_redirects=False,
     )
-    assert flashed(stub)[0]["level"] == "info"
+    assert flashed(response) == [
+        {
+            "level": "success",
+            "text": "Moved 2 imported transactions onto the card, 1 merged with the same Plaid "
+            "transactions, 1 held for review on the Import page.",
+        }
+    ]
+    db.expire_all()
+    assert db.get(Transaction, twin_id) is None  # merged into the Plaid row
+    assert (plaid_row.csv_reference, plaid_row.notes) == ("320262830000000001", "Birthday cake")
+    kept = db.get(Transaction, held_id)
+    assert (kept.account_id, kept.duplicate_status) == (card.id, "suspect")
+    assert db.get(Account, manual_id) is None
 
 
 def test_dismissing_lost_edits(db, client):
@@ -653,7 +727,20 @@ def test_dismissing_without_javascript(db, client):
 
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [(3, 3), ("12", 12), (" 7 ", 7), (True, None), ("x", None), (None, None), (-2, -2)],
+    [
+        (3, 3),
+        ("12", 12),
+        (" 7 ", 7),
+        (str(2**63 - 1), 2**63 - 1),
+        (True, None),
+        ("x", None),
+        (None, None),
+        (-2, None),  # ids are positive BIGINTs: anything else names no row
+        (0, None),
+        ("²", None),
+        (2**63, None),
+        ("9" * 5000, None),
+    ],
 )
 def test_ids_from_the_browser(value, expected):
     assert routes._int(value) == expected

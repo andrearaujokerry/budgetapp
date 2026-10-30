@@ -1181,7 +1181,8 @@ def attach_after_link(
     session_factory: sessionmaker[Session],
 ) -> tuple[reconcile.AttachResult | None, bool]:
     """After linking: attach the lone manual account to the lone linked card (§6), else report
-    that the Connection page must ask. Never fails the link itself."""
+    that the Connection page must ask. Never fails the link itself: a refused or failed attach is
+    rolled back and left for the Connection page to offer."""
     try:
         with db.transaction(session_factory) as s:
             choice = attach_choice(s)
@@ -1193,8 +1194,8 @@ def attach_after_link(
             result = reconcile.attach_manual_account(s, choice.manual[0].id, choice.linked[0].id)
             log.info("Attached the CSV history to the linked card")
             return result, False
-    except NotImplementedError:
-        log.info("Attaching CSV history isn't available yet; the Connection page offers it")
+    except reconcile.AttachError as exc:
+        log.info("Attaching the CSV history after linking was refused: %s", exc)
         return None, True
     except Exception:
         log.warning("Attaching the CSV history after linking failed", exc_info=True)

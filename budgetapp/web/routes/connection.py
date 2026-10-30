@@ -43,7 +43,7 @@ from budgetapp import clock, db, secrets
 from budgetapp.config import Settings, in_test_process
 from budgetapp.models import SyncRun
 from budgetapp.plaid_gateway import PlaidGateway, PlaidGatewayError, PlaidTransportError
-from budgetapp.services import linking
+from budgetapp.services import linking, reconcile
 from budgetapp.services import sync as sync_service
 from budgetapp.services.background import BackgroundJobs
 from budgetapp.services.notify import Notifier
@@ -161,13 +161,21 @@ def backfill_key(item_id: int) -> str:
 # --------------------------------------------------------------------------- helpers
 
 
+#: The largest row id (BIGINT); an id beyond it can't name a row.
+MAX_ROW_ID = 2**63 - 1
+
+
 def _int(value: Any) -> int | None:
+    """A row id sent by the page (ASCII digits, 1 … BIGINT max), else ``None``."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, int):
+    if isinstance(value, str):
+        text = value.strip()
+        if not (text.isascii() and text.isdigit()) or len(text) > 19:
+            return None
+        value = int(text)
+    if isinstance(value, int) and 1 <= value <= MAX_ROW_ID:
         return value
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value.strip())
     return None
 
 
@@ -489,7 +497,8 @@ def exchange(
         text += " Choose below which card your imported CSV history belongs to."
     elif result.attached is not None:
         moved = result.attached.moved_transactions
-        text += f" Your imported history ({moved:,} transactions) now belongs to the card."
+        noun = "transaction" if moved == 1 else "transactions"
+        text += f" Your imported history ({moved:,} {noun}) now belongs to the card."
     response = JSONResponse({"redirect": PAGE, "item_id": result.item_id})
     flash(response, "success", text)
     return response
@@ -667,23 +676,16 @@ def attach(request: Request, session: SessionDep, form: FormDep) -> Response:
         return redirect(request, PAGE, "error", "Choose the imported account and the linked card.")
     try:
         result = linking.attach_manual(session, manual_id, account_id)
-    except linking.LinkRefused as exc:
+    except (linking.LinkRefused, reconcile.AttachError) as exc:
         return redirect(request, PAGE, "error", str(exc))
-    except NotImplementedError:
-        return redirect(
-            request,
-            PAGE,
-            "info",
-            "Moving imported history onto a linked card isn't available in this version yet.",
-        )
     session.commit()
     moved = result.moved_transactions
-    return redirect(
-        request,
-        PAGE,
-        "success",
-        f"Moved {moved:,} imported transaction{'' if moved == 1 else 's'} onto the card.",
-    )
+    text = f"Moved {moved:,} imported transaction{'' if moved == 1 else 's'} onto the card"
+    if result.reconcile.paired:
+        text += f", {result.reconcile.paired:,} merged with the same Plaid transactions"
+    if result.reconcile.suspects_flagged:
+        text += f", {result.reconcile.suspects_flagged:,} held for review on the Import page"
+    return redirect(request, PAGE, "success", text + ".")
 
 
 @router.post("/connection/lost-edits/{plaid_transaction_id}/dismiss")

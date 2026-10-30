@@ -492,15 +492,52 @@ def test_several_manual_accounts_are_left_for_the_user_to_choose(
     assert attach_calls == [] and result.attach_needed and result.attached is None
 
 
-def test_until_csv_attaching_exists_the_link_still_succeeds(
+def test_linking_moves_the_lone_csv_history_onto_the_new_card(
     db, session_factory, fake_plaid, secrets, sandbox
 ):
-    make_account(db, manual=True)
+    """CSV's real ``reconcile.attach_manual_account`` runs after linking (§6)."""
+    manual = make_account(db, manual=True)
+    rows = [
+        make_transaction(db, manual, source="csv", amount=amount, notes="From the CSV")
+        for amount in ("12.00", "30.50")
+    ]
+    manual_id = manual.id
     fake_item = fake_plaid.add_item(item_id="it")
     result = linking.exchange(
         session_factory, fake_plaid, secrets, sandbox, fake_plaid.public_token_for(fake_item), AMEX
     )
-    assert result.attach_needed and len(items(db)) == 1
+    db.expire_all()
+    card = db.scalars(select(Account).where(Account.item_id.is_not(None))).one()
+    assert not result.attach_needed and result.attached is not None
+    assert result.attached.moved_transactions == 2
+    assert db.get(Account, manual_id) is None  # the manual account is gone
+    assert {(t.account_id, t.notes) for t in rows} == {(card.id, "From the CSV")}
+    assert len(items(db)) == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [reconcile.AttachError("Choose a card linked through Plaid."), RuntimeError("a bug")],
+    ids=["refused", "failed"],
+)
+def test_an_attach_that_fails_never_fails_the_link(
+    db, session_factory, fake_plaid, secrets, sandbox, monkeypatch, failure
+):
+    def attach(session, manual_id, plaid_account_id):
+        session.execute(
+            Account.__table__.update().where(Account.id == manual_id).values(name="half-moved")
+        )
+        raise failure
+
+    monkeypatch.setattr(reconcile, "attach_manual_account", attach)
+    manual = make_account(db, manual=True)
+    fake_item = fake_plaid.add_item(item_id="it")
+    result = linking.exchange(
+        session_factory, fake_plaid, secrets, sandbox, fake_plaid.public_token_for(fake_item), AMEX
+    )
+    assert result.attach_needed and result.attached is None and len(items(db)) == 1
+    db.expire_all()
+    assert db.get(Account, manual.id).name == "American Express (CSV)"  # rolled back
 
 
 def test_attach_manual_checks_both_accounts(db, attach_calls):
