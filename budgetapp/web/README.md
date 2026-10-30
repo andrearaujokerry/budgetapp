@@ -11,7 +11,7 @@ component live at `/dev/ui-kit`. ARCHITECTURE §9 has the security design.
 | `flash.py` | `redirect()`, `flash()`, `flash_oob()`, `is_local_path()` |
 | `security.py` | the Host/Origin checks, security headers, CSP, `allow_plaid_link()` |
 | `app.py` | `create_app()`: wiring, error pages (never import it from a route: circular) |
-| `routes/<page>.py` | one module per page, each with `router = APIRouter()` (the Connection placeholder also answers `POST /connection/sync` and `GET /connection/sync-status` until SYNC replaces it) |
+| `routes/<page>.py` | one module per page, each with `router = APIRouter()`. Every page is built except `dashboard.py` (`/`) and `trends.py`, still the shell's placeholders until the DASH package replaces them; `connection.py` (SYNC) also answers the top bar's `POST /connection/sync` and `GET /connection/sync-status` |
 | `templates/<page>/` | `index.html` (full page) and `_<part>.html` partials |
 
 Checklist for a page package:

@@ -157,9 +157,8 @@ The pill and the action are chosen independently (first match wins in each list)
 | `conn.syncing` | disabled Sync now with a spinning icon |
 | otherwise | **Sync now**: `<form method="post" action="/connection/sync">` with a button carrying `hx-post="/connection/sync" hx-target="#sync-status" hx-swap="outerHTML"`, so it also works without JS |
 
-Route contract (SYNC package) — **both routes return this one partial**, rendered with a fresh
-`conn`. Until SYNC lands, the shell's placeholder `routes/connection.py` serves both (Sync now
-answers "Syncing isn't built yet." as an info toast); SYNC replaces the module and keeps the URLs:
+Route contract (SYNC package, `routes/connection.py`) — **both routes return this one partial**,
+rendered with a fresh `conn`:
 
 - `POST /connection/sync`: for HTMX requests status 200 with the partial (it says "Syncing…", so
   mark the run as running before responding), optionally followed by `ui.flash_oob(...)`. If a
