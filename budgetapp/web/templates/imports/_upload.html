@@ -1,0 +1,27 @@
+{#- The upload form and the download instructions (full page only). -#}
+{% import "components/ui.html" as ui %}
+{% import "components/forms.html" as form %}
+<div class="grid grid--sidebar import-start">
+{% call ui.card("Upload an Amex CSV file", "The extended download from americanexpress.com, up to " ~ max_file_mb ~ " MB.", id="upload") %}
+<form class="form" method="post" action="/import/preview" enctype="multipart/form-data">
+{{ form.field("file", "CSV file", type="file", accept=".csv,text/csv", required=true, error=errors.get("file"), help="Read in memory to build a preview; the file itself is never saved.", class="input--file") }}
+{% if target_options %}
+{{ form.select_field("account", "Import into", target_options, value=account, placeholder=none if account else "Choose an account", required=true, error=errors.get("account"), help="Linked cards are matched with the transactions Plaid already has." if targets.options|selectattr("linked")|list else "A CSV-only account; attach it to your card once it is linked.") }}
+{% else %}
+<p class="field__error">{{ ui.icon("alert") }}<span>There is no account to import into yet. Link your card on the Connection page first.</span></p>
+{% endif %}
+<div class="form-actions">
+{{ ui.button("Preview import", variant="primary", type="submit", icon="upload") }}
+<span class="text-sm muted">Nothing is imported until you confirm.</span>
+</div>
+</form>
+{% endcall %}
+{% call ui.card("How to download your history", id="howto") %}
+<ol class="import-steps">
+{%- for step in steps %}
+<li>{{ step }}</li>
+{%- endfor %}
+</ol>
+<p class="import-note text-sm muted">Amex keeps about two years of activity online. Overlapping downloads are fine: rows already imported are skipped by their Reference number, and rows Plaid already has are merged, never added twice.</p>
+{% endcall %}
+</div>

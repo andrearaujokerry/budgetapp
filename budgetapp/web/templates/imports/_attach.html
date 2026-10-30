@@ -1,0 +1,19 @@
+{#- Offer to attach a CSV-only account to a linked card. Needs `offer` (an AttachOffer). -#}
+{% import "components/ui.html" as ui %}
+{% import "components/forms.html" as form %}
+{% set single = offer.targets|length == 1 %}
+{% set target_label = offer.targets[0][1] if single else "your linked card" %}
+{% call ui.card("Attach your CSV history to " ~ target_label, id="attach-" ~ offer.manual_id, class="attach-card") %}
+<form class="attach-form" method="post" action="/import/attach" data-confirm="Move {{ offer.transaction_count }} CSV transactions to {{ target_label }}? Rows Plaid also has are merged. This can’t be undone.">
+<p>“{{ offer.manual_label }}” holds {{ offer.transaction_count|pluralize("transaction") }} imported from CSV files. Attaching moves them, with their imports, rules and statements, to {{ target_label }} and merges the rows Plaid also has, so every charge counts once.</p>
+<input type="hidden" name="manual_id" value="{{ offer.manual_id }}">
+<div class="form-actions">
+{%- if single %}
+<input type="hidden" name="account_id" value="{{ offer.targets[0][0] }}">
+{%- else %}
+{{ form.select_field("account_id", "Linked card", offer.targets, value=offer.default_target, placeholder=none if offer.default_target else "Choose a card", id="attach-account-" ~ offer.manual_id, required=true, compact=true) }}
+{%- endif %}
+{{ ui.button("Attach to " ~ target_label, variant="primary", type="submit", icon="link") }}
+</div>
+</form>
+{% endcall %}

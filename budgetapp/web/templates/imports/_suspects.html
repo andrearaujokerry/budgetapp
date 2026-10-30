@@ -1,0 +1,46 @@
+{#- CSV rows held for review (the HTMX target #suspects). Needs `suspects`. -#}
+{% import "components/ui.html" as ui %}
+{% if suspects %}
+{%- set intro = "These CSV rows fall inside the period Plaid covers, but no posted Plaid transaction matched them. They stay out of every total until you decide." %}
+{%- if suspects|selectattr("pending")|list %}{% set intro = intro ~ " Rows pending in Plaid merge on their own once Plaid’s charge posts: leave those." %}{% endif %}
+{% call ui.card("Held for review", intro, flush=true, id="suspects") %}
+<div class="table-wrap">
+<table class="table table--compact">
+<thead><tr>
+<th scope="col" class="col-optional-sm">Date</th>
+<th scope="col" class="col-grow">Description</th>
+<th scope="col" class="col-optional-md">Card member</th>
+<th scope="col" class="col-optional-lg">From file</th>
+<th scope="col" class="num">Amount</th>
+<th scope="col" class="shrink"><span class="sr-only">Actions</span></th>
+</tr></thead>
+<tbody>
+{%- for s in suspects %}
+{%- set what = s.name ~ ", " ~ (s.date|date_long) ~ ", " ~ ui.money_text(s.amount) %}
+{%- set twin = (s.pending_name or "a charge of the same amount") ~ ", " ~ (s.pending_date|date_long) if s.pending else "" %}
+<tr>
+<td class="table__date col-optional-sm nowrap">{{ s.date|date_long }}</td>
+<td class="col-grow"><span class="table__primary">{{ s.name }}</span><span class="table__secondary"><span class="import-phone">{{ s.date|date_long }} · </span>{{ s.account_label }}{% if s.original_description %} · {{ s.original_description }}{% endif %}</span>
+{%- if s.pending %}<span class="table__secondary suspect-pending" title="Plaid still shows this charge as pending ({{ twin }}). This row merges with it on its own when it posts.">{{ ui.icon("clock", size="sm") }} Pending in Plaid: {{ twin }}</span>{% endif %}</td>
+<td class="col-optional-md nowrap">{{ s.account_owner or "—" }}</td>
+<td class="col-optional-lg truncate import-file">{% if s.filename %}<span class="import-file__name" title="{{ s.filename }}">{{ s.filename }}</span>{% else %}—{% endif %}</td>
+<td class="num">{{ ui.money(s.amount) }}</td>
+<td class="table__actions">
+<div class="btn-group suspect-actions">
+<form method="post" action="/import/suspects/{{ s.id }}/keep" hx-post="/import/suspects/{{ s.id }}/keep" hx-target="#suspects" hx-swap="outerHTML"{% if s.pending %} data-confirm="Plaid still shows this charge as pending ({{ twin }}), and this row merges with it on its own when it posts. Keeping it now counts the charge twice until then. Keep it anyway?"{% endif %}>
+{{ ui.button("Keep", size="sm", type="submit", icon="check", tooltip="A real charge Plaid missed: count it", aria_label="Keep " ~ what) }}
+</form>
+<form method="post" action="/import/suspects/{{ s.id }}/delete" hx-post="/import/suspects/{{ s.id }}/delete" hx-target="#suspects" hx-swap="outerHTML" data-confirm="Delete this CSV row ({{ what }})? Use this when Plaid already has the same charge. If you import a file with this row again, it is held for review again.">
+{{ ui.button("Delete", size="sm", variant="danger", type="submit", icon="trash", tooltip="A duplicate of a Plaid transaction: delete it", aria_label="Delete " ~ what) }}
+</form>
+</div>
+</td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{% endcall %}
+{% else %}
+<div id="suspects" hidden></div>
+{% endif %}

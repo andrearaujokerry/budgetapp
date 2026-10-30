@@ -37,7 +37,6 @@ STUBS = {  # start/serve are built (tests/web/test_serve.py), demo too (tests/te
     "sandbox-link": ["--user", "custom", "--institution", "ins_109508"],
     "sandbox-refresh": [],
     "sandbox-reset-login": ["--item", "1"],
-    "import-csv": ["activity.csv", "--account", "2", "--dry-run"],
     "recategorize": ["--since", "2026-01-01", "--only-uncategorized", "--dry-run"],
     "backup": ["--if-due", "--keep", "30", "--unattended"],
     "restore": ["backup.dump", "--force-disconnect"],
