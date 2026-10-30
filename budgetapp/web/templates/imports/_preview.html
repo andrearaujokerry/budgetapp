@@ -27,6 +27,7 @@
 <td class="shrink tabular muted col-optional-sm">{{ row.row_number }}</td>
 <td class="table__date col-optional-sm">{{ row.date|date_long }}</td>
 {%- if row.other_account %}{% set detail = "Already in " ~ row.other_account %}
+{%- elif row.plaid_pending %}{% set detail = "Pending in Plaid: " ~ (row.plaid_name or "same amount") ~ " · " ~ (row.plaid_date|date_long) %}
 {%- elif row.original_description and row.original_description != row.name %}{% set detail = row.original_description %}
 {%- else %}{% set detail = "" %}{% endif %}
 <td class="col-grow"><span class="table__primary">{{ row.name }}</span>
@@ -54,7 +55,10 @@
 {{ ui.stat("From Plaid", count(p.matched), sub="already synced; merged", icon="link") }}
 {%- endif %}
 {%- if p.suspects %}
-{{ ui.stat("Held for review", count(p.suspects), sub="no matching Plaid charge", tone="warn") }}
+{%- if p.suspects_pending == p.suspects %}{% set held_sub = "pending in Plaid; they merge" %}
+{%- elif p.suspects_pending %}{% set held_sub = count(p.suspects_pending) ~ " of them pending in Plaid" %}
+{%- else %}{% set held_sub = "no matching Plaid charge" %}{% endif %}
+{{ ui.stat("Held for review", count(p.suspects), sub=held_sub, tone="warn") }}
 {%- endif %}
 {{ ui.stat("Already imported", count(p.duplicates), sub="skipped", icon="check") }}
 {%- if p.changed %}
@@ -70,7 +74,9 @@
 {{ ui.banner("info", "Once your card is linked, attach this account to it here: the history then shows as one card, and the rows Plaid also has are merged.", title="A CSV-only account “" ~ p.account_label ~ "” will be created.") }}
 {%- endif %}
 {%- if p.suspects %}
-{{ ui.banner("warn", "They fall inside the period Plaid already covers but match no Plaid transaction, so they stay out of every total until you keep or delete them on this page.", title=(p.suspects|pluralize("row")) ~ " will be held for review.") }}
+{%- set held_text = "They fall inside the period Plaid already covers but match no posted Plaid transaction, so they stay out of every total until you keep or delete them on this page." %}
+{%- if p.suspects_pending %}{% set held_text = held_text ~ " Rows marked “Pending in Plaid” merge on their own once Plaid’s charge posts: leave those." %}{% endif %}
+{{ ui.banner("warn", held_text, title=(p.suspects|pluralize("row")) ~ " will be held for review.") }}
 {%- endif %}
 {%- if p.changed %}
 {{ ui.banner("warn", "Their Reference was imported before with a different date or amount, so they are skipped. Check them against your statement.", title=(p.changed|pluralize("row")) ~ " changed since an earlier import.") }}
@@ -80,7 +86,7 @@
 {%- endif %}
 
 {%- if p.group("new").count %}{{ rows_table(p.group("new"), "Will be added", none) }}{% endif %}
-{%- if p.group("suspect").count %}{{ rows_table(p.group("suspect"), "Will be added, held for review", "Inside Plaid’s history without a matching Plaid charge.") }}{% endif %}
+{%- if p.group("suspect").count %}{{ rows_table(p.group("suspect"), "Will be added, held for review", "Inside Plaid’s history without a matching posted Plaid charge.") }}{% endif %}
 {%- if p.group("matched").count %}{{ rows_table(p.group("matched"), "Already synced from Plaid", "Each is merged into its Plaid transaction (your notes, tags and categories move with it), never stored twice.") }}{% endif %}
 {%- if p.group("duplicate").count %}{{ rows_table(p.group("duplicate"), "Already imported", none) }}{% endif %}
 {%- if p.group("changed").count %}{{ rows_table(p.group("changed"), "Changed since an earlier import", none) }}{% endif %}

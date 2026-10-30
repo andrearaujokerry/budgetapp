@@ -27,8 +27,11 @@ NOTHING``, so a re-import or an overlapping file adds nothing twice), categorize
 then the Amex category mapping), records ``csv_imports``, runs ``reconcile.reconcile_item`` (rows
 that pair with a Plaid transaction are merged into it: never stored twice) and calls
 ``alerts.evaluate_after_import``; a preview is imported once (committing it again answers with
-that import). Every writing function takes ``db.ledger_lock`` first and never commits; the caller
-commits. Raw file contents never go to the logs.
+that import). ``csv_imports.duplicate_count`` counts rows imported before and unchanged;
+``error_count`` counts rows that couldn't be read plus rows changed since an earlier import (the
+returned :class:`CsvImportOutcome` has both numbers apart). Every writing function takes
+``db.ledger_lock`` first and never commits; the caller commits. Raw file contents never go to
+the logs.
 """
 
 from __future__ import annotations
@@ -71,6 +74,8 @@ HEADER_SCAN_ROWS = 20
 FUTURE_TOLERANCE = dt.timedelta(days=7)
 MANUAL_ACCOUNT_NAME = "American Express (CSV)"
 NEW_ACCOUNT = "new"
+#: Row ids are BIGINT; a larger number never names a row.
+MAX_ROW_ID = 2**63 - 1
 _CHUNK = 1000
 
 DOWNLOAD_STEPS = (
@@ -461,7 +466,7 @@ def parse_target(value: str | None) -> int | None:
     text = (value or "").strip()
     if text == NEW_ACCOUNT:
         return None
-    if not text.isdigit():
+    if not (text.isascii() and text.isdigit()) or not 1 <= int(text) <= MAX_ROW_ID:
         raise ImportRefused("account", "Choose the account to import into.")
     return int(text)
 
@@ -477,7 +482,7 @@ def _target(session: Session, account_id: int | None, *, production: bool) -> Ac
                 "separate account would count twice).",
             )
         return None
-    account = session.get(Account, account_id)
+    account = session.get(Account, account_id) if 1 <= account_id <= MAX_ROW_ID else None
     if account is None:
         raise ImportRefused(
             "account",
@@ -511,9 +516,11 @@ class PreviewRow:
     #: changed: what is stored under this Reference
     earlier_date: dt.date | None = None
     earlier_amount: Decimal | None = None
-    #: matched: the Plaid transaction it pairs with
+    #: matched: the Plaid transaction it pairs with; held: the charge Plaid still shows as
+    #: pending (``plaid_pending``), which it pairs with once that posts
     plaid_name: str | None = None
     plaid_date: dt.date | None = None
+    plaid_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,9 +538,11 @@ class ImportPreview:
 
     Counts (disjoint): ``new`` rows will be added and counted; ``suspects`` will be added but held
     for review (inside Plaid's history without a matching Plaid charge, excluded from totals until
-    the user keeps them); ``matched`` pair with a Plaid transaction already stored (merged into it,
-    never stored twice); ``duplicates`` were imported before; ``changed`` have a Reference imported
-    before with a different date or amount (skipped, shown as a warning); ``errors`` can't be read.
+    the user keeps them), ``suspects_pending`` of them because Plaid still shows the charge as
+    pending (they merge on their own once it posts); ``matched`` pair with a Plaid transaction
+    already stored (merged into it, never stored twice); ``duplicates`` were imported before;
+    ``changed`` have a Reference imported before with a different date or amount (skipped, shown
+    as a warning); ``errors`` can't be read.
     """
 
     token: str
@@ -550,6 +559,7 @@ class ImportPreview:
     parsed: int
     new: int
     suspects: int
+    suspects_pending: int
     matched: int
     duplicates: int
     changed: int
@@ -577,8 +587,10 @@ class _Stored:
     preview: ImportPreview
     rows: tuple[ParsedRow, ...]
     #: the ``csv_imports`` row this preview was imported as (kept so a repeated commit, e.g. a
-    #: double-clicked Import button, answers with that import instead of importing again)
+    #: double-clicked Import button, answers with that import instead of importing again), and
+    #: how many of its rows were skipped as changed since an earlier import
     import_id: int | None = None
+    changed_count: int = 0
 
 
 _PREVIEWS: dict[str, _Stored] = {}
@@ -655,22 +667,22 @@ def _preview_row(row: ParsedRow, **extra: Any) -> PreviewRow:
 def _same_as_stored(row: ParsedRow, stored: Any) -> bool:
     """Is the stored row with this Reference the same charge (same amount and date)?
 
-    A CSV row keeps the file's date. A Plaid row that paired with it only had to have the CSV
-    date inside its pairing window.
+    A CSV row keeps the file's date. A Plaid row that paired with it only had to accept the CSV
+    row's dates (``reconcile.PlaidSide.accepts``).
     """
     if stored.amount != row.amount:
         return False
     if stored.source == "csv":
         return stored.date == row.date
-    window = reconcile.PlaidSide(
+    plaid = reconcile.PlaidSide(
         id=0,
         account_id=0,
         date=stored.date,
         authorized_date=stored.authorized_date,
         amount=stored.amount,
         texts=(),
-    ).window
-    return window[0] <= row.date <= window[1]
+    )
+    return plaid.accepts(row.date, reference_posting_date(row.reference, row.date))
 
 
 def preview(
@@ -729,14 +741,24 @@ def preview(
 
     matched: dict[int, reconcile.PlaidSide] = {}
     suspect_indexes: set[int] = set()
+    pending: dict[int, reconcile.PlaidSide] = {}
     if account is not None and account.item_id is not None:
-        matched, suspect_indexes = _simulate(session, account, fresh)
+        matched, suspect_indexes, pending = _simulate(session, account, fresh)
     new_rows = [
         _preview_row(row)
         for i, row in enumerate(fresh)
         if i not in matched and i not in suspect_indexes
     ]
-    suspect_rows = [_preview_row(row) for i, row in enumerate(fresh) if i in suspect_indexes]
+    suspect_rows = [
+        _preview_row(
+            row,
+            plaid_name=(pending[i].label or None) if i in pending else None,
+            plaid_date=pending[i].spend_date if i in pending else None,
+            plaid_pending=i in pending,
+        )
+        for i, row in enumerate(fresh)
+        if i in suspect_indexes
+    ]
     matched_rows = [
         _preview_row(fresh[i], plaid_name=plaid.label or None, plaid_date=plaid.spend_date)
         for i, plaid in sorted(matched.items())
@@ -771,6 +793,7 @@ def preview(
         parsed=len(parsed.rows),
         new=len(new_rows),
         suspects=len(suspect_rows),
+        suspects_pending=sum(1 for row in suspect_rows if row.plaid_pending),
         matched=len(matched_rows),
         duplicates=len(duplicates),
         changed=len(changed),
@@ -816,39 +839,50 @@ def _stored_by_reference(session: Session, references: Sequence[str]) -> dict[st
 
 def _simulate(
     session: Session, account: Account, fresh: Sequence[ParsedRow]
-) -> tuple[dict[int, reconcile.PlaidSide], set[int]]:
+) -> tuple[dict[int, reconcile.PlaidSide], set[int], dict[int, reconcile.PlaidSide]]:
     """What :func:`reconcile.reconcile_item` would do with these rows added to ``account``.
 
-    Returns ``{index in fresh: the Plaid row it pairs with}`` and the indexes the cutover would
-    hold for review.
+    Returns ``{index in fresh: the Plaid row it pairs with}``, the indexes the cutover would hold
+    for review, and ``{index: pending Plaid row}`` for held rows whose charge Plaid still shows
+    as pending (``reconcile.pending_twins``: they pair once it posts).
     """
     assert account.item_id is not None
     account_ids = reconcile.item_account_ids(session, account.item_id)
     plaid_rows = reconcile.plaid_candidates(session, account_ids)
+    pending_rows = reconcile.pending_candidates(session, account_ids)
+    new_sides = [
+        CsvSide(
+            key=(1, i),
+            account_id=account.id,
+            date=row.date,
+            amount=row.amount,
+            texts=(row.original_description or "", row.name),
+            posted=reference_posting_date(row.reference, row.date),
+        )
+        for i, row in enumerate(fresh)
+    ]
+    since = reconcile.earliest_window_start([*plaid_rows, *pending_rows])
+    stored_sides = (
+        reconcile.csv_candidates(session, account_ids, since=since) if since is not None else []
+    )
     matched: dict[int, reconcile.PlaidSide] = {}
-    if plaid_rows:
-        since = reconcile.earliest_window_start(plaid_rows)
-        new_sides = [
-            CsvSide(
-                key=(1, i),
-                account_id=account.id,
-                date=row.date,
-                amount=row.amount,
-                texts=(row.original_description or "", row.name),
-            )
-            for i, row in enumerate(fresh)
-        ]
-        stored_sides = reconcile.csv_candidates(session, account_ids, since=since)
-        for csv_side, plaid in reconcile.match([*stored_sides, *new_sides], plaid_rows):
-            if csv_side.key[0] == 1:
-                matched[csv_side.key[1]] = plaid
+    paired: set[tuple[int, int]] = set()
+    for csv_side, plaid in reconcile.match([*stored_sides, *new_sides], plaid_rows):
+        paired.add(csv_side.key)
+        if csv_side.key[0] == 1:
+            matched[csv_side.key[1]] = plaid
     suspects: set[int] = set()
     item = session.get(PlaidItem, account.item_id)
     if item is not None and item.history_complete_at is not None:
         start = account.plaid_history_start or reconcile.history_start(session, account.id)
         if start is not None:
             suspects = {i for i, row in enumerate(fresh) if i not in matched and row.date >= start}
-    return matched, suspects
+    pending: dict[int, reconcile.PlaidSide] = {}
+    if suspects and pending_rows:
+        unpaired = [s for s in (*stored_sides, *new_sides) if s.key not in paired]
+        twins = {row.key: plaid for row, plaid in reconcile.match(unpaired, pending_rows)}
+        pending = {i: twins[(1, i)] for i in sorted(suspects) if (1, i) in twins}
+    return matched, suspects, pending
 
 
 # --------------------------------------------------------------------------- commit
@@ -946,8 +980,25 @@ def _manual_account(session: Session) -> Account:
     return account
 
 
-def _outcome(row: CsvImport, *, inserted_ids: tuple[int, ...] = ()) -> ImportOutcome:
-    return ImportOutcome(
+@dataclass(frozen=True, slots=True)
+class CsvImportOutcome(ImportOutcome):
+    """``events.ImportOutcome`` plus ``changed_count``: rows skipped because their Reference was
+    imported before with a different date or amount. They count in ``error_count`` (rows skipped
+    that need checking; ``csv_imports`` stores no separate column), never in ``duplicate_count``
+    (rows imported before, unchanged)."""
+
+    changed_count: int = 0
+
+    @property
+    def unreadable_count(self) -> int:
+        """Rows skipped because they couldn't be read (``error_count`` without the changed)."""
+        return self.error_count - self.changed_count
+
+
+def _outcome(
+    row: CsvImport, *, inserted_ids: tuple[int, ...] = (), changed_count: int = 0
+) -> CsvImportOutcome:
+    return CsvImportOutcome(
         account_id=row.account_id,
         filename=row.filename,
         csv_import_id=row.id,
@@ -959,6 +1010,18 @@ def _outcome(row: CsvImport, *, inserted_ids: tuple[int, ...] = ()) -> ImportOut
         inserted_transaction_ids=inserted_ids,
         date_min=row.date_min,
         date_max=row.date_max,
+        changed_count=changed_count,
+    )
+
+
+def _count_changed(session: Session, rows: Sequence[ParsedRow]) -> int:
+    """How many of ``rows`` (each Reference is stored already) differ from the stored charge."""
+    stored = _stored_by_reference(session, [row.reference for row in rows])
+    return sum(
+        1
+        for row in rows
+        if (existing := stored.get(row.reference)) is not None
+        and not _same_as_stored(row, existing)
     )
 
 
@@ -968,7 +1031,7 @@ def commit(
     *,
     notifier: Notifier | None = None,
     production: bool = False,
-) -> ImportOutcome:
+) -> CsvImportOutcome:
     """Import the rows of a preview; returns what happened (the caller commits).
 
     Takes the ledger lock, creates the manual account when the preview asked for a new one,
@@ -976,6 +1039,8 @@ def commit(
     mapping), records ``csv_imports``, reconciles with Plaid (rows that pair are merged into the
     Plaid transaction and count as ``matched_plaid_count``, not as inserted) and calls
     ``alerts.evaluate_after_import``. Raises :class:`ImportRefused` (``expired``, ``account``).
+    A row whose Reference is stored already counts in ``duplicate_count`` when it is the same
+    charge, else (changed since an earlier import) in ``error_count`` and ``changed_count``.
 
     A preview is imported once. Committing it again (a double-clicked Import button sends two
     requests) waits for the first import on the ledger lock and then returns that import's
@@ -996,7 +1061,7 @@ def commit(
     if stored.import_id is not None:
         earlier = session.get(CsvImport, stored.import_id)
         if earlier is not None:
-            return _outcome(earlier)
+            return _outcome(earlier, changed_count=stored.changed_count)
     preview_ = stored.preview
     account = _target(session, preview_.account_id, production=production)
     if account is None:
@@ -1017,6 +1082,8 @@ def commit(
     categorizer = Categorizer.load(session)
     values = [_row_values(row, account.id, csv_import.id, categorizer) for row in stored.rows]
     inserted = _insert(session, values)
+    # classified before reconciling, while each skipped Reference is still on its stored row
+    changed = _count_changed(session, [r for r in stored.rows if r.reference not in inserted])
 
     result = ReconcileResult()
     if account.item_id is not None:
@@ -1026,20 +1093,23 @@ def commit(
     kept = sorted(new_ids - paired)
     csv_import.inserted_count = len(kept)
     csv_import.matched_plaid_count = len(paired)
-    csv_import.duplicate_count = len(stored.rows) - len(inserted)
+    csv_import.duplicate_count = len(stored.rows) - len(inserted) - changed
+    csv_import.error_count = len(preview_.errors) + changed
     session.flush()
 
-    outcome = _outcome(csv_import, inserted_ids=tuple(kept))
+    outcome = _outcome(csv_import, inserted_ids=tuple(kept), changed_count=changed)
     alerts.evaluate_after_import(session, notifier or NullNotifier(), outcome)
     with _LOCK:
         stored.import_id = csv_import.id
+        stored.changed_count = changed
     log.info(
-        "CSV import %d: %d added, %d matched Plaid, %d duplicates, %d errors",
+        "CSV import %d: %d added, %d matched Plaid, %d duplicates, %d changed, %d errors",
         csv_import.id,
         outcome.inserted_count,
         outcome.matched_plaid_count,
         outcome.duplicate_count,
-        outcome.error_count,
+        changed,
+        outcome.unreadable_count,
     )
     return outcome
 
@@ -1092,7 +1162,11 @@ def reference_dates(session: Session, *, csv_import_id: int | None = None) -> Re
 
 @dataclass(frozen=True, slots=True)
 class ImportRecord:
-    """One past import, for the history table and the summary after an import."""
+    """One past import, for the history table and the summary after an import.
+
+    ``error_count`` counts every row skipped as needing a check: rows that couldn't be read and
+    rows whose Reference was imported before with a different date or amount.
+    """
 
     id: int
     filename: str
@@ -1161,7 +1235,11 @@ def import_record(session: Session, csv_import_id: int) -> ImportRecord | None:
 
 @dataclass(frozen=True, slots=True)
 class SuspectRow:
-    """An unpaired CSV row inside Plaid's history: out of every total until the user decides."""
+    """An unpaired CSV row inside Plaid's history: out of every total until the user decides.
+
+    ``pending_name``/``pending_date``: Plaid still shows this charge as pending; the row merges
+    with it on its own once it posts (keeping the row now would count the charge twice).
+    """
 
     id: int
     account_label: str
@@ -1173,6 +1251,12 @@ class SuspectRow:
     account_owner: str | None
     amount: Decimal
     filename: str | None
+    pending_name: str | None = None
+    pending_date: dt.date | None = None
+
+    @property
+    def pending(self) -> bool:
+        return self.pending_date is not None
 
 
 def list_suspects(session: Session) -> list[SuspectRow]:
@@ -1182,18 +1266,26 @@ def list_suspects(session: Session) -> list[SuspectRow]:
         .where(Transaction.source == "csv", Transaction.duplicate_status == "suspect")
         .order_by(Transaction.date, Transaction.id)
     ).all()
-    labels: dict[int, str] = {}
+    accounts: dict[int, Account | None] = {}
+    for txn, _ in rows:
+        if txn.account_id not in accounts:
+            accounts[txn.account_id] = session.get(Account, txn.account_id)
+    items = {a.item_id for a in accounts.values() if a is not None and a.item_id is not None}
+    pending: dict[int, reconcile.PlaidSide] = {}
+    for item_id in sorted(items):
+        pending.update(
+            reconcile.pending_twins(session, reconcile.item_account_ids(session, item_id))
+        )
     out = []
     for txn, filename in rows:
-        if txn.account_id not in labels:
-            account = session.get(Account, txn.account_id)
-            labels[txn.account_id] = account_label(account) if account else "—"
+        account = accounts[txn.account_id]
         name = clean_text(txn.name) or txn.name
         statement_as = clean_text(txn.original_description)
+        twin = pending.get(txn.id)
         out.append(
             SuspectRow(
                 id=txn.id,
-                account_label=labels[txn.account_id],
+                account_label=account_label(account) if account else "—",
                 date=txn.date,
                 posted_date=txn.posted_date,
                 name=name,
@@ -1202,6 +1294,8 @@ def list_suspects(session: Session) -> list[SuspectRow]:
                 account_owner=txn.account_owner,
                 amount=txn.amount,
                 filename=filename,
+                pending_name=(twin.label or None) if twin else None,
+                pending_date=twin.spend_date if twin else None,
             )
         )
     return out
@@ -1228,7 +1322,11 @@ def keep_suspect(session: Session, transaction_id: int) -> bool:
 
 def delete_suspect(session: Session, transaction_id: int) -> bool:
     """The user says the charge is a duplicate of one Plaid has: delete the CSV row. False if the
-    row is not a suspect (any more)."""
+    row is not a suspect (any more).
+
+    Its Reference goes with it: a later import of a file holding the row adds it again, held for
+    review again (out of every total), so a mistaken Delete can be undone by importing the file.
+    """
     ledger_lock(session)
     txn = _suspect(session, transaction_id)
     if txn is None:

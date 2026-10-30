@@ -10,7 +10,15 @@ one, so every charge is stored once, and attaches a manual (CSV-only) account to
     unpaired, posted Plaid rows (no ``csv_reference``) across all accounts of the Item, with equal
     amounts, the CSV date within ``[COALESCE(authorized_date, date) − 3 days, date]`` — widened to
     ``[date − 30 days, date]`` when ``authorized_date`` is null. Pending Plaid rows are not
-    candidates: a CSV file holds posted charges, and a pending row is replaced when it posts.
+    candidates: a CSV file holds posted charges, and a pending row is replaced when it posts
+    (:func:`pending_twins` only tells the user which CSV rows will pair once it has).
+  - A CSV row whose Reference holds a plausible posting date (below) pairs only with a Plaid row
+    posted on that date or up to 3 days before it (:data:`POSTED_DATE_TOLERANCE`): equal when
+    Plaid's ``date`` is the posting date, as Plaid documents; later if Plaid gave the charge
+    date. Never a Plaid row posted after it: that is another charge of the same amount, and
+    merging the CSV row into it would delete a real charge — a row of a file of the months
+    before Plaid's history (nothing Plaid has was posted that early), last month's
+    subscription, a row the user kept as a charge Plaid missed.
   - One global one-to-one assignment (:func:`match`), best first by date distance (CSV date vs
     ``COALESCE(authorized_date, date)``), then description similarity (CSV ``Appears On Your
     Statement As``/``Description`` vs Plaid ``original_description``/``name``/``merchant_name``),
@@ -28,6 +36,12 @@ one, so every charge is stored once, and attaches a manual (CSV-only) account to
     (excluded from every total by ``v_allocations``), never rows the user marked ``kept``.
 * :func:`attach_manual_account` moves a manual account's history (transactions, imports, rules,
   statements) onto a linked account, then runs the full pass.
+
+For the sync (ARCHITECTURE §8), inside the one apply transaction: call
+``reconcile_item(session, item_id)`` after the inserts and before the cursor compare-and-set, and
+in the sync that first sets ``history_complete_at`` (and ``plaid_history_start``) call
+``apply_cutover(session, item)`` AFTER setting them: ``reconcile_item`` ran before the history was
+complete, so its own cutover flagged nothing. Neither function commits.
 
 Amex References embed a posting date (``ref[1:8]`` = YYYYDDD, RESEARCH T4.3b, inferred from one
 real dataset): :func:`reference_posting_date` reads it, CSV import uses it for ``posted_date``, and
@@ -69,6 +83,9 @@ WINDOW_BEFORE_AUTHORIZED = dt.timedelta(days=3)
 WINDOW_BEFORE_POSTED = dt.timedelta(days=30)
 #: A Reference's embedded posting date counts only within [Date, Date + 30 days].
 REFERENCE_DATE_MAX_LAG = dt.timedelta(days=30)
+#: A CSV row with a Reference posting date pairs only with a Plaid row posted on that date or at
+#: most this long before it.
+POSTED_DATE_TOLERANCE = dt.timedelta(days=3)
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,18 +151,21 @@ def reference_posting_date(reference: str | None, csv_date: dt.date) -> dt.date 
 @dataclass(frozen=True, slots=True)
 class CsvSide:
     """A CSV row as the matcher sees it. ``key`` orders and identifies it: ``(0, transaction id)``
-    for a stored row, ``(1, n)`` for a row of a file being previewed."""
+    for a stored row, ``(1, n)`` for a row of a file being previewed. ``posted`` is the posting
+    date read from its Reference (:func:`reference_posting_date`), when plausible."""
 
     key: tuple[int, int]
     account_id: int
     date: dt.date
     amount: Decimal
     texts: tuple[str, ...]
+    posted: dt.date | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class PlaidSide:
-    """An unpaired, posted Plaid row as the matcher sees it."""
+    """An unpaired Plaid row as the matcher sees it: posted, or ``pending`` (only ever matched by
+    :func:`pending_twins`)."""
 
     id: int
     account_id: int
@@ -154,6 +174,7 @@ class PlaidSide:
     amount: Decimal
     texts: tuple[str, ...]
     label: str = ""
+    pending: bool = False
 
     @property
     def spend_date(self) -> dt.date:
@@ -162,9 +183,27 @@ class PlaidSide:
     @property
     def window(self) -> tuple[dt.date, dt.date]:
         """The CSV dates this row can pair with (inclusive)."""
+        if self.pending:  # a pending row's date is the day of the charge, like the CSV Date
+            latest = max(self.date, self.spend_date)
+            return (
+                self.spend_date - WINDOW_BEFORE_AUTHORIZED,
+                latest + WINDOW_BEFORE_AUTHORIZED,
+            )
         if self.authorized_date is None:
             return self.date - WINDOW_BEFORE_POSTED, self.date
         return self.authorized_date - WINDOW_BEFORE_AUTHORIZED, self.date
+
+    def accepts(self, csv_date: dt.date, csv_posted: dt.date | None = None) -> bool:
+        """Can a CSV row dated ``csv_date`` (posted ``csv_posted`` by its Reference) be this
+        charge? The date must be inside :attr:`window`; for a posted Plaid row the Reference
+        posting date must also be its ``date`` or at most :data:`POSTED_DATE_TOLERANCE` after
+        it (module docstring)."""
+        low, high = self.window
+        if not low <= csv_date <= high:
+            return False
+        if csv_posted is None or self.pending:
+            return True
+        return self.date <= csv_posted <= self.date + POSTED_DATE_TOLERANCE
 
 
 _NON_ALNUM = re.compile(r"[^0-9a-z]+")
@@ -211,9 +250,10 @@ def match(
 ) -> list[tuple[CsvSide, PlaidSide]]:
     """One-to-one pairs, assigned globally best first (see the module docstring).
 
-    A candidate pair has equal amounts and the CSV date inside the Plaid row's window. Pairs are
-    taken in order of date distance, then description similarity (higher first), then same
-    account first; ties fall back to the dates and keys, so the result is deterministic.
+    A candidate pair has equal amounts and a CSV row the Plaid row accepts
+    (:meth:`PlaidSide.accepts`). Pairs are taken in order of date distance, then description
+    similarity (higher first), then same account first; ties fall back to the dates and keys, so
+    the result is deterministic.
     """
     by_amount: dict[Decimal, list[PlaidSide]] = defaultdict(list)
     for plaid in plaid_rows:
@@ -226,8 +266,7 @@ def match(
             continue
         row_grams: tuple[frozenset[str], ...] | None = None
         for plaid in options:
-            low, high = plaid.window
-            if not low <= row.date <= high:
+            if not plaid.accepts(row.date, row.posted):
                 continue
             if row_grams is None:
                 row_grams = _gram_sets(row.texts)
@@ -267,8 +306,7 @@ def item_account_ids(session: Session, item_id: int) -> list[int]:
     )
 
 
-def plaid_candidates(session: Session, account_ids: Sequence[int]) -> list[PlaidSide]:
-    """Unpaired, posted Plaid rows of these accounts."""
+def _plaid_sides(session: Session, account_ids: Sequence[int], *, pending: bool) -> list[PlaidSide]:
     if not account_ids:
         return []
     rows = session.execute(
@@ -285,7 +323,7 @@ def plaid_candidates(session: Session, account_ids: Sequence[int]) -> list[Plaid
             Transaction.account_id.in_(account_ids),
             Transaction.source == "plaid",
             Transaction.csv_reference.is_(None),
-            Transaction.pending.is_(False),
+            Transaction.pending.is_(pending),
         )
     )
     return [
@@ -297,9 +335,20 @@ def plaid_candidates(session: Session, account_ids: Sequence[int]) -> list[Plaid
             amount=r.amount,
             texts=(r.original_description or "", r.name or "", r.merchant_name or ""),
             label=r.merchant_name or r.name or "",
+            pending=pending,
         )
         for r in rows
     ]
+
+
+def plaid_candidates(session: Session, account_ids: Sequence[int]) -> list[PlaidSide]:
+    """Unpaired, posted Plaid rows of these accounts."""
+    return _plaid_sides(session, account_ids, pending=False)
+
+
+def pending_candidates(session: Session, account_ids: Sequence[int]) -> list[PlaidSide]:
+    """Pending Plaid rows of these accounts (never paired; see :func:`pending_twins`)."""
+    return _plaid_sides(session, account_ids, pending=True)
 
 
 def earliest_window_start(plaid_rows: Iterable[PlaidSide]) -> dt.date | None:
@@ -321,6 +370,7 @@ def csv_candidates(
         Transaction.amount,
         Transaction.original_description,
         Transaction.name,
+        Transaction.csv_reference,
     ).where(Transaction.account_id.in_(account_ids), Transaction.source == "csv")
     if since is not None:
         query = query.where(Transaction.date >= since)
@@ -331,9 +381,26 @@ def csv_candidates(
             date=r.date,
             amount=r.amount,
             texts=(r.original_description or "", r.name or ""),
+            posted=reference_posting_date(r.csv_reference, r.date),
         )
         for r in session.execute(query)
     ]
+
+
+def pending_twins(session: Session, account_ids: Sequence[int]) -> dict[int, PlaidSide]:
+    """``{CSV transaction id: pending Plaid row}`` for the stored CSV rows of these accounts whose
+    charge Plaid still shows as pending.
+
+    One to one, best first, like :func:`match`; a pending row's window is its charge date ± 3 days.
+    Nothing is paired: the posted row Plaid sends later pairs with the CSV row in the next pass.
+    The Import page uses this to say so, instead of "no matching Plaid charge".
+    """
+    pending = pending_candidates(session, account_ids)
+    if not pending:
+        return {}
+    since = earliest_window_start(pending)
+    rows = csv_candidates(session, account_ids, since=since)
+    return {row.key[1]: plaid for row, plaid in match(rows, pending)}
 
 
 # --------------------------------------------------------------------------- the full pass
@@ -428,8 +495,11 @@ def apply_cutover(session: Session, item: PlaidItem) -> int:
 
     Only once the Item has ``history_complete_at``. An account's ``plaid_history_start`` is set
     here (its earliest Plaid posting date) when the sync has not set it yet; it is never moved
-    afterwards. Rows the user marked ``kept`` are never flagged again.
+    afterwards. Rows the user marked ``kept`` are never flagged again. :func:`reconcile_item`
+    ends with it; the sync that first sets ``history_complete_at`` calls it again AFTER setting
+    it, in the same transaction (module docstring). Idempotent; takes the ledger lock.
     """
+    ledger_lock(session)
     if item.history_complete_at is None:
         return 0
     flagged = 0

@@ -33,13 +33,18 @@ from tests.factories import (
     make_transaction,
     set_app_settings,
 )
-from tests.test_csv_import import amex_csv, amex_row, ledger_locks_held
+from tests.test_csv_import import amex_csv, amex_row, ledger_locks_held, ref
 
 D = dt.date.fromisoformat
 
 
-def csv_side(n: int, date: str, amount: str, *texts: str, account: int = 1) -> CsvSide:
-    return CsvSide((0, n), account, D(date), Decimal(amount), texts or ("",))
+def csv_side(
+    n: int, date: str, amount: str, *texts: str, account: int = 1, posted: str | None = None
+) -> CsvSide:
+    """A CSV row; ``posted`` is the posting date its Reference holds (none: no plausible one)."""
+    return CsvSide(
+        (0, n), account, D(date), Decimal(amount), texts or ("",), D(posted) if posted else None
+    )
 
 
 def plaid_side(
@@ -123,6 +128,39 @@ class TestMatcher:
     def test_window_without_an_authorized_date(self, csv_date, paired):
         plaid = plaid_side(2, "2025-08-12", "10.00")
         assert bool(match([csv_side(1, csv_date, "10.00")], [plaid])) is paired
+
+    @pytest.mark.parametrize(
+        ("posted", "paired"),
+        [
+            (None, True),  # no posting date in the Reference: the window alone decides
+            ("2025-08-12", True),  # posted the day Plaid posted it
+            ("2025-08-15", True),  # up to 3 days after Plaid's date
+            ("2025-08-16", False),
+            ("2025-08-11", False),  # posted before the Plaid row: another charge
+        ],
+    )
+    def test_the_reference_posting_date_must_fit_plaids_posting_date(self, posted, paired):
+        plaid = plaid_side(2, "2025-08-12", "10.00", authorized="2025-08-10")
+        row = csv_side(1, "2025-08-10", "10.00", posted=posted)
+        assert bool(match([row], [plaid])) is paired
+
+    def test_the_wide_window_needs_a_fitting_posting_date_too(self):
+        plaid = plaid_side(2, "2025-10-04", "15.99", "NETFLIX.COM")  # window 09-04 … 10-04
+        last_month = csv_side(1, "2025-09-05", "15.99", "NETFLIX.COM", posted="2025-09-06")
+        assert match([last_month], [plaid]) == []
+        late = csv_side(1, "2025-09-05", "15.99", "NETFLIX.COM", posted="2025-10-04")
+        assert len(match([late], [plaid])) == 1  # a charge that took 29 days to post
+        unknown = csv_side(1, "2025-09-05", "15.99", "NETFLIX.COM")
+        assert len(match([unknown], [plaid])) == 1  # no Reference date: ARCHITECTURE's window
+
+    def test_pending_rows_are_matched_by_their_charge_date(self):
+        pending = PlaidSide(
+            9, 1, D("2025-10-20"), None, Decimal("64.10"), ("SAFEWAY",), pending=True
+        )
+        assert pending.window == (D("2025-10-17"), D("2025-10-23"))
+        # its posting date is unknown yet, so the Reference's isn't compared
+        assert len(match([csv_side(1, "2025-10-19", "64.10", posted="2025-10-27")], [pending])) == 1
+        assert match([csv_side(1, "2025-10-16", "64.10")], [pending]) == []
 
     def test_the_closest_date_wins(self):
         csv = [csv_side(1, "2025-08-10", "10.00", "CAFE")]
@@ -224,7 +262,10 @@ class TestReconcileItem:
         plaid = plaid_row(db, account, "189.00", "2025-08-11", "2025-08-08", name="Hilton")
         data = amex_csv(
             *[
-                amex_row("2025-08-08", "HILTON GARDEN INN", "189.00", category="Travel-Lodging")
+                # posted 08-11 like the Plaid row (the Reference holds the posting date)
+                amex_row(
+                    "2025-08-08", "HILTON GARDEN INN", "189.00", category="Travel-Lodging", lag=3
+                )
                 for _ in range(3)
             ]
         )
@@ -278,6 +319,44 @@ class TestReconcileItem:
 
     def test_an_unknown_item_does_nothing(self, db):
         assert reconcile.reconcile_item(db, 999_999) == reconcile.ReconcileResult()
+
+    def test_last_months_subscription_is_not_merged_into_this_months(self, db):
+        """Review finding: without authorized dates the window is 30 days, and September's charge
+        (posted before Plaid's history starts) merged into October's, deleting a real charge."""
+        item = make_item(db, history_complete_at=clock.now())
+        account = make_account(db, item)
+        plaid_row(db, account, "40.00", "2025-09-20")  # Plaid's history starts here
+        october = plaid_row(db, account, "15.99", "2025-10-04", name="NETFLIX.COM")
+        september = csv_row(
+            db, account, "15.99", "2025-09-05", ref("2025-09-06"), name="NETFLIX.COM"
+        )
+        assert reconcile.reconcile_item(db, item.id).paired == 0
+        db.expire_all()
+        assert db.get(Transaction, september.id) is not None
+        assert db.get(Transaction, october.id).csv_reference is None
+
+    def test_a_kept_row_is_not_merged_into_a_later_charge_of_the_same_amount(self, db):
+        """Review finding: a row the user kept (a charge Plaid missed) merged into a different
+        $2.00 charge posted three weeks later."""
+        item = make_item(db, history_complete_at=clock.now())
+        account = make_account(db, item)
+        plaid_row(db, account, "40.00", "2025-10-01")
+        kept = csv_row(
+            db, account, "2.00", "2025-10-05", ref("2025-10-06"), duplicate_status="kept"
+        )
+        plaid_row(db, account, "2.00", "2025-10-26", name="PARKING")  # no authorized date
+        assert reconcile.reconcile_item(db, item.id).paired == 0
+        assert db.get(Transaction, kept.id).duplicate_status == "kept"
+
+    def test_a_kept_row_still_pairs_with_its_own_charge(self, db):
+        """Kept while Plaid still showed it as pending: it pairs once Plaid sends it posted."""
+        item = make_item(db, history_complete_at=clock.now())
+        account = make_account(db, item)
+        kept = csv_row(
+            db, account, "64.10", "2025-10-19", ref("2025-10-20"), duplicate_status="kept"
+        )
+        posted = plaid_row(db, account, "64.10", "2025-10-20", "2025-10-19")
+        assert reconcile.reconcile_item(db, item.id).pairs == ((kept.id, posted.id),)
 
     def test_the_pass_takes_the_ledger_lock(self, db):
         account = make_account(db)
@@ -455,6 +534,42 @@ class TestCutover:
         assert result.pairs == ((suspect.id, late.id),)
         assert db.get(Transaction, suspect.id) is None
 
+    def test_the_sync_that_completes_the_history_flags_with_apply_cutover(self, db):
+        """ARCHITECTURE §8: ``reconcile_item`` runs before the sync sets ``history_complete_at``,
+        so that sync calls ``apply_cutover`` after setting it (review finding: the hand-off to
+        SYNC left this out)."""
+        item = make_item(db)
+        account = make_account(db, item)
+        plaid_row(db, account, "40.00", "2025-10-01")
+        row = csv_row(db, account, "12.00", "2025-10-05", ref("2025-10-06"))
+        assert reconcile.reconcile_item(db, item.id).suspects_flagged == 0
+        item.history_complete_at = clock.now()
+        account.plaid_history_start = D("2025-10-01")
+        assert reconcile.apply_cutover(db, item) == 1
+        assert db.get(Transaction, row.id).duplicate_status == "suspect"
+        assert reconcile.apply_cutover(db, item) == 0  # idempotent
+        assert ledger_locks_held(db) >= 1
+
+
+class TestPendingTwins:
+    def test_csv_rows_pending_in_plaid_are_named_one_to_one_and_never_paired(self, db):
+        item = make_item(db)
+        account = make_account(db, item)
+        pending = plaid_row(db, account, "64.10", "2025-10-20", pending=True, name="SAFEWAY")
+        near = csv_row(db, account, "64.10", "2025-10-19", ref("2025-10-20"))
+        csv_row(db, account, "64.10", "2025-10-22", ref("2025-10-23"))  # also in the window
+        csv_row(db, account, "64.10", "2025-09-01", ref("2025-09-02"))  # outside it
+        twins = reconcile.pending_twins(db, [account.id])
+        assert {csv_id: plaid.id for csv_id, plaid in twins.items()} == {near.id: pending.id}
+        assert twins[near.id].label == "SAFEWAY"
+        assert reconcile.reconcile_item(db, item.id).paired == 0
+
+    def test_no_pending_rows_no_twins(self, db):
+        account = make_account(db)
+        csv_row(db, account, "64.10", "2025-10-19", ref("2025-10-20"))
+        assert reconcile.pending_twins(db, [account.id]) == {}
+        assert reconcile.pending_twins(db, []) == {}
+
 
 # --------------------------------------------------------------------------- attaching
 
@@ -600,7 +715,7 @@ class TestAttach:
             db,
             amex_csv(
                 amex_row("2025-06-01", "OLD COFFEE", "4.00"),
-                amex_row("2025-10-06", "PHILZ COFFEE", "5.25"),
+                amex_row("2025-10-06", "PHILZ COFFEE", "5.25", lag=2),  # posted 10-08
             ),
             "before-linking.csv",
             None,

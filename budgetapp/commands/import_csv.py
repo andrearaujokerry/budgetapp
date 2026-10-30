@@ -144,11 +144,17 @@ def import_file(
     session.commit()
     record = csv_import.import_record(session, outcome.csv_import_id or 0)
     held = record.suspects if record is not None else 0
+    changed = (
+        f"{outcome.changed_count:,} changed since an earlier import (skipped), "
+        if outcome.changed_count
+        else ""
+    )
     out(
         f"Imported {outcome.filename}: {outcome.inserted_count:,} added"
         f"{f' ({held:,} held for review on the Import page)' if held else ''}, "
         f"{outcome.matched_plaid_count:,} merged with Plaid transactions, "
-        f"{outcome.duplicate_count:,} already imported, {outcome.error_count:,} errors."
+        f"{outcome.duplicate_count:,} already imported, {changed}"
+        f"{outcome.unreadable_count:,} errors."
     )
     return 0
 
@@ -156,7 +162,12 @@ def import_file(
 def _row_line(row: csv_import.PreviewRow) -> str:
     amount = format_money(row.amount)
     text = f"    row {row.row_number:>5}  {row.date.isoformat()}  {amount:>12}  {row.name}"
-    if row.plaid_name or row.plaid_date:
+    if row.plaid_pending:
+        text += (
+            f"  (pending in Plaid: {row.plaid_name or '?'} ({row.plaid_date});"
+            " merges when it posts)"
+        )
+    elif row.plaid_name or row.plaid_date:
         text += f"  ↔ Plaid: {row.plaid_name or '?'} ({row.plaid_date})"
     if row.other_account:
         text += f"  (in {row.other_account})"
@@ -187,6 +198,11 @@ def print_preview(preview: csv_import.ImportPreview, out: Printer = print) -> No
     ]
     for label, count in counts:
         out(f"  {label + ':':<34}{count:>7,}")
+    if preview.suspects_pending:
+        out(
+            f"  {preview.suspects_pending:,} of the rows held for review match charges Plaid "
+            "still shows as pending: they merge on their own once those post."
+        )
     for group in preview.groups:
         if not group.count:
             continue

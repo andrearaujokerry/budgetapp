@@ -136,6 +136,22 @@ def ledger_locks_held(db) -> int:
     )
 
 
+def counted_total(db, account: Account) -> Decimal:
+    """What the account's rows add up to in every total (``v_allocations``)."""
+    return db.scalar(
+        select(func.coalesce(func.sum(v_allocations.c.amount), 0)).where(
+            v_allocations.c.account_id == account.id
+        )
+    )
+
+
+def ref_of(data: bytes, date_cell: str) -> str:
+    """The Reference of the (only) row of ``data`` whose Date cell is ``date_cell``."""
+    rows = csv.DictReader(io.StringIO(data.decode("utf-8-sig"), newline=""))
+    (reference,) = [row["Reference"] for row in rows if row["Date"] == date_cell]
+    return reference.strip("'")
+
+
 def csv_rows(db, account: Account | None = None) -> list[Transaction]:
     query = select(Transaction).where(Transaction.source == "csv").order_by(Transaction.id)
     if account is not None:
@@ -239,6 +255,7 @@ class TestParsing:
             ("10/06/2025", dt.date(2025, 10, 6)),
             ("10/06/25", dt.date(2025, 10, 6)),
             ("2/8/20", dt.date(2020, 2, 8)),
+            ("8/1/25", dt.date(2025, 8, 1)),  # a two-digit year is 2025, not year 25
             ("2025-10-06", dt.date(2025, 10, 6)),
             ("06/01/2019  Sat", dt.date(2019, 6, 1)),
         ],
@@ -264,6 +281,10 @@ class TestParsing:
             ("(4.20)", "-4.20"),
             ("12.340", "12.34"),
             ("0", "0.00"),
+            ("−5.00", "-5.00"),  # U+2212
+            ("$-12.34", "-12.34"),
+            ("12.", "12.00"),
+            (".5", "0.50"),
         ],
     )
     def test_amounts_are_exact(self, text, expected):
@@ -271,7 +292,13 @@ class TestParsing:
 
     @pytest.mark.parametrize(
         ("text", "kind"),
-        [("12.345", "decimals"), ("abc", "number"), ("1e3", "number"), ("1" * 20, "range")],
+        [
+            ("12.345", "decimals"),
+            ("abc", "number"),
+            ("1e3", "number"),
+            ("1" * 20, "range"),
+            ("12.34-", "number"),  # a trailing minus is refused, never read as a charge
+        ],
     )
     def test_bad_amounts(self, text, kind):
         with pytest.raises(ValueError, match=kind):
@@ -327,6 +354,15 @@ class TestRefusedFiles:
         header = [h for h in HEADER if h != "Reference"]
         with pytest.raises(ImportRefused) as info:
             csv_import.parse_file(amex_csv(amex_row("2025-10-06", "PHILZ", "5.25"), header=header))
+        assert info.value.kind == "no_reference"
+
+    def test_a_reference_number_column_is_not_taken_for_the_reference(self):
+        data = (
+            b"Date,Description,Amount,Reference Number,Category\r\n"
+            b"8/1/2025,A,1.00,'3202521300000001',X\r\n"
+        )
+        with pytest.raises(ImportRefused) as info:
+            csv_import.parse_file(data)
         assert info.value.kind == "no_reference"
 
     def test_a_file_without_a_description_is_refused(self):
@@ -394,6 +430,14 @@ class TestRowErrors:
         ).rows
         assert row.name == "PHILZ COFFEE"
 
+    def test_an_unclosed_quote_in_the_last_row_is_a_row_error(self):
+        data = amex_csv(amex_row("2025-08-01", "A", "1.00")) + (
+            b"8/2/2025,\"B UNCLOSED,ALEX,-91005,2.00,,,,,,,'320252150000000077',Other\r\n"
+        )
+        parsed = csv_import.parse_file(data)
+        assert [(r.row_number, r.name) for r in parsed.rows] == [(2, "A")]
+        assert [(e.row_number, e.reason) for e in parsed.errors] == [(3, "The amount is missing.")]
+
 
 # --------------------------------------------------------------------------- targets
 
@@ -453,16 +497,19 @@ class TestTargets:
         # Sandbox (or production before linking) still allows CSV-only accounts.
         assert csv_import.preview(db, fixture("activity_2025-08.csv"), "a.csv", manual.id).new == 15
 
-    def test_an_unknown_account_is_refused(self, db):
+    @pytest.mark.parametrize("account_id", [999_999, 0, 2**63])  # 2**63 is past BIGINT
+    def test_an_unknown_account_is_refused(self, db, account_id):
         with pytest.raises(ImportRefused) as info:
-            csv_import.preview(db, fixture("activity_2025-08.csv"), "a.csv", 999_999)
+            csv_import.preview(db, fixture("activity_2025-08.csv"), "a.csv", account_id)
         assert info.value.kind == "account"
 
     @pytest.mark.parametrize(("value", "expected"), [("new", None), ("12", 12), (" 7 ", 7)])
     def test_parse_target(self, value, expected):
         assert csv_import.parse_target(value) == expected
 
-    @pytest.mark.parametrize("value", ["", None, "abc", "-1"])
+    @pytest.mark.parametrize(
+        "value", ["", None, "abc", "-1", "0", "²", "99999999999999999999", str(2**63)]
+    )
     def test_parse_target_refuses_junk(self, value):
         with pytest.raises(ImportRefused):
             csv_import.parse_target(value)
@@ -608,8 +655,51 @@ class TestPreviewAndCommit:
         (row,) = preview.group("changed").sample
         assert (row.earlier_amount, row.earlier_date) == (Decimal("5.25"), dt.date(2025, 10, 6))
         outcome = csv_import.commit(db, preview.token)
-        assert (outcome.inserted_count, outcome.duplicate_count) == (0, 1)
+        # skipped as changed (an error to check), never reported as "already imported"
+        assert (outcome.inserted_count, outcome.duplicate_count) == (0, 0)
+        assert (outcome.changed_count, outcome.error_count, outcome.unreadable_count) == (1, 1, 0)
+        record = db.get(CsvImport, outcome.csv_import_id)
+        assert (record.duplicate_count, record.error_count) == (0, 1)
         assert [t.amount for t in csv_rows(db)] == [Decimal("5.25")]
+
+    def test_changed_rows_are_counted_apart_from_duplicates(self, db):
+        """Review finding: a changed row was counted as "already imported" after the import."""
+        account = make_account(db, manual=True)
+        same, moved = ref("2025-08-02"), ref("2025-08-02")
+        run_import(
+            db,
+            amex_csv(
+                amex_row("2025-08-01", "SAME", "10.00", reference=same),
+                amex_row("2025-08-01", "MOVED", "10.00", reference=moved),
+            ),
+            account,
+        )
+        data = (
+            amex_csv(
+                amex_row("2025-08-01", "SAME", "10.00", reference=same),
+                amex_row("2025-08-01", "MOVED", "11.00", reference=moved),
+                amex_row("2025-08-03", "NEW", "3.00"),
+            )
+            + b"13/45/2025,BAD,ALEX RIVERA,-91005,1.00,,BAD,,,,,'320252130000000999',Other\r\n"
+        )
+        preview, outcome = run_import(db, data, account, filename="again.csv")
+        assert (preview.new, preview.duplicates, preview.changed, len(preview.errors)) == (
+            1,
+            1,
+            1,
+            1,
+        )
+        assert (outcome.inserted_count, outcome.duplicate_count) == (1, 1)
+        assert (outcome.changed_count, outcome.unreadable_count, outcome.error_count) == (1, 1, 2)
+        record = csv_import.import_record(db, outcome.csv_import_id)
+        assert (record.row_count, record.inserted_count, record.duplicate_count) == (4, 1, 1)
+        assert record.error_count == 2  # skipped to check: unreadable or changed
+        again = csv_import.commit(db, preview.token)  # a double-clicked Import
+        assert (again.csv_import_id, again.changed_count, again.duplicate_count) == (
+            outcome.csv_import_id,
+            1,
+            1,
+        )
 
     def test_a_row_already_in_another_account_is_a_duplicate(self, db):
         _, first = run_import(db, fixture("activity_cp1252.csv"), None)
@@ -777,6 +867,115 @@ class TestLinkedAccounts:
         )
         assert (preview.new, preview.suspects) == (1, 0)
 
+    def test_an_older_months_file_keeps_the_charges_before_plaids_history(self, db):
+        """Review finding: in a file of the months before Plaid's history, the 09-29 coffee
+        (posted 09-30, before Plaid's first posting) merged into Plaid's 10-01 coffee."""
+        item = make_item(db, history_complete_at=clock.now())
+        account = make_account(db, item)
+        make_transaction(
+            db, account, amount="40.00", date="2025-10-01", authorized_date="2025-09-30"
+        )
+        make_transaction(
+            db,
+            account,
+            amount="5.25",
+            date="2025-10-02",
+            authorized_date="2025-10-01",
+            name="Philz Coffee",
+        )
+        data = amex_csv(
+            amex_row("2025-09-29", "PHILZ COFFEE", "5.25", lag=1),  # posted 09-30
+            amex_row("2025-09-30", "WHOLE FOODS", "40.00", lag=1),  # posted 10-01, in Plaid
+        )
+        preview, outcome = run_import(db, data, account)
+        assert (preview.new, preview.matched, preview.suspects) == (1, 1, 0)
+        assert [r.name for r in preview.group("matched").sample] == ["WHOLE FOODS"]
+        assert (outcome.inserted_count, outcome.matched_plaid_count) == (1, 1)
+        assert counted_total(db, account) == Decimal("50.50")  # 40.00 and both coffees
+
+    def test_a_daily_charge_at_the_start_of_plaids_history_pairs_only_with_its_twin(self, db):
+        item = make_item(db, history_complete_at=clock.now())
+        account = make_account(db, item)
+        first = make_transaction(  # bought 09-30, posted 10-01: Plaid's first posting
+            db,
+            account,
+            amount="5.25",
+            date="2025-10-01",
+            authorized_date="2025-09-30",
+            name="Philz Coffee",
+        )
+        make_transaction(
+            db,
+            account,
+            amount="5.25",
+            date="2025-10-02",
+            authorized_date="2025-10-01",
+            name="Philz Coffee",
+        )
+        days = ("2025-09-27", "2025-09-28", "2025-09-29", "2025-09-30")
+        data = amex_csv(*[amex_row(day, "PHILZ COFFEE", "5.25", lag=1) for day in days])
+        preview, _ = run_import(db, data, account)
+        assert (preview.new, preview.matched) == (3, 1)
+        db.refresh(first)
+        assert first.csv_reference == ref_of(data, "9/30/2025")
+        assert counted_total(db, account) == Decimal("26.25")  # five coffees, 09-27 to 10-01
+
+    def test_a_row_whose_charge_is_pending_in_plaid_is_held_and_says_so(self, db):
+        """Review finding: such a row was described as matching no Plaid charge, so "Keep"
+        counted the charge twice until it posted."""
+        item = make_item(db, history_complete_at=clock.now())
+        account = make_account(db, item)
+        make_transaction(
+            db, account, amount="40.00", date="2025-10-01", authorized_date="2025-09-30"
+        )
+        pending = make_transaction(
+            db,
+            account,
+            amount="64.10",
+            date="2025-10-20",
+            pending=True,
+            name="SAFEWAY",
+            plaid_transaction_id="pending-1",
+        )
+        data = amex_csv(
+            amex_row("2025-10-19", "SAFEWAY #1490", "64.10"),  # posted 10-20
+            amex_row("2025-10-12", "ACE HARDWARE", "18.00"),  # Plaid has no such charge
+        )
+        preview, _ = run_import(db, data, account)
+        assert (preview.suspects, preview.suspects_pending, preview.matched) == (2, 1, 0)
+        rows = {r.name: r for r in preview.group("suspect").sample}
+        safeway = rows["SAFEWAY #1490"]
+        assert (safeway.plaid_pending, safeway.plaid_name, safeway.plaid_date) == (
+            True,
+            "SAFEWAY",
+            dt.date(2025, 10, 20),
+        )
+        assert not rows["ACE HARDWARE"].plaid_pending
+        held = {s.name: s for s in csv_import.list_suspects(db)}
+        assert (held["SAFEWAY #1490"].pending_name, held["SAFEWAY #1490"].pending_date) == (
+            "SAFEWAY",
+            dt.date(2025, 10, 20),
+        )
+        assert not held["ACE HARDWARE"].pending
+        assert counted_total(db, account) == Decimal("104.10")  # the pending charge counts once
+
+        # Plaid posts it: the sync replaces the pending row, and the next pass merges the held row.
+        db.delete(pending)
+        db.flush()
+        posted = make_transaction(
+            db,
+            account,
+            amount="64.10",
+            date="2025-10-20",
+            authorized_date="2025-10-19",
+            name="SAFEWAY",
+            pending_transaction_id="pending-1",
+        )
+        result = reconcile.reconcile_item(db, item.id)
+        assert result.pairs == ((held["SAFEWAY #1490"].id, posted.id),)
+        assert [s.name for s in csv_import.list_suspects(db)] == ["ACE HARDWARE"]
+        assert counted_total(db, account) == Decimal("104.10")
+
 
 # --------------------------------------------------------------------------- review, history
 
@@ -809,6 +1008,22 @@ class TestReview:
         csv_import.keep_suspect(db, txn.id)
         db.flush()
         assert db.scalar(counted) == 1
+
+    def test_a_deleted_held_row_comes_back_held_when_its_file_is_imported_again(self, db):
+        """Deleting forgets the row and its Reference (nothing remembers dismissals): importing
+        the file again holds it for review again, out of every total, never counted."""
+        item = make_item(db, history_complete_at=clock.now())
+        account = make_account(db, item)
+        make_transaction(db, account, amount="40.00", date="2025-10-01")
+        data = amex_csv(amex_row("2025-10-05", "ORPHAN", "12.00"))
+        run_import(db, data, account)
+        (held,) = csv_import.list_suspects(db)
+        assert csv_import.delete_suspect(db, held.id)
+        preview, _ = run_import(db, data, account, filename="again.csv")
+        assert (preview.new, preview.suspects) == (0, 1)
+        (again,) = csv_import.list_suspects(db)
+        assert again.id != held.id
+        assert counted_total(db, account) == Decimal("40.00")
 
     def test_plaid_rows_are_never_suspects_here(self, db):
         plaid = make_transaction(db, duplicate_status="suspect")

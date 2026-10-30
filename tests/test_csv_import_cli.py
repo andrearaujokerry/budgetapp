@@ -79,6 +79,39 @@ def test_rows_held_for_review_are_mentioned(db):
     assert "1 added (1 held for review on the Import page)" in lines[-1]
 
 
+def test_changed_rows_are_reported_apart(db):
+    """Review finding: they were counted as "already imported"."""
+    reference = "320252140000004242"
+    run(db, amex_csv(amex_row("2025-08-01", "PHILZ", "5.25", reference=reference)))
+    code, lines = run(
+        db,
+        amex_csv(
+            amex_row("2025-08-01", "PHILZ", "6.25", reference=reference),
+            amex_row("2025-08-03", "BLUE BOTTLE", "4.00"),
+        ),
+    )
+    assert code == 0
+    assert lines[-1] == (
+        "Imported activity.csv: 1 added, 0 merged with Plaid transactions, 0 already imported, "
+        "1 changed since an earlier import (skipped), 0 errors."
+    )
+
+
+def test_rows_pending_in_plaid_are_explained(db):
+    from budgetapp import clock
+
+    item = make_item(db, history_complete_at=clock.now())
+    account = make_account(db, item)
+    make_transaction(db, account, amount="40.00", date="2025-10-01")
+    make_transaction(db, account, amount="64.10", date="2025-10-20", pending=True, name="SAFEWAY")
+    data = amex_csv(amex_row("2025-10-19", "SAFEWAY #1490", "64.10"))
+    code, lines = run(db, data, dry_run=True)
+    assert code == 0
+    text = "\n".join(lines)
+    assert "1 of the rows held for review match charges Plaid still shows as pending" in text
+    assert "SAFEWAY #1490  (pending in Plaid: SAFEWAY (2025-10-20); merges when it posts)" in text
+
+
 def test_an_explicit_account(db):
     target = make_account(db, manual=True, name="Old card")
     make_account(db, manual=True)

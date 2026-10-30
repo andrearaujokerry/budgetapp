@@ -5,7 +5,10 @@ No row comes from a real statement. The layouts follow the real Amex downloads d
 RESEARCH T4.1–T4.3b (header names and order, quoting, encodings, Reference format).
 
 A Reference is `3` + YYYYDDD (the posting date: year and day of the year) + 10 digits, so
-`reconcile.reference_posting_date` reads a plausible posting date from each one.
+`reconcile.reference_posting_date` reads a plausible posting date from each one. Pairing relies on
+it: a CSV row pairs only with a Plaid row posted on that date or up to 3 days before it. A
+synthetic row meant to pair with a Plaid row in a test must therefore carry that row's posting
+date in its Reference (`amex_row(..., lag=n)` in `tests/test_csv_import.py`).
 
 | File | What it exercises |
 | --- | --- |

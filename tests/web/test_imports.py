@@ -120,6 +120,33 @@ def test_a_double_clicked_import_imports_once(client, db):
     assert db.scalar(select(func.count()).select_from(Transaction)) == 15
 
 
+def test_changed_rows_are_reported_apart_after_an_import(client, db):
+    """Review finding: the flash, banner and history said "already imported" for them."""
+    reference = "320252140000004242"
+    first = amex_csv(amex_row("2025-08-01", "PHILZ", "5.25", reference=reference))
+    client.post("/import/commit", data={"token": preview_token(upload(client, first))})
+    manual = db.scalars(select(Account)).one()
+    data = (
+        amex_csv(
+            amex_row("2025-08-01", "PHILZ", "6.25", reference=reference),
+            amex_row("2025-08-03", "BLUE BOTTLE", "4.00"),
+        )
+        + b"13/45/2025,BAD,ALEX RIVERA,-91005,1.00,,BAD,,,,,'320252130000000999',Other\r\n"
+    )
+    token = preview_token(upload(client, data, account=str(manual.id), filename="b.csv"))
+    page = client.post("/import/commit", data={"token": token})
+    assert toasts(page.text) == [
+        "Imported b.csv: 1 added, 1 changed since an earlier import (skipped), "
+        "1 with errors skipped."
+    ]
+    assert (
+        "1 added, 0 merged with Plaid transactions, 0 already imported, 2 skipped (unreadable, "
+        "or changed since an earlier import)." in page.text
+    )
+    assert '<th scope="col" class="num col-optional-md">Skipped</th>' in page.text
+    assert_clean(page)
+
+
 def test_a_preview_with_errors_and_duplicates(client, db):
     token = preview_token(upload(client, fixture("activity_malformed.csv")))
     client.post("/import/commit", data={"token": token})
@@ -146,7 +173,7 @@ def test_a_linked_card_shows_the_matching_plaid_transactions(client, db):
         authorized_date="2025-10-06",
         name="Philz Coffee",
     )
-    data = amex_csv(amex_row("2025-10-06", "PHILZ COFFEE", "5.25"))
+    data = amex_csv(amex_row("2025-10-06", "PHILZ COFFEE", "5.25", lag=2))  # posted 10-08
     page = client.get(
         f"/import?preview={preview_token(upload(client, data, account=str(account.id)))}"
     )
@@ -208,6 +235,31 @@ def test_no_account_chosen(client, db):
 def test_a_file_too_large_is_refused_before_it_is_read(client, monkeypatch):
     monkeypatch.setattr(imports_routes, "MAX_BODY_BYTES", 1000)
     response = upload(client, fixture("activity_2025-08.csv"))
+    assert response.status_code == 422
+    assert "larger than 10 MB" in response.text
+
+
+def test_a_chunked_upload_over_the_limit_is_refused_while_it_streams(client, monkeypatch):
+    """No Content-Length to check first: the stream itself is cut at the limit."""
+    monkeypatch.setattr(imports_routes, "MAX_BODY_BYTES", 2000)
+    data = amex_csv(*[amex_row("2025-06-01", f"COFFEE {i}", "4.50") for i in range(100)])
+    head = (
+        '--XyZ\r\nContent-Disposition: form-data; name="account"\r\n\r\nnew\r\n'
+        '--XyZ\r\nContent-Disposition: form-data; name="file"; filename="a.csv"\r\n'
+        "Content-Type: text/csv\r\n\r\n"
+    )
+    body = head.encode() + data + b"\r\n--XyZ--\r\n"
+
+    def chunks():
+        for start in range(0, len(body), 512):
+            yield body[start : start + 512]
+
+    response = client.post(
+        "/import/preview",
+        content=chunks(),
+        headers={"content-type": "multipart/form-data; boundary=XyZ"},
+        follow_redirects=False,
+    )
     assert response.status_code == 422
     assert "larger than 10 MB" in response.text
 
@@ -320,6 +372,85 @@ def test_an_unknown_or_handled_row_is_a_404(client, db):
     assert client.post(f"/import/suspects/{normal.id}/delete").status_code == 404
 
 
+@pytest.mark.parametrize(
+    "method, path",
+    [
+        ("get", "/import?done=99999999999999999999"),
+        ("post", "/import/suspects/99999999999999999999/keep"),
+        ("post", "/import/suspects/9223372036854775808/delete"),  # 2**63
+    ],
+)
+def test_ids_beyond_bigint_are_bad_requests(app, make_client, method, path):
+    """Review finding: they reached PostgreSQL and the user got a 500 page."""
+    client = make_client(app, raise_server_exceptions=False)
+    response = getattr(client, method)(path)
+    assert response.status_code == 400
+    assert "Bad request" in response.text
+
+
+def test_a_held_row_pending_in_plaid_says_so_and_keep_asks_first(client, db):
+    """Review finding: it read "no matching Plaid charge", and Keep counted it twice."""
+    item = make_item(db, history_complete_at=clock.now())
+    account = make_account(db, item, name="Gold Card", mask="1001")
+    make_transaction(db, account, amount="40.00", date="2025-10-01", authorized_date="2025-09-30")
+    make_transaction(
+        db, account, amount="64.10", date="2025-10-20", pending=True, name='SAFEWAY "#1490"'
+    )
+    data = amex_csv(
+        amex_row("2025-10-19", "SAFEWAY 1490 SAN FRANCISCO", "64.10"),
+        amex_row("2025-10-12", "ACE HARDWARE", "18.00"),
+    )
+    token = preview_token(upload(client, data, account=str(account.id)))
+    page = client.get(f"/import?preview={token}")
+    html = page.text
+    assert "1 of them pending in Plaid" in html
+    assert "Rows marked “Pending in Plaid” merge on their own" in html
+    assert "Pending in Plaid: SAFEWAY &#34;#1490&#34; · Oct 20, 2025" in html
+    assert_clean(page)
+
+    done = client.post("/import/commit", data={"token": token})
+    html = done.text
+    assert "Rows pending in Plaid merge on their own" in html
+    assert "Pending in Plaid: SAFEWAY &#34;#1490&#34;, Oct 20, 2025" in html
+    pending_id, plain_id = (
+        s.id for s in sorted(csv_import.list_suspects(db), key=lambda s: not s.pending)
+    )
+    keep_forms = dict(
+        re.findall(r'<form method="post" action="/import/suspects/(\d+)/keep"([^>]*)>', html)
+    )
+    assert "Keeping it now counts the charge twice until then." in keep_forms[str(pending_id)]
+    assert "data-confirm" not in keep_forms[str(plain_id)]
+    assert_clean(done)
+
+
+def test_html_in_descriptions_and_file_names_is_escaped(client, db):
+    data = amex_csv(
+        amex_row("2025-08-01", "<script>alert(1)</script>", "1.00", statement_as="<b>x</b>")
+    )
+    token = preview_token(upload(client, data, filename='"><img src=x>.csv'))
+    page = client.get(f"/import?preview={token}")
+    assert "<script>alert(1)</script>" not in page.text and "<img src=x>" not in page.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page.text
+    assert_clean(page)
+
+
+def test_held_row_names_are_escaped_in_attributes(client, db):
+    item = make_item(db, history_complete_at=clock.now())
+    account = make_account(db, item)
+    make_transaction(db, account, amount="40.00", date="2025-10-01")
+    evil = 'X" onmouseover="alert(1)" data-x="<script>alert(2)</script> & co'
+    token = preview_token(
+        upload(client, amex_csv(amex_row("2025-10-05", evil, "12.00")), account=str(account.id))
+    )
+    page = client.post("/import/commit", data={"token": token})
+    assert 'onmouseover="alert(1)"' not in page.text
+    assert "<script>alert(2)</script>" not in page.text
+    (confirm,) = re.findall(r'data-confirm="(Delete this CSV row[^"]*)"', page.text)
+    assert "X&#34; onmouseover=&#34;alert(1)&#34;" in confirm
+    assert "If you import a file with this row again, it is held for review again." in confirm
+    # (no csp_problems() here: its regex sees " onmouseover=" inside the escaped value itself)
+
+
 # --------------------------------------------------------------------------- attaching
 
 
@@ -342,7 +473,7 @@ def test_attach_a_csv_only_account(client, db):
     )
     assert response.status_code == 303
     page = client.get("/import")
-    assert toasts(page.text) == ["Attached: 1 transactions moved to the linked card."]
+    assert toasts(page.text) == ["Attached: 1 transaction moved to the linked card."]
     db.expunge_all()
     assert db.get(Account, manual_id) is None
     assert "Attach your CSV history" not in page.text
@@ -363,6 +494,28 @@ def test_attach_asks_which_card_when_there_are_several(client, db):
 def test_attach_needs_both_accounts(client, data):
     page = client.post("/import/attach", data=data)
     assert toasts(page.text) == ["Choose the linked card to attach to."]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"manual_id": "99999999999999999999", "account_id": "1"},
+        {"manual_id": "1", "account_id": "9223372036854775808"},
+        {"manual_id": "²", "account_id": "1"},  # a digit to str.isdigit(), not to int()
+    ],
+)
+def test_attach_refuses_ids_that_cannot_name_an_account(app, make_client, data):
+    """Review finding: an id beyond BIGINT gave a 500 page."""
+    client = make_client(app, raise_server_exceptions=False)
+    page = client.post("/import/attach", data=data)
+    assert page.status_code == 200
+    assert toasts(page.text) == ["Choose the linked card to attach to."]
+
+
+def test_an_upload_into_an_impossible_account_is_refused(client):
+    response = upload(client, fixture("activity_cp1252.csv"), account="99999999999999999999")
+    assert response.status_code == 422
+    assert response.context["errors"] == {"account": "Choose the account to import into."}
 
 
 def test_attach_refuses_wrong_accounts(client, db):

@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
@@ -34,6 +34,9 @@ router = APIRouter()
 #: The whole request body may be at most this large (the file plus a few small fields).
 MAX_BODY_BYTES = csv_import.MAX_FILE_BYTES + 64 * 1024
 MAX_ERRORS_SHOWN = 20
+#: Row ids are BIGINT: a larger number never names a row (and PostgreSQL would refuse it).
+MAX_ID = csv_import.MAX_ROW_ID
+RowId = Annotated[int, Path(ge=1, le=MAX_ID)]
 
 
 # --------------------------------------------------------------------------- uploads, in memory
@@ -154,7 +157,7 @@ def imports_page(
     session: SessionDep,
     settings: SettingsDep,
     preview: str | None = None,
-    done: int | None = None,
+    done: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
 ) -> Response:
     context = page_context(session, settings, preview_token=preview, done=done)
     return render(request, "imports/index.html", context, active_nav="imports")
@@ -189,7 +192,7 @@ def preview_upload(
     return render(request, "imports/index.html", context, active_nav="imports", status_code=422)
 
 
-def _import_message(outcome: Any, held: int) -> str:
+def _import_message(outcome: csv_import.CsvImportOutcome, held: int) -> str:
     parts = [f"{outcome.inserted_count:,} added"]
     if held:
         parts[0] += f" ({held:,} held for review)"
@@ -197,8 +200,10 @@ def _import_message(outcome: Any, held: int) -> str:
         parts.append(f"{outcome.matched_plaid_count:,} merged with Plaid transactions")
     if outcome.duplicate_count:
         parts.append(f"{outcome.duplicate_count:,} already imported")
-    if outcome.error_count:
-        parts.append(f"{outcome.error_count:,} with errors skipped")
+    if outcome.changed_count:
+        parts.append(f"{outcome.changed_count:,} changed since an earlier import (skipped)")
+    if outcome.unreadable_count:
+        parts.append(f"{outcome.unreadable_count:,} with errors skipped")
     return f"Imported {outcome.filename}: " + ", ".join(parts) + "."
 
 
@@ -252,7 +257,7 @@ def _suspects_response(request: Request, session: Session, text: str) -> Respons
 
 
 @router.post("/import/suspects/{transaction_id}/keep")
-def keep_suspect(request: Request, transaction_id: int, session: SessionDep) -> Response:
+def keep_suspect(request: Request, transaction_id: RowId, session: SessionDep) -> Response:
     """The user says the charge is real: it counts from now on and is never flagged again."""
     if not csv_import.keep_suspect(session, transaction_id):
         raise HTTPException(404)
@@ -261,7 +266,7 @@ def keep_suspect(request: Request, transaction_id: int, session: SessionDep) -> 
 
 
 @router.post("/import/suspects/{transaction_id}/delete")
-def delete_suspect(request: Request, transaction_id: int, session: SessionDep) -> Response:
+def delete_suspect(request: Request, transaction_id: RowId, session: SessionDep) -> Response:
     """The user says the charge duplicates one Plaid has: delete the CSV row."""
     if not csv_import.delete_suspect(session, transaction_id):
         raise HTTPException(404)
@@ -272,21 +277,31 @@ def delete_suspect(request: Request, transaction_id: int, session: SessionDep) -
 # --------------------------------------------------------------------------- attaching
 
 
+def _row_id(value: object) -> int | None:
+    """A posted row id, or ``None`` unless it is a number that can name a row."""
+    text = value.strip() if isinstance(value, str) else ""
+    if not (text.isascii() and text.isdigit()):
+        return None
+    number = int(text)
+    return number if 1 <= number <= MAX_ID else None
+
+
 @router.post("/import/attach")
 def attach_account(request: Request, session: SessionDep, form: FormDep) -> Response:
     """Move a CSV-only account's history onto a linked card, then reconcile."""
-    manual = str(form.get("manual_id", ""))
-    target = str(form.get("account_id", ""))
-    if not (manual.isdigit() and target.isdigit()):
+    manual = _row_id(form.get("manual_id"))
+    target = _row_id(form.get("account_id"))
+    if manual is None or target is None:
         return redirect(request, "/import", "error", "Choose the linked card to attach to.")
     try:
-        result = reconcile.attach_manual_account(session, int(manual), int(target))
+        result = reconcile.attach_manual_account(session, manual, target)
     except reconcile.AttachError as exc:
         session.rollback()
         return redirect(request, "/import", "error", str(exc))
     session.commit()
     paired = result.reconcile.paired
-    text = f"Attached: {result.moved_transactions:,} transactions moved to the linked card"
+    moved = result.moved_transactions
+    text = f"Attached: {moved:,} transaction{'' if moved == 1 else 's'} moved to the linked card"
     if paired:
         text += f", {paired:,} merged with the same Plaid transactions"
     if result.reconcile.suspects_flagged:

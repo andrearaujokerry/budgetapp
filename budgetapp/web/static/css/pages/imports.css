@@ -112,6 +112,15 @@
   flex-wrap: nowrap;
 }
 
+/* A held row whose charge Plaid still shows as pending (it merges once that posts). */
+.table .suspect-pending {
+  color: var(--accent-text);
+}
+
+.suspect-pending .icon {
+  vertical-align: -2px;
+}
+
 /* The file a held row came from: one line, cut with an ellipsis (the full name is its title). */
 .table .import-file {
   --truncate-w: 12rem;
