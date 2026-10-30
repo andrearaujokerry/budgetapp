@@ -63,7 +63,7 @@ from budgetapp.plaid_gateway import (
     PlaidGatewayError,
     item_status_for,
 )
-from budgetapp.services import alerts, reconcile, userstate
+from budgetapp.services import alerts, reconcile, statements, userstate
 from budgetapp.services.background import run_steps
 from budgetapp.services.categorize import Categorizer, apply_carried_state, apply_decision
 from budgetapp.services.events import SyncOutcome
@@ -1100,13 +1100,16 @@ def snapshot_statement(
     """Record a Liabilities statement snapshot (ARCHITECTURE §5 statements).
 
     Upsert on ``(account_id, plaid_issue_date)``; else attach to the row whose ``closing_date`` is
-    within 7 days (rows without an issue date first, then the closest); else insert. A ``user``
-    closing date or a ``user`` reported balance is never changed, nor anything typed from the PDF.
+    within ``statements.SAME_STATEMENT_DAYS`` (10) days, the distance under which the Statements
+    page treats two closing dates as one statement (rows without an issue date first, then the
+    closest); else insert. A ``user`` closing date or a ``user`` reported balance is never
+    changed, nor anything typed from the PDF.
     """
     rows = list(session.scalars(select(Statement).where(Statement.account_id == account.id)))
     row = next((r for r in rows if r.plaid_issue_date == issue_date), None)
     if row is None:
-        near = [r for r in rows if abs((r.closing_date - issue_date).days) <= 7]
+        same = statements.SAME_STATEMENT_DAYS
+        near = [r for r in rows if abs((r.closing_date - issue_date).days) <= same]
         near.sort(
             key=lambda r: (r.plaid_issue_date is not None, abs((r.closing_date - issue_date).days))
         )

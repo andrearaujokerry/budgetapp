@@ -403,8 +403,11 @@ from the same date, and vice versa.
 | notes | text | |
 
 A snapshot upserts on `(account_id, plaid_issue_date)`; if no row has that issue date, it
-attaches to a row whose `closing_date` is within 7 days, else inserts a new row. A period's start
-is always derived (previous `closing_date` + 1 day), never stored, except the override above.
+attaches to a row whose `closing_date` is within 10 days, else inserts a new row. Two closing dates
+within 10 days are one statement everywhere: generated dates that near a stored one are dropped
+(§6), and the Statements page refuses to add one that near (moving one onto the other combines
+them). A period's start is always derived (previous `closing_date` + 1 day), never stored, except
+the override above.
 
 ### Other tables
 - **app_settings** (single row, `id = 1`): `budget_period_mode` (`calendar` \| `statement`,

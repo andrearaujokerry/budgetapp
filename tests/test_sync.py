@@ -32,6 +32,7 @@ from budgetapp.services import (
     csv_import,
     reconcile,
     spending,
+    statements,
     sync,
     userstate,
 )
@@ -952,6 +953,31 @@ def test_a_snapshot_moves_a_liabilities_closing_date_to_the_issue_date(linked, d
         dt.date(2026, 10, 3),
         Decimal("1500.00"),
     )
+
+
+def test_a_snapshot_near_a_typed_closing_date_is_that_statement(linked, db):
+    """The Statements page treats closing dates within 10 days as one statement (it refuses to
+    add one that near, and moving one onto the other combines them). A snapshot 9 days from the
+    date the user typed attaches to it, instead of making two short flagged cycles."""
+    account = make_account_for(linked)
+    typed = make_statement(db, account, "2026-10-12", closing_date_source="user")
+    linked.sync()  # Amex's statement was issued Oct 3
+    db.expire_all()
+    rows = [
+        (r.id, r.closing_date, r.closing_date_source, r.plaid_issue_date)
+        for r in db.scalars(select(Statement))
+    ]
+    assert rows == [(typed.id, dt.date(2026, 10, 12), "user", dt.date(2026, 10, 3))]
+    shown = statements.cycles(db, account.id, start=dt.date(2026, 8, 1), end=NOW.date())
+    assert [c.flagged for c in shown] == [False] * len(shown)
+
+
+def test_a_snapshot_further_from_a_typed_closing_date_is_another_statement(linked, db):
+    account = make_account_for(linked)
+    make_statement(db, account, "2026-10-14", closing_date_source="user")  # 11 days away
+    linked.sync()
+    dates = sorted(db.scalars(select(Statement.closing_date)))
+    assert dates == [dt.date(2026, 10, 3), dt.date(2026, 10, 14)]
 
 
 @pytest.mark.parametrize(
