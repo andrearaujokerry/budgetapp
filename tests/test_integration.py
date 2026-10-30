@@ -2,18 +2,27 @@
 
 * Statement-mode budget periods (BUD, and the "this period" views of TXN and CAT) are exactly the
   Statements page's cycles (STMT), user-typed closing dates and period start included.
+* A category merge (CAT) writes a budget where the Budgets page (BUD) writes an edit.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 
 import pytest
 
 from budgetapp.periods import STATEMENT
 from budgetapp.services import budgets, categories, statements
 from budgetapp.services import transactions as txns
-from tests.factories import make_account, make_statement, set_app_settings
+from tests.factories import (
+    get_category,
+    make_account,
+    make_budget,
+    make_category,
+    make_statement,
+    set_app_settings,
+)
 
 TODAY = dt.date(2026, 10, 20)
 
@@ -68,3 +77,21 @@ def test_statement_mode_budget_periods_are_the_statements_pages_cycles(db, card)
     assert (previous.start, previous.end) == spans[1]
     assert budgets.previous_period(db, previous).start == spans[2][0]
     assert budgets.next_period(db, previous) == current
+
+
+def test_a_merge_starts_the_budget_where_a_budgets_page_edit_would(db, card):
+    """A merge target with no budget now takes the source's, from ``budgets.edit_day`` of the
+    current cycle (its middle day), the date a Budgets page edit of that cycle writes."""
+    coffee, cafes = make_category(db, "Coffee"), make_category(db, "Cafes")
+    make_budget(db, coffee, None, effective_from=dt.date(2026, 1, 1))  # no budget now
+    make_budget(db, cafes, "100.00", effective_from=dt.date(2026, 1, 1))
+    cycle = budgets.current_period(db)  # Sep 30 – Oct 27, after the user's Sep 29 statement
+    edit = budgets.set_budget(db, get_category(db, "Groceries").id, Decimal("80.00"))
+    plan = categories.merge_preview(db, cafes.id, coffee.id).counts.budgets
+    assert plan.action == "take_source"
+    assert plan.effective_from == edit.row.effective_from == budgets.edit_day(cycle)
+    assert plan.effective_from == dt.date(2026, 10, 13)
+    categories.merge_categories(db, cafes.id, coffee.id)
+    line = budgets.overview(db, cycle).line_for(coffee.id)
+    assert line is not None and line.budget == Decimal("100.00")
+    assert budgets.overview(db, budgets.previous_period(db, cycle)).line_for(coffee.id) is None

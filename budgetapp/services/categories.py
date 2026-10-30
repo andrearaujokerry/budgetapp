@@ -63,7 +63,7 @@ from budgetapp.models import (
     v_allocations,
 )
 from budgetapp.money import ZERO
-from budgetapp.periods import STATEMENT, Period
+from budgetapp.periods import Period
 from budgetapp.services import budgets, spending, userstate
 from budgetapp.services.categorize import (
     CREDIT_KEY_SUFFIX,
@@ -636,14 +636,11 @@ def _budget_now(session: Session, category_id: int, ends: Mapping[str, dt.date])
 
 
 def _budget_start(period: Period, kind: str) -> dt.date:
-    """Where a budget for the current ``period`` starts, as the Budgets page writes an edit: the
-    period's start, or a statement cycle's middle day (its start moves when a closing date is
-    corrected, and a row there would change the cycle before). An annual budget starts no earlier
-    than January 1, so last year's annual amount stays as it was."""
-    if period.kind == STATEMENT:
-        start = period.start + dt.timedelta(days=(period.days - 1) // 2)
-    else:
-        start = period.start
+    """Where a budget for the current ``period`` starts: where the Budgets page writes an edit
+    (``budgets.edit_day``: the period's start, or a statement cycle's middle day, since a cycle's
+    start moves when a closing date is corrected). An annual budget starts no earlier than
+    January 1, so last year's annual amount stays as it was."""
+    start = budgets.edit_day(period)
     if kind == "annual":
         start = max(start, dt.date(clock.today().year, 1, 1))
     return start
