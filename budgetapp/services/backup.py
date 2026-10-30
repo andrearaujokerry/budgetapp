@@ -10,23 +10,30 @@ are kept. The folder is 0700 and every dump 0600. ``--if-due`` skips when the ne
 is under 20 hours old. A failed backup, or a newest dump older than 26 hours, notifies once a day
 (a marker file: the database may be the thing that is down).
 
+The copies a restore takes of the data it replaces (``<db>-<timestamp>-pre-restore.dump``) are a
+separate set: they never count toward the 30 nightly/manual backups, nor toward "due" or "stale",
+and the newest 5 are kept, pruned only after a restore succeeds. Taking one never deletes anything,
+so a restore can never delete the backup it was asked to restore.
+
 **Restore** (``./run restore FILE``) replaces the environment's database with a dump of that same
 database, in ONE transaction, so it either completes or changes nothing:
 
 1. the dump is verified (full read) and its database name must be this environment's (a
    production dump never lands in Sandbox or the other way round); a dump made by a newer version
    of the app (an unknown schema revision) is refused;
-2. production: the web, sync and backup agents are stopped (and started again at the end);
-3. a running sync (a connection holding a sync lock) is never interrupted: the restore is
-   refused; other sessions on the database are refused (listed), or ended with
-   ``force_disconnect``;
-4. the sync lock of every Item is held until the end, so no sync can start in between;
-5. a pre-restore dump of the current data is taken and verified (``…-pre-restore.dump``);
-6. ``pg_restore`` writes the dump as SQL to a private temporary file (checked complete), then
-   ``psql --single-transaction`` drops everything in the ``public`` schema, replays the script and
+2. ``pg_restore`` writes the dump as SQL to a private temporary file (checked complete): from here
+   on the restore no longer needs the dump file;
+3. the sync lock of every Item is taken and held until the end, BEFORE any agent stops: a running
+   sync is never interrupted (the restore is refused), and a sync that starts meanwhile records
+   ``skipped``;
+4. production: the web, sync and backup agents are stopped (and started again at the end);
+5. other sessions on the database are refused (listed), or ended with ``force_disconnect``;
+6. a copy of the current data is taken and verified (``…-pre-restore.dump``), unless the caller
+   explicitly skips it (``safety_copy=False``: a database ``pg_dump`` can no longer read);
+7. ``psql --single-transaction`` drops everything in the ``public`` schema, replays the script and
    checks the result before COMMIT. Objects are created by, and so owned by, the environment's role
    (``--no-owner``); the database itself (owner, ``CONNECT`` revoked from ``PUBLIC``) is untouched;
-7. the schema guard reports whether the restored data needs an upgrade.
+8. the schema guard reports whether the restored data needs an upgrade.
 
 Callers (the CLI) ask for the typed confirmation; the functions here never prompt.
 """
@@ -45,7 +52,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Connection, Engine, func, select, text
 from sqlalchemy.pool import NullPool
 
 from budgetapp import clock, db, secrets
@@ -56,6 +63,8 @@ from budgetapp.services.notify import Notifier
 log = logging.getLogger(__name__)
 
 DEFAULT_KEEP = 30
+#: Copies of replaced data kept by restores (a separate set; never counted toward DEFAULT_KEEP).
+PRE_RESTORE_KEEP = 5
 DUE_AFTER = dt.timedelta(hours=20)
 STALE_AFTER = dt.timedelta(hours=26)
 #: A temporary file older than this is left over from a killed run and is removed.
@@ -84,6 +93,13 @@ class BackupError(Exception):
 
 class RestoreRefused(Exception):
     """The restore was not started, or stopped before anything changed; the message says why."""
+
+
+class SafetyCopyFailed(RestoreRefused):
+    """The copy of the current data could not be made, so nothing was restored.
+
+    The CLI then offers ``--without-safety-copy`` (a database ``pg_dump`` can no longer read).
+    """
 
 
 class RestoreFailed(Exception):
@@ -126,8 +142,12 @@ def parse_backup_name(path: Path) -> tuple[str, dt.datetime, int, bool] | None:
     return match["db"], created, int(match["seq"] or 0), match["pre"] is not None
 
 
-def list_backups(settings: Settings) -> list[Backup]:
-    """Verified dumps of this environment's database, newest first (temporary files ignored)."""
+def list_backups(settings: Settings, *, pre_restore: bool | None = None) -> list[Backup]:
+    """Verified dumps of this environment's database, newest first (temporary files ignored).
+
+    ``pre_restore``: ``None`` lists every dump, ``False`` only the backups (nightly or
+    ``./run backup``), ``True`` only the copies restores took of the data they replaced.
+    """
     directory = backup_dir(settings)
     found: list[Backup] = []
     try:
@@ -137,6 +157,8 @@ def list_backups(settings: Settings) -> list[Backup]:
     for path in entries:
         parsed = parse_backup_name(path)
         if parsed is None or parsed[0] != settings.db_name:
+            continue
+        if pre_restore is not None and parsed[3] != pre_restore:
             continue
         try:
             stat = path.stat()
@@ -151,14 +173,16 @@ def list_backups(settings: Settings) -> list[Backup]:
 
 
 def newest_backup(settings: Settings) -> Backup | None:
-    backups = list_backups(settings)
+    """The newest backup (pre-restore copies don't count: they say nothing about whether the
+    nightly backups work, and they hold the data a restore replaced)."""
+    backups = list_backups(settings, pre_restore=False)
     return backups[0] if backups else None
 
 
 def is_due(
     settings: Settings, *, min_age: dt.timedelta = DUE_AFTER, now: dt.datetime | None = None
 ) -> bool:
-    """True when there is no verified dump younger than ``min_age`` (default 20 h)."""
+    """True when there is no verified backup younger than ``min_age`` (default 20 h)."""
     newest = newest_backup(settings)
     return newest is None or newest.age(now) >= min_age
 
@@ -363,18 +387,41 @@ def _fsync_dir(directory: Path) -> None:
             os.close(fd)
 
 
-def rotate(settings: Settings, keep: int = DEFAULT_KEEP) -> list[Path]:
-    """Delete all but the ``keep`` newest verified dumps; returns the removed paths."""
+def _remove_all_but(
+    backups: Sequence[Backup], keep: int, protect: Sequence[Path] = ()
+) -> list[Path]:
     if keep < 1:
         raise ValueError("keep at least one backup")
+    protected = {Path(p).resolve(strict=False) for p in protect}
     removed = []
-    for backup in list_backups(settings)[keep:]:
+    for backup in backups[keep:]:
+        if backup.path.resolve(strict=False) in protected:
+            continue
         try:
             backup.path.unlink()
         except FileNotFoundError:
             continue
         removed.append(backup.path)
     return removed
+
+
+def rotate(
+    settings: Settings, keep: int = DEFAULT_KEEP, *, protect: Sequence[Path] = ()
+) -> list[Path]:
+    """Delete all but the ``keep`` newest backups; returns the removed paths.
+
+    Pre-restore copies are never touched (see :func:`prune_pre_restore`), nor are ``protect``ed
+    paths.
+    """
+    return _remove_all_but(list_backups(settings, pre_restore=False), keep, protect)
+
+
+def prune_pre_restore(
+    settings: Settings, keep: int = PRE_RESTORE_KEEP, *, protect: Sequence[Path] = ()
+) -> list[Path]:
+    """Delete all but the ``keep`` newest pre-restore copies, never a ``protect``ed path (the
+    file a restore just read may itself be a pre-restore copy: an undo)."""
+    return _remove_all_but(list_backups(settings, pre_restore=True), keep, protect)
 
 
 def fix_permissions(settings: Settings) -> list[Path]:
@@ -425,6 +472,10 @@ def run_backup(
 ) -> BackupResult:
     """Dump the environment's database into its backup folder (see the module docstring).
 
+    A backup then rotates the backups (newest ``keep`` stay). A ``pre_restore`` copy deletes
+    nothing: it is taken while a restore may be reading the oldest backup, and the restore prunes
+    its own copies once it has succeeded.
+
     Raises :class:`BackupError` when the dump or its verification fails; the temporary file is
     removed, so nothing unverified ever carries a final name.
     """
@@ -465,7 +516,7 @@ def run_backup(
             temporary.unlink()
         raise
     seconds = time.monotonic() - started
-    removed = tuple(rotate(settings, keep))
+    removed = () if pre_restore else tuple(rotate(settings, keep))
     size = final.stat().st_size
     log.info(
         "backup %s (%d bytes, %.1f s); removed %d old", final.name, size, seconds, len(removed)
@@ -478,7 +529,7 @@ def run_backup(
         info=info,
         removed=removed,
         newest=newest_backup(settings),
-        kept=len(list_backups(settings)),
+        kept=len(list_backups(settings, pre_restore=pre_restore)),
     )
 
 
@@ -568,6 +619,8 @@ class RestorePlan:
 
 @dataclass(frozen=True, slots=True)
 class RestoreResult:
+    """What :func:`restore` did. ``pre_restore`` is ``None`` when the copy was skipped."""
+
     path: Path
     pre_restore: BackupResult | None
     seconds: float
@@ -577,6 +630,7 @@ class RestoreResult:
     stopped_agents: tuple[str, ...]
     restarted_agents: tuple[str, ...]
     terminated: tuple[SessionInfo, ...]
+    pruned: tuple[Path, ...] = ()
 
 
 class AgentControl(Protocol):
@@ -661,8 +715,9 @@ def sync_lock_holders(engine: Engine) -> list[int]:
         return [int(pid) for pid in conn.execute(query, {"namespace": db.LOCK_NS_SYNC}).scalars()]
 
 
-def other_sessions(engine: Engine) -> list[SessionInfo]:
-    """Client connections to the engine's database other than this one."""
+def other_sessions(engine: Engine, *, exclude: Sequence[int] = ()) -> list[SessionInfo]:
+    """Client connections to the engine's database other than this one (and ``exclude``: the
+    restore's own lock connection)."""
     query = text(
         "SELECT pid, usename, application_name, client_addr::text, state "
         "FROM pg_stat_activity "
@@ -671,7 +726,12 @@ def other_sessions(engine: Engine) -> list[SessionInfo]:
     )
     with engine.connect() as conn:
         rows = conn.execute(query).all()
-    return [SessionInfo(int(r[0]), r[1], r[2] or None, r[3], r[4]) for r in rows]
+    skip = set(exclude)
+    return [
+        SessionInfo(int(r[0]), r[1], r[2] or None, r[3], r[4])
+        for r in rows
+        if int(r[0]) not in skip
+    ]
 
 
 def terminate_sessions(
@@ -708,21 +768,58 @@ def item_ids(engine: Engine) -> list[int]:
         return [int(item_id) for item_id in rows]
 
 
+@dataclass(frozen=True, slots=True)
+class SyncLocks:
+    """The sync locks :func:`hold_sync_locks` holds: the Items, and the connection holding them."""
+
+    items: tuple[int, ...]
+    backend_pid: int | None  # None when there are no Items (nothing to hold)
+
+    @property
+    def pids(self) -> tuple[int, ...]:
+        return () if self.backend_pid is None else (self.backend_pid,)
+
+
+SYNC_RUNNING = "A sync is running right now. Try again in a few minutes. Nothing was changed."
+
+
+def _release_sync_locks(conn: Connection, held: Sequence[int]) -> None:
+    try:
+        for item_id in held:
+            if not conn.execute(select(func.pg_advisory_unlock(db.LOCK_NS_SYNC, item_id))).scalar():
+                conn.invalidate()  # closing the session releases whatever it still holds
+                break
+    except Exception:
+        log.warning("could not release the sync locks cleanly; discarding the connection")
+        conn.invalidate()
+    finally:
+        conn.close()
+
+
 @contextlib.contextmanager
-def hold_sync_locks(engine: Engine) -> Iterator[list[int]]:
+def hold_sync_locks(engine: Engine) -> Iterator[SyncLocks]:
     """Hold the sync lock of every Item (ARCHITECTURE §6) for the ``with`` block.
 
-    Raises :class:`RestoreRefused` when a sync is running (a lock is busy).
+    The same keys as ``db.sync_lock``, all on ONE dedicated autocommit connection whose pid is in
+    the result, so the restore never counts it as another session. Raises
+    :class:`RestoreRefused` when a sync is running (a lock is busy); nothing is held then.
     """
-    with contextlib.ExitStack() as stack:
-        held = []
-        for item_id in item_ids(engine):
-            if not stack.enter_context(db.sync_lock(engine, item_id)):
-                raise RestoreRefused(
-                    "A sync is running right now. Try again in a few minutes. Nothing was changed."
-                )
+    ids = item_ids(engine)
+    if not ids:
+        yield SyncLocks((), None)
+        return
+    conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+    held: list[int] = []
+    try:
+        pid = int(conn.execute(select(func.pg_backend_pid())).scalar_one())
+        for item_id in ids:
+            lock = func.pg_try_advisory_lock(db.LOCK_NS_SYNC, int(item_id))
+            if not conn.execute(select(lock)).scalar():
+                raise RestoreRefused(SYNC_RUNNING)
             held.append(item_id)
-        yield held
+        yield SyncLocks(tuple(held), pid)
+    finally:
+        _release_sync_locks(conn, held)
 
 
 #: Runs first inside the restore transaction: drop every object in ``public`` (also objects a
@@ -862,27 +959,67 @@ def upgrade_hint(settings: Settings) -> str:
     return "./run migrate"
 
 
+def _close_other_sessions(
+    settings: Settings,
+    engine: Engine,
+    locks: SyncLocks,
+    *,
+    force_disconnect: bool,
+    wait: float,
+    say: Callable[[str], None],
+) -> list[SessionInfo]:
+    """Refuse while other connections are open, or end them with ``force_disconnect``.
+
+    Stopped agents get ``wait`` seconds to close their pools first. The restore's own lock
+    connection never counts.
+    """
+    sessions = other_sessions(engine, exclude=locks.pids)
+    deadline = time.monotonic() + wait
+    while sessions and time.monotonic() < deadline:
+        time.sleep(0.5)
+        sessions = other_sessions(engine, exclude=locks.pids)
+    if sessions and not force_disconnect:
+        raise RestoreRefused(
+            f"{len(sessions)} other connection(s) to {settings.db_name} are open: "
+            + "; ".join(s.describe() for s in sessions)
+            + ". Close the app (and any psql session), or pass --force-disconnect to end "
+            "them. Nothing was changed."
+        )
+    if not sessions:
+        return []
+    terminated = terminate_sessions(engine, sessions)
+    say(f"Ended {len(terminated)} other connection(s) to {settings.db_name}.")
+    return terminated
+
+
 def restore(
     settings: Settings,
     plan: RestorePlan,
     *,
     force_disconnect: bool = False,
+    safety_copy: bool = True,
     agents: AgentControl | None = None,
     say: Callable[[str], None] = print,
     runner: Runner = subprocess.run,
     store: secrets.SecretStore | None = None,
     engine: Engine | None = None,
-    keep: int = DEFAULT_KEEP,
+    keep_pre_restore: int = PRE_RESTORE_KEEP,
 ) -> RestoreResult:
     """Replace the environment's database with ``plan`` (see the module docstring).
 
     The caller has already shown the plan and received the typed confirmation. ``say`` reports
-    each step as it happens. Raises :class:`RestoreRefused` (nothing changed) or
-    :class:`RestoreFailed` (rolled back); either way agents that were stopped are started again.
+    each step as it happens. ``safety_copy=False`` skips the copy of the current data (for a
+    database ``pg_dump`` can no longer read; the caller warns that it is not saved).
+
+    Raises :class:`RestoreRefused` (the database was not changed; :class:`SafetyCopyFailed` when
+    the copy of the current data failed) or :class:`RestoreFailed` (rolled back); either way
+    agents that were stopped are started again. Nothing in the backup folder is deleted unless
+    the restore succeeded, and never ``plan.path``.
     """
     started = time.monotonic()
     if settings.is_production and agents is None:
         raise RestoreRefused("A production restore needs the launchd agent control.")
+    script = ensure_backup_dir(settings) / f".restore-{os.getpid()}.sql{PARTIAL_SUFFIX}"
     own_engine = engine is None
     if engine is None:
         engine = db.make_engine(settings, poolclass=NullPool)
@@ -891,43 +1028,39 @@ def restore(
     terminated: list[SessionInfo] = []
     pre: BackupResult | None = None
     try:
-        if agents is not None:
-            stopped = agents.stop_app_agents()
-            if stopped:
-                say(f"Stopped the {', '.join(stopped)} agent(s) for the restore.")
-        if sync_lock_holders(engine):  # never interrupted, not even with --force-disconnect
-            raise RestoreRefused(
-                "A sync is running right now. Try again in a few minutes. Nothing was changed."
+        # The whole dump becomes the restore script first: from here on nothing needs the file.
+        write_restore_script(settings, plan, script, runner=runner)
+        # The locks come BEFORE any agent stops: a running sync refuses the restore instead of
+        # being killed by the bootout, and a sync an agent starts meanwhile records "skipped".
+        with hold_sync_locks(engine) as locks:
+            if locks.items:
+                say(f"Holding the sync lock of {len(locks.items)} Item(s) until the restore ends.")
+            if agents is not None:
+                stopped = agents.stop_app_agents()
+                if stopped:
+                    say(f"Stopped the {', '.join(stopped)} agent(s) for the restore.")
+            terminated = _close_other_sessions(
+                settings,
+                engine,
+                locks,
+                force_disconnect=force_disconnect,
+                wait=AGENT_EXIT_WAIT if stopped else 0,
+                say=say,
             )
-        sessions = other_sessions(engine)
-        deadline = time.monotonic() + (AGENT_EXIT_WAIT if stopped else 0)
-        while sessions and time.monotonic() < deadline:  # stopped agents close their pools
-            time.sleep(0.5)
-            sessions = other_sessions(engine)
-        if sessions and not force_disconnect:
-            raise RestoreRefused(
-                f"{len(sessions)} other connection(s) to {settings.db_name} are open: "
-                + "; ".join(s.describe() for s in sessions)
-                + ". Close the app (and any psql session), or pass --force-disconnect to end "
-                "them. Nothing was changed."
-            )
-        if sessions:
-            terminated = terminate_sessions(engine, sessions)
-            say(f"Ended {len(terminated)} other connection(s) to {settings.db_name}.")
-        with hold_sync_locks(engine) as held:
-            if held:
-                say(f"Holding the sync lock ({len(held)} connection(s)) until the restore ends.")
-            pre = run_backup(settings, pre_restore=True, keep=keep, runner=runner, store=store)
-            assert pre.path is not None
-            say(f"Saved the current data first (verified): {pre.path}")
-            script = backup_dir(settings) / f".restore-{os.getpid()}.sql{PARTIAL_SUFFIX}"
-            try:
-                write_restore_script(settings, plan, script, runner=runner)
-                say(f"Restoring {plan.path.name} into {settings.db_name} (one transaction)…")
-                apply_restore_script(settings, script, runner=runner, store=store)
-            finally:
-                with contextlib.suppress(OSError):
-                    script.unlink()
+            if safety_copy:
+                try:
+                    pre = run_backup(settings, pre_restore=True, runner=runner, store=store)
+                except BackupError as exc:
+                    raise SafetyCopyFailed(
+                        f"The copy of the current data failed ({exc}), so nothing was restored "
+                        "and the database was not changed."
+                    ) from exc
+                assert pre.path is not None
+                say(f"Saved the current data first (verified): {pre.path}")
+            else:
+                say("Not saving the current data first (--without-safety-copy).")
+            say(f"Restoring {plan.path.name} into {settings.db_name} (one transaction)…")
+            apply_restore_script(settings, script, runner=runner, store=store)
         say(f"Restored {plan.path.name} into {settings.db_name}.")
         try:
             db.schema_guard(engine)
@@ -939,13 +1072,22 @@ def restore(
                 f"{exc.code_revision}. Upgrade it with {upgrade_hint(settings)}."
             )
         counts = _counts(engine)
+        pruned = prune_pre_restore(settings, keep_pre_restore, protect=(plan.path,))
+        if pruned:
+            say(
+                f"Removed {len(pruned)} older pre-restore copy(ies); the newest "
+                f"{keep_pre_restore} are kept."
+            )
     finally:
+        with contextlib.suppress(OSError):
+            script.unlink()
         if agents is not None and stopped:
             try:
                 restarted = agents.start_agents(stopped)
                 if restarted:
                     say(f"Started the {', '.join(restarted)} agent(s) again.")
             except Exception as exc:  # report, never hide the restore's own outcome
+                restarted = list(getattr(exc, "started", ()))  # agents.AgentStartError
                 say(f"Could not start the agents again ({exc}); run ./run install-agents.")
         if own_engine:
             engine.dispose()
@@ -959,4 +1101,5 @@ def restore(
         stopped_agents=tuple(stopped),
         restarted_agents=tuple(restarted),
         terminated=tuple(terminated),
+        pruned=tuple(pruned),
     )

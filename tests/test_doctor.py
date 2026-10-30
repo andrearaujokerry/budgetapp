@@ -907,6 +907,20 @@ class TestBackups:
         check = prod.one(doctor.check_backups)
         assert check.status == FAIL and "is 27 h old" in check.title
 
+    def test_a_restore_copy_does_not_hide_stale_nightly_backups(self, prod, dr):
+        """A restore's copy of the replaced data says nothing about the nightly backups."""
+        dump(prod.settings, 27)
+        stamp = (NOW - dt.timedelta(hours=1)).strftime("%Y%m%dT%H%M%SZ")
+        dump(prod.settings, 1, name=f"budgetapp-{stamp}-pre-restore.dump")
+        check = prod.one(doctor.check_backups)
+        assert check.status == FAIL and "is 27 h old" in check.title
+        dump(dr.settings, 3)
+        dump(dr.settings, 1, name=f"{dr.settings.db_name}-{stamp}-pre-restore.dump", mode=0o644)
+        checks = [(c.status, c.title) for c in dr.run(doctor.check_backups)]
+        assert checks[0] == (FAIL, "1 dump(s) are readable by others")  # copies are checked too
+        assert checks[1][0] == PASS and checks[1][1].startswith("Newest verified backup 3 h ago")
+        assert "(1 kept in" in checks[1][1] and "plus 1 pre-restore copy(ies))" in checks[1][1]
+
     def test_partial_and_foreign_files_do_not_count(self, prod):
         directory = Path(prod.settings.backups_dir)
         dump(prod.settings, 1, name=".budgetapp-20261029T140000Z.dump.partial")

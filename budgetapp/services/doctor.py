@@ -1101,7 +1101,7 @@ def check_backups(ctx: DoctorContext) -> Iterable[Check]:
                 detail=str(directory),
                 fix=f"chmod 700 {_quote(directory)}",
             )
-    found = backups.list_backups(s)
+    found = backups.list_backups(s)  # every dump, pre-restore copies included
     loose = [b for b in found if (_mode(b.path) or 0) & 0o077]
     if loose:
         yield Check(
@@ -1110,7 +1110,10 @@ def check_backups(ctx: DoctorContext) -> Iterable[Check]:
             f"{len(loose)} dump(s) are readable by others",
             fix=f"chmod 600 {_quote(directory)}/*.dump",
         )
-    newest = found[0] if found else None
+    # Freshness is about the nightly backups: a restore's copy of replaced data doesn't count.
+    regular = [b for b in found if not b.pre_restore]
+    copies = len(found) - len(regular)
+    newest = regular[0] if regular else None
     if newest is None:
         yield Check(
             section,
@@ -1130,11 +1133,12 @@ def check_backups(ctx: DoctorContext) -> Iterable[Check]:
             fix=f"./run backup --env {s.env}; then read {s.logs_dir / 'backup.log'}",
         )
     else:
+        extra = f", plus {copies} pre-restore copy(ies)" if copies else ""
         yield Check(
             section,
             PASS,
             f"Newest verified backup {_hours(age)} ago "
-            f"({len(found)} kept in {_short(directory, ctx.home)})",
+            f"({len(regular)} kept in {_short(directory, ctx.home)}{extra})",
         )
 
 

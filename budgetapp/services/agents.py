@@ -4,11 +4,15 @@ macOS privacy protection (TCC) keeps launchd jobs out of ``~/Desktop``, where th
 lives, so production always runs a NON-editable install in
 ``~/Library/Application Support/budgetapp/venv`` (RESEARCH T5.2e):
 
-* :func:`upgrade_install` is the only way production code changes: refuse a dirty tree → stop the
-  web, sync and backup agents that are loaded → back up the production database →
-  ``pip install -r requirements.txt`` then ``pip install --no-deps <repo>`` into the install →
-  run the migrations FROM THE NEW INSTALL while holding the sync lock → write the install stamp
-  (the git commit, which ``doctor`` compares with the repository) → start the agents again.
+* :func:`upgrade_install` is the only way production code changes: refuse a dirty tree → export
+  the commit (``git archive``) into a private temporary folder → stop the web, sync and backup
+  agents that are loaded → back up the production database → ``pip install -r requirements.txt``
+  then ``pip install --no-deps`` from that export into the install → run the migrations FROM THE
+  NEW INSTALL while holding the sync lock → write the install stamp (the git commit, which
+  ``doctor`` compares with the repository) → start the agents again. The install is built from
+  the commit itself, never from the working tree, so a file saved during the upgrade can't
+  reach production under a clean stamp. When a step fails, the agents it stopped are started
+  again (best effort) before the error is raised.
 * :func:`launch_production` is ``./run live``: upgrade when the stamp differs from the
   repository's commit (or the production schema is behind), then open the web agent, or serve
   from the install when no web agent is installed.
@@ -16,7 +20,9 @@ lives, so production always runs a NON-editable install in
   ``uninstall-agents``: they write the plists (``plistlib``, checked with ``plutil -lint``, mode
   644) and bootstrap them in the order postgres → sync → backup → web, or boot them out in the
   reverse order (``pg_ctl stop -m fast`` before postgres, so smart shutdown never waits for the
-  app's pooled connections). Both have a dry run that only prints the plan.
+  app's pooled connections). Both have a dry run that only prints the plan. When an install
+  fails part-way, the agents that were loaded before it are loaded again (best effort) and the
+  output names any that still aren't, so scheduled syncs and backups never stop silently.
 
 The agents (labels ``local.budgetapp.<name>``) run the install with ``BUDGETAPP_ENV=production``,
 ``LC_ALL=C.UTF-8``, a PATH with PostgreSQL 18 and Homebrew, ``HOME`` and the data paths; their
@@ -37,6 +43,8 @@ import plistlib
 import shlex
 import shutil
 import subprocess
+import tarfile
+import tempfile
 import threading
 import time
 import urllib.error
@@ -86,6 +94,17 @@ class AgentError(Exception):
 
 class DirtyTreeError(AgentError):
     """The repository has changes that are not committed."""
+
+
+class AgentStartError(AgentError):
+    """Some agents could not be loaded; ``started`` are the ones that were, ``failed`` the rest."""
+
+    def __init__(
+        self, message: str, *, started: Sequence[str] = (), failed: Sequence[str] = ()
+    ) -> None:
+        super().__init__(message)
+        self.started = tuple(started)
+        self.failed = tuple(failed)
 
 
 def label(name: str) -> str:
@@ -308,14 +327,32 @@ class AgentController:
         return stopped
 
     def start_agents(self, names: Sequence[str]) -> list[str]:
-        started = []
+        """Bootstrap ``names`` (in install order) that have a plist and aren't loaded.
+
+        Every agent is tried; when some fail, :class:`AgentStartError` names them (and the ones
+        that did start) once all were tried.
+        """
+        started: list[str] = []
+        failed: list[str] = []
+        problems: list[str] = []
         for name in AGENTS:
             if name not in names or not self.layout.plist_path(name).exists():
                 continue
-            if self.launchctl.is_loaded(name):
+            try:
+                if self.launchctl.is_loaded(name):
+                    continue
+                self.launchctl.bootstrap(name, self.layout.plist_path(name))
+            except AgentError as exc:
+                failed.append(name)
+                problems.append(str(exc))
                 continue
-            self.launchctl.bootstrap(name, self.layout.plist_path(name))
             started.append(name)
+        if failed:
+            raise AgentStartError(
+                f"Could not start the {', '.join(failed)} agent(s): {'; '.join(problems)}",
+                started=started,
+                failed=failed,
+            )
         return started
 
 
@@ -592,7 +629,13 @@ def _default_backup(settings: Settings) -> Path | None:
     from budgetapp.services import backup
 
     _refuse_production_in_tests(settings)
-    return backup.run_backup(settings).path
+    try:
+        return backup.run_backup(settings).path
+    except backup.BackupError as exc:  # ./run live reports AgentError only
+        raise AgentError(
+            f"The backup before the upgrade failed ({exc}), so nothing was upgraded. "
+            "Check it with ./run doctor --env production."
+        ) from exc
 
 
 @contextlib.contextmanager
@@ -661,14 +704,37 @@ def ensure_venv(layout: Layout, runner: Runner, say: Callable[[str], None]) -> N
     say(f"Created the virtual environment {layout.install_dir} ({layout.python}).")
 
 
-def pip_install(layout: Layout, runner: Runner, say: Callable[[str], None]) -> None:
-    """The pinned dependencies, then the app itself (never editable)."""
-    assert layout.repo_dir is not None
+@contextlib.contextmanager
+def export_commit(layout: Layout, runner: Runner, commit: str) -> Iterator[Path]:
+    """The repository's files at ``commit`` (``git archive``), in a private temporary folder.
+
+    pip builds the install from this copy, never from the working tree: whatever is saved in the
+    checkout while the upgrade runs (minutes of ``pip install``), production gets exactly the
+    commit the install stamp records.
+    """
+    with tempfile.TemporaryDirectory(prefix="budgetapp-install-") as tmp:
+        archive = Path(tmp) / "source.tar"
+        result = _git(layout, runner, "archive", "--format=tar", f"--output={archive}", commit)
+        if result.returncode != 0:
+            raise AgentError(f"Could not export commit {commit[:12]}: {_detail(result)}")
+        source = Path(tmp) / "source"
+        try:
+            with tarfile.open(archive) as tar:
+                tar.extractall(source, filter="data")
+        except (tarfile.TarError, OSError) as exc:
+            raise AgentError(f"Could not unpack commit {commit[:12]}: {exc}") from exc
+        archive.unlink()
+        yield source
+
+
+def pip_install(layout: Layout, runner: Runner, say: Callable[[str], None], source: Path) -> None:
+    """The pinned dependencies, then the app itself (never editable), both from ``source``: the
+    commit exported by :func:`export_commit`."""
     pip = [str(layout.venv_python), "-I", "-m", "pip", "install", "--disable-pip-version-check"]
     pip += ["--no-input", "--quiet"]
     steps = (
-        ("the pinned dependencies", [*pip, "-r", str(layout.repo_dir / "requirements.txt")]),
-        ("the app", [*pip, "--no-deps", "--force-reinstall", str(layout.repo_dir)]),
+        ("the pinned dependencies", [*pip, "-r", str(source / "requirements.txt")]),
+        ("the app", [*pip, "--no-deps", "--force-reinstall", str(source)]),
     )
     for what, argv in steps:
         result = _run(runner, argv, timeout=900, env=_install_env(layout), cwd=layout.data_dir)
@@ -687,6 +753,28 @@ def migrate_from_install(layout: Layout, runner: Runner) -> str:
     return lines[-1] if lines else "migrated"
 
 
+def start_again(
+    controller: AgentController, names: Sequence[str], say: Callable[[str], None]
+) -> list[str]:
+    """After a failure: start ``names`` again, best effort; says what happened and never raises
+    (the original error is the one to report)."""
+    try:
+        started = controller.start_agents(names)
+    except AgentStartError as exc:
+        started = list(exc.started)
+        say(
+            f"{str(exc).rstrip('.')}. Start them with ./run install-agents once the problem below "
+            "is fixed."
+        )
+    except Exception as exc:
+        log.warning("could not start the agents again: %s", exc)
+        say(f"Could not start the agents again ({exc}); run ./run install-agents.")
+        return []
+    if started:
+        say(f"Started the {', '.join(started)} agent(s) again.")
+    return started
+
+
 def upgrade_install(
     settings: Settings,
     *,
@@ -702,7 +790,10 @@ def upgrade_install(
     """Upgrade the Application Support install from the repository (see the module docstring).
 
     The only way production code and the production schema change. Raises :class:`AgentError`
-    (or :class:`DirtyTreeError`) before anything changes when a precondition fails.
+    (or :class:`DirtyTreeError`) before anything changes when a precondition fails. When a later
+    step fails, the agents it stopped are started again before the error is raised, whatever
+    ``restart`` says: ``restart=False`` only leaves them stopped after a SUCCESSFUL upgrade, for
+    a caller (``install_agents``) that reloads them itself.
     """
     if not settings.is_production:
         raise AgentError("The install always runs production; pass production settings.")
@@ -741,25 +832,30 @@ def upgrade_install(
         )
 
     controller = AgentController(layout, launchctl)
-    stopped = controller.stop_app_agents()
-    if stopped:
-        say(f"Stopped the {', '.join(stopped)} agent(s) for the upgrade.")
+    with export_commit(layout, runner, commit) as source:
+        say(f"Building the install from commit {commit[:12]} (git archive, not the working tree).")
+        stopped = controller.stop_app_agents()
+        if stopped:
+            say(f"Stopped the {', '.join(stopped)} agent(s) for the upgrade.")
+        try:
+            backup_path = backup(settings)
+            say(f"Backed up the production database: {backup_path}")
+            ensure_venv(layout, runner, say)
+            pip_install(layout, runner, say, source)
+            with lock(settings):
+                migration = migrate_from_install(layout, runner)
+            say(f"Migrations (from the install, under the sync lock): {migration}")
+            stamp = write_stamp(layout, commit, _python_version(layout, runner))
+            say(f"Install stamp: commit {stamp.short}.")
+        except BaseException:
+            if stopped:
+                start_again(controller, stopped, say)
+            raise
     restarted: list[str] = []
-    try:
-        backup_path = backup(settings)
-        say(f"Backed up the production database: {backup_path}")
-        ensure_venv(layout, runner, say)
-        pip_install(layout, runner, say)
-        with lock(settings):
-            migration = migrate_from_install(layout, runner)
-        say(f"Migrations (from the install, under the sync lock): {migration}")
-        stamp = write_stamp(layout, commit, _python_version(layout, runner))
-        say(f"Install stamp: commit {stamp.short}.")
-    finally:
-        if restart and stopped:
-            restarted = controller.start_agents(stopped)
-            if restarted:
-                say(f"Started the {', '.join(restarted)} agent(s) again.")
+    if restart and stopped:
+        restarted = controller.start_agents(stopped)
+        if restarted:
+            say(f"Started the {', '.join(restarted)} agent(s) again.")
     return UpgradeResult(
         commit=commit,
         previous_commit=previous.commit if previous else None,
@@ -970,7 +1066,10 @@ def install_agents(
     """``./run install-agents``: upgrade the install, write and (re)load the agents.
 
     Returns the plan's lines (also printed through ``say``). With ``dry_run`` nothing changes:
-    only ``git`` and ``launchctl print`` are read to make the plan.
+    only ``git`` and ``launchctl print`` are read to make the plan. When a step fails, the
+    agents that were loaded before the install are loaded again (best effort), PostgreSQL is
+    started again if the install stopped it, and ``say`` names whatever is still not running;
+    then the error is raised.
     """
     if not settings.is_production:
         raise AgentError("The agents always run production; pass production settings.")
@@ -983,19 +1082,23 @@ def install_agents(
     wanted = _wanted(with_web)
     loaded = {name: launchctl.is_loaded(name) for name in AGENTS}
     commit = repo_commit(layout, runner)
+    progress = {"database_up": False}
+
+    def start_database() -> None:
+        say(f"     PostgreSQL: {ensure_database(settings, layout, launchctl, cluster)}")
+        progress["database_up"] = True
 
     steps: list[PlanStep] = [
         PlanStep(
             "Make sure PostgreSQL is running (the upgrade backs up and migrates the database)",
-            lambda: say(
-                f"     PostgreSQL: {ensure_database(settings, layout, launchctl, cluster)}"
-            ),
+            start_database,
         ),
         PlanStep(
             f"Upgrade the production install in {layout.install_dir} to commit {commit[:12]}: "
-            "stop the sync/backup/web agents, back up the production database, pip install -r "
-            "requirements.txt, pip install --no-deps (never editable), run the migrations from "
-            "the install under the sync lock, write the install stamp",
+            "export that commit with git archive, stop the sync/backup/web agents, back up the "
+            "production database, pip install -r requirements.txt and pip install --no-deps from "
+            "the export (never the working tree, never editable), run the migrations from the "
+            "install under the sync lock, write the install stamp",
             lambda: upgrade(
                 settings, layout=layout, runner=runner, launchctl=launchctl, restart=False, say=say
             ),
@@ -1025,26 +1128,96 @@ def install_agents(
     for name in wanted:
         steps.append(
             PlanStep(
-                f"launchctl bootstrap {launchctl.domain} {layout.plist_path(name)} — "
-                f"{DESCRIPTIONS[name]}",
+                f"launchctl bootstrap {launchctl.domain} "
+                f"{shlex.quote(str(layout.plist_path(name)))} — {DESCRIPTIONS[name]}",
                 lambda name=name: _bootstrap(settings, name, layout, launchctl, cluster),
             )
         )
     lines = [step.text for step in steps]
     say("Plan (dry run, nothing changes):" if dry_run else "Installing the launchd agents:")
-    for number, step in enumerate(steps, 1):
-        say(f"  {number}. {step.text}")
-        if dry_run:
-            continue
-        assert step.action is not None
-        step.action()
-    if not dry_run:
-        say(
-            "Done. macOS shows “Background Items Added”: keep Budget Tracker allowed in System "
-            "Settings → General → Login Items & Extensions. Check everything with "
-            "./run doctor --env production."
+    if dry_run:
+        for number, step in enumerate(steps, 1):
+            say(f"  {number}. {step.text}")
+        return lines
+    try:
+        for number, step in enumerate(steps, 1):
+            say(f"  {number}. {step.text}")
+            assert step.action is not None
+            step.action()
+    except BaseException:
+        _recover_failed_install(
+            settings,
+            layout,
+            launchctl,
+            cluster,
+            was_loaded=loaded,
+            wanted=wanted,
+            database_was_up=progress["database_up"],
+            say=say,
         )
+        raise
+    say(
+        "Done. macOS shows “Background Items Added”: keep Budget Tracker allowed in System "
+        "Settings → General → Login Items & Extensions. Check everything with "
+        "./run doctor --env production."
+    )
     return lines
+
+
+def _recover_failed_install(
+    settings: Settings,
+    layout: Layout,
+    launchctl: Launchctl,
+    cluster: Cluster,
+    *,
+    was_loaded: dict[str, bool],
+    wanted: Sequence[str],
+    database_was_up: bool,
+    say: Callable[[str], None],
+) -> None:
+    """After a failed install: put back what ran before it, best effort, and say what doesn't.
+
+    Every agent that was loaded before the install and isn't now is bootstrapped again
+    (postgres first) from the plist on disk; the app agents cope with a database that isn't up
+    yet, so they are loaded whatever PostgreSQL's state. A web agent removed on purpose (no
+    ``--with-web``) stays removed. PostgreSQL is started again with ``pg_ctl`` only when the
+    install had it running, no agent manages it now and it is down. Never raises: the install's
+    own error is the one to report.
+    """
+    started: list[str] = []
+    down: list[str] = []
+    for name in AGENTS:
+        if not was_loaded[name]:
+            continue
+        plist = layout.plist_path(name)
+        try:
+            if launchctl.is_loaded(name):
+                continue
+            if not plist.exists():
+                if name in wanted:  # it was loaded from a plist that is gone: can't put it back
+                    down.append(name)
+                continue
+            launchctl.bootstrap(name, plist)
+            started.append(name)
+        except Exception as exc:
+            log.warning("could not load the %s agent again: %s", name, exc)
+            down.append(name)
+    if database_was_up:
+        try:
+            if not launchctl.is_loaded("postgres") and not cluster.is_running(settings):
+                cluster.start(settings)
+                say("Started PostgreSQL again (it was running before the install).")
+        except Exception as exc:
+            log.warning("could not start PostgreSQL again: %s", exc)
+            say(f"PostgreSQL is not running ({exc}). Start it with ./run db start.")
+    if started:
+        say(f"Started the {', '.join(started)} agent(s) again (loaded before the install).")
+    if down:
+        say(
+            f"NOT running now: the {', '.join(down)} agent(s), which ran before the install, so "
+            "scheduled syncs and backups may be off. Fix the problem below, then run "
+            "./run install-agents again."
+        )
 
 
 def _hand_over_postgres(
@@ -1113,7 +1286,7 @@ def uninstall_agents(
         steps.append(
             PlanStep(
                 (f"launchctl bootout {launchctl.target(name)}; " if loaded else "")
-                + f"delete {layout.plist_path(name)}",
+                + f"delete {shlex.quote(str(layout.plist_path(name)))}",
                 lambda name=name: _remove_agent(name, layout, launchctl),
             )
         )

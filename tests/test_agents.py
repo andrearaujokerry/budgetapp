@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import io
 import plistlib
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,22 @@ from budgetapp.services import agents
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 OLD_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
+#: What the fake ``git archive`` exports for COMMIT.
+TREE = {
+    "requirements.txt": "fastapi==0.162.0\n",
+    "pyproject.toml": '[project]\nname = "budgetapp"\n',
+    "budgetapp/__init__.py": '__version__ = "0.1.0"\n',
+}
+
+
+def write_tar(path: Path, files: dict[str, str]) -> None:
+    with tarfile.open(path, "w") as tar:
+        for name, content in files.items():
+            data = content.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
 
 
 @pytest.fixture
@@ -58,6 +76,10 @@ class Mac:
         self.calls: list[tuple[list[str], dict]] = []
         self.fail_pip = False
         self.venv_runs = True
+        self.tree = dict(TREE)
+        #: Agents whose bootstrap fails ("Bootstrap failed: 5"); ``…_once`` only the first time.
+        self.fail_bootstrap: set[str] = set()
+        self.fail_bootstrap_once: set[str] = set()
 
     def _done(self, argv, code=0, out="", err=""):
         return subprocess.CompletedProcess(argv, code, out, err)
@@ -75,6 +97,12 @@ class Mac:
                 return self._done(argv, out=f"{self.commit}\n")
             if "status" in argv:
                 return self._done(argv, out=self.status)
+            if "archive" in argv:
+                self.events.append("git archive")
+                assert argv[-1] == self.commit  # the commit read at the start, never HEAD
+                output = next(a for a in argv if a.startswith("--output="))
+                write_tar(Path(output.split("=", 1)[1]), self.tree)
+                return self._done(argv)
         if "-m" in argv and argv[argv.index("-m") + 1] == "venv":
             self.events.append("venv")
             self.venv_runs = True
@@ -107,6 +135,9 @@ class Mac:
             return self._done(argv, out="disabled services = {\n" + "\n".join(lines) + "\n}\n")
         self.events.append(f"{verb} {name}")
         if verb == "bootstrap":
+            if name in self.fail_bootstrap or name in self.fail_bootstrap_once:
+                self.fail_bootstrap_once.discard(name)
+                return self._done(argv, 5, "", "Bootstrap failed: 5: Input/output error")
             self.loaded.add(name)
         elif verb == "bootout":
             if name not in self.loaded:
@@ -257,6 +288,18 @@ class TestSafety:
         with pytest.raises(agents.AgentError, match="never touch the production database"):
             agents._default_revision(prod)
         with pytest.raises(agents.AgentError, match="never touch the production database"):
+            agents._default_backup(prod)
+
+    def test_a_failed_backup_before_the_upgrade_is_an_agent_error(self, prod, monkeypatch):
+        """./run live reports AgentError only; a BackupError used to end in a traceback."""
+        from budgetapp.services import backup
+
+        def failing(settings, **kwargs):  # stands in for pg_dump: nothing touches real data
+            raise backup.BackupError("pg_dump failed: disk full")
+
+        monkeypatch.setattr(agents, "_refuse_production_in_tests", lambda settings: None)
+        monkeypatch.setattr(backup, "run_backup", failing)
+        with pytest.raises(agents.AgentError, match="disk full.*nothing was upgraded"):
             agents._default_backup(prod)
 
 
@@ -541,6 +584,7 @@ class TestUpgrade:
         mac = Mac(layout, loaded=("postgres", "sync", "backup", "web"), events=events)
         result = upgrade(prod, layout, mac, FakeDb(events))
         assert events == [
+            "git archive",  # before anything stops: a failed export changes nothing
             "bootout web",
             "bootout backup",
             "bootout sync",
@@ -561,8 +605,12 @@ class TestUpgrade:
         assert layout.stamp_path.stat().st_mode & 0o777 == 0o600
         pips = [argv for argv, _ in mac.calls if "pip" in argv]
         assert all("-e" not in argv and "--editable" not in argv for argv in pips)
-        assert pips[0][-2:] == ["-r", str(layout.repo_dir / "requirements.txt")]
-        assert pips[1][-3:] == ["--no-deps", "--force-reinstall", str(layout.repo_dir)]
+        # Both pip steps read the exported commit, never the working tree.
+        source = Path(pips[1][-1])
+        assert pips[0][-2:] == ["-r", str(source / "requirements.txt")]
+        assert pips[1][-3:-1] == ["--no-deps", "--force-reinstall"]
+        assert source.name == "source" and layout.repo_dir not in (source, *source.parents)
+        assert not source.exists()  # the temporary export is gone afterwards
         [(migrate, kwargs)] = [(a, k) for a, k in mac.calls if "migrate" in a]
         python = str(layout.install_dir / "bin" / "python")
         assert migrate == [python, "-I", "-m", "budgetapp", "migrate", "--env", "production"]
@@ -578,7 +626,7 @@ class TestUpgrade:
         layout.venv_python.parent.mkdir(parents=True)
         layout.venv_python.write_text("")
         upgrade(prod, layout, mac, FakeDb(events))
-        assert "venv" not in events and events[0] == "backup"
+        assert "venv" not in events and events[:2] == ["git archive", "backup"]
 
     def test_a_broken_install_is_rebuilt(self, prod, layout):
         events: list[str] = []
@@ -587,7 +635,7 @@ class TestUpgrade:
         layout.venv_python.parent.mkdir(parents=True)
         layout.venv_python.write_text("")
         upgrade(prod, layout, mac, FakeDb(events))
-        assert events[:3] == ["backup", "venv", "pip -r"]
+        assert events[:4] == ["git archive", "backup", "venv", "pip -r"]
         assert agents.read_stamp(layout).python == "3.14.2"
 
     @pytest.mark.parametrize(
@@ -646,6 +694,302 @@ class TestUpgrade:
     def test_only_production(self, layout):
         with pytest.raises(agents.AgentError, match="production"):
             agents.upgrade_install(load_settings("test"), layout=layout, runner=Mac(layout))
+
+    def test_a_failure_restarts_the_agents_even_for_a_caller_that_reloads_them(self, prod, layout):
+        """``restart=False`` (install-agents) only means "after a successful upgrade"."""
+        install_plists(layout)
+        events: list[str] = []
+        mac = Mac(layout, loaded=("sync", "backup"), events=events)
+        mac.fail_pip = True
+        with pytest.raises(agents.AgentError, match="pip could not install"):
+            upgrade(prod, layout, mac, FakeDb(events), restart=False)
+        assert events[-2:] == ["bootstrap sync", "bootstrap backup"]
+        assert mac.loaded == {"sync", "backup"}
+
+    def test_a_restart_that_fails_never_hides_the_upgrade_error(self, prod, layout):
+        install_plists(layout)
+        events: list[str] = []
+        mac = Mac(layout, loaded=("sync", "backup"), events=events)
+        mac.fail_pip = True
+        mac.fail_bootstrap = {"sync"}
+        fake_db = FakeDb(events)
+        said: list[str] = []
+        with pytest.raises(agents.AgentError, match="pip could not install"):
+            agents.upgrade_install(
+                prod,
+                layout=layout,
+                runner=mac,
+                backup=fake_db.backup,
+                lock=fake_db.lock,
+                revision=fake_db.revision,
+                say=said.append,
+            )
+        assert mac.loaded == {"backup"}
+        assert any(line.startswith("Could not start the sync agent(s)") for line in said)
+        assert "Started the backup agent(s) again." in said
+
+    def test_an_export_that_fails_changes_nothing(self, prod, layout):
+        events: list[str] = []
+        mac = Mac(layout, loaded=("sync",), events=events)
+
+        def runner(argv, **kwargs):
+            if "archive" in argv:
+                return subprocess.CompletedProcess(argv, 128, "", "fatal: not a valid object")
+            return mac(argv, **kwargs)
+
+        fake_db = FakeDb(events)
+        with pytest.raises(agents.AgentError, match="Could not export commit 0123456789ab"):
+            agents.upgrade_install(
+                prod,
+                layout=layout,
+                runner=runner,
+                launchctl=agents.Launchctl(501, mac),
+                backup=fake_db.backup,
+                lock=fake_db.lock,
+                revision=fake_db.revision,
+                say=lambda line: None,
+            )
+        assert events == [] and mac.loaded == {"sync"}
+
+
+def git_repo(path: Path, files: dict[str, str]) -> str:
+    """A real git repository with ``files`` committed (isolated from the user's git config);
+    returns the commit."""
+    for name, content in files.items():
+        target = path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    env = {
+        "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+        "HOME": str(path),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+    }
+    git = ["git", "-C", str(path)]
+    subprocess.run(["git", "init", "-q", str(path)], env=env, check=True)
+    subprocess.run([*git, "add", "--", *files], env=env, check=True)
+    subprocess.run(
+        [*git, "-c", "user.name=Test", "-c", "user.email=test@example.invalid"]
+        + ["commit", "-q", "--no-verify", "--no-gpg-sign", "-m", "test"],
+        env=env,
+        check=True,
+    )
+    head = subprocess.run(
+        [*git, "rev-parse", "HEAD"], env=env, check=True, capture_output=True, text=True
+    )
+    return head.stdout.strip()
+
+
+class TestBuildFromTheCommit:
+    """Review minor: pip built the install from the working tree after minutes of dependency
+    installs, so a file saved meanwhile reached production under the clean commit's stamp."""
+
+    def test_a_file_saved_during_the_upgrade_never_reaches_the_install(self, prod, tmp_path):
+        repo = tmp_path / "repo"
+        head = git_repo(repo, {**TREE, "budgetapp/__init__.py": 'VERSION = "committed"\n'})
+        layout = agents.Layout.for_settings(
+            prod, home=tmp_path / "home", repo_dir=repo, uid=501, python="/fake/python3.14"
+        )
+        events: list[str] = []
+        mac = Mac(layout, events=events, commit=head)
+        seen: dict[str, object] = {}
+
+        def runner(argv, **kwargs):
+            if Path(argv[0]).name == "git":
+                return subprocess.run(argv, **kwargs)  # the real repository
+            if "pip" in argv and "-r" in argv:  # dependencies install for minutes; a file is saved
+                (repo / "budgetapp" / "__init__.py").write_text('VERSION = "edited"\n')
+                (repo / "budgetapp" / "extra.py").write_text("NEW = 1\n")
+                seen["requirements"] = Path(argv[argv.index("-r") + 1]).read_text()
+            if "pip" in argv and "--no-deps" in argv:
+                source = Path(argv[-1])
+                seen["source"] = source
+                seen["installed"] = (source / "budgetapp" / "__init__.py").read_text()
+                seen["extra"] = (source / "budgetapp" / "extra.py").exists()
+            return mac(argv, **kwargs)
+
+        fake_db = FakeDb(events)
+        result = agents.upgrade_install(
+            prod,
+            layout=layout,
+            runner=runner,
+            launchctl=agents.Launchctl(501, mac),
+            backup=fake_db.backup,
+            lock=fake_db.lock,
+            revision=fake_db.revision,
+            say=lambda line: None,
+        )
+        assert seen["installed"] == 'VERSION = "committed"\n' and seen["extra"] is False
+        assert seen["requirements"] == TREE["requirements.txt"]
+        assert result.commit == head and agents.read_stamp(layout).commit == head
+        assert not Path(seen["source"]).exists()  # the private export is removed
+        # The edit is still in the checkout (for the next upgrade to refuse), not in production.
+        assert set(agents.dirty_paths(layout, runner)) == {
+            "budgetapp/__init__.py",
+            "budgetapp/extra.py",
+        }
+
+
+class TestAgentController:
+    def test_one_agent_that_cannot_start_does_not_keep_the_others_down(self, layout):
+        install_plists(layout)
+        mac = Mac(layout)
+        mac.fail_bootstrap = {"sync"}
+        controller = agents.AgentController(layout, agents.Launchctl(501, mac))
+        with pytest.raises(agents.AgentStartError, match="Could not start the sync agent") as info:
+            controller.start_agents(["web", "sync", "backup"])
+        assert info.value.started == ("backup", "web") and info.value.failed == ("sync",)
+        assert mac.loaded == {"backup", "web"}
+
+
+class TestInstallFailure:
+    """Review major: a failed ./run install-agents left the sync, backup and web agents booted
+    out, so syncs and nightly backups stopped, and so did the alerts that would report it."""
+
+    @staticmethod
+    def real_upgrade(events):
+        fake_db = FakeDb(events)
+        upgrade_install = agents.upgrade_install  # the real one, even once it is patched
+
+        def run(settings, **kwargs):
+            return upgrade_install(
+                settings,
+                backup=fake_db.backup,
+                lock=fake_db.lock,
+                revision=fake_db.revision,
+                **kwargs,
+            )
+
+        return run
+
+    @staticmethod
+    def install(prod, layout, mac, events, said, **kwargs):
+        return agents.install_agents(
+            prod,
+            layout=layout,
+            runner=mac,
+            cluster=kwargs.pop("cluster", None) or FakeCluster(events),
+            say=said.append,
+            **kwargs,
+        )
+
+    @pytest.mark.parametrize("with_web", [False, True])
+    def test_a_failed_upgrade_leaves_every_agent_as_it_was(self, prod, layout, with_web):
+        install_plists(layout)
+        events: list[str] = []
+        mac = Mac(layout, loaded=agents.AGENTS, events=events)
+        mac.fail_pip = True  # offline, PyPI down…
+        said: list[str] = []
+        with pytest.raises(agents.AgentError, match="pip could not install"):
+            self.install(
+                prod,
+                layout,
+                mac,
+                events,
+                said,
+                upgrade=self.real_upgrade(events),
+                with_web=with_web,
+            )
+        assert mac.loaded == set(agents.AGENTS)
+        assert "Started the sync, backup, web agent(s) again." in said
+        assert not any(line.startswith("NOT running") for line in said)
+
+    def test_a_failure_after_the_upgrade_loads_the_agents_again(self, prod, layout):
+        install_plists(layout)
+        events: list[str] = []
+        mac = Mac(layout, loaded=agents.AGENTS, events=events)
+        mac.fail_bootstrap_once = {"sync"}  # launchd refused it this once
+        said: list[str] = []
+        with pytest.raises(agents.AgentError, match="bootstrap local.budgetapp.sync failed"):
+            self.install(
+                prod, layout, mac, events, said, upgrade=self.real_upgrade(events), with_web=True
+            )
+        assert mac.loaded == set(agents.AGENTS)
+        assert (
+            said[-1] == "Started the sync, backup, web agent(s) again (loaded before the install)."
+        )
+
+    def test_an_agent_that_still_cannot_load_is_named(self, prod, layout):
+        install_plists(layout)
+        events: list[str] = []
+        mac = Mac(layout, loaded=agents.AGENTS, events=events)
+        mac.fail_bootstrap = {"sync"}
+        said: list[str] = []
+        with pytest.raises(agents.AgentError, match="bootstrap local.budgetapp.sync failed"):
+            self.install(prod, layout, mac, events, said, upgrade=self.real_upgrade(events))
+        assert mac.loaded == {"postgres", "backup"}  # web: removed on purpose (no --with-web)
+        assert not layout.plist_path("web").exists()
+        assert said[-2] == "Started the backup agent(s) again (loaded before the install)."
+        assert said[-1].startswith(
+            "NOT running now: the sync agent(s), which ran before the install, so scheduled "
+            "syncs and backups may be off."
+        )
+        assert said[-1].endswith("then run ./run install-agents again.")
+
+    def test_postgres_is_started_again_when_the_install_stopped_it(self, prod, layout):
+        """First install: PostgreSQL ran under pg_ctl; the hand-over stopped it, then launchd
+        refused the new agent."""
+        events: list[str] = []
+        mac = Mac(layout, events=events)
+        mac.fail_bootstrap = {"postgres"}
+        said: list[str] = []
+        with pytest.raises(agents.AgentError, match="bootstrap local.budgetapp.postgres failed"):
+            self.install(prod, layout, mac, events, said, upgrade=lambda settings, **kw: None)
+        assert events[-2:] == ["bootstrap postgres", "cluster start"]
+        assert "Started PostgreSQL again (it was running before the install)." in said
+        assert mac.loaded == set()
+
+    def test_a_loaded_postgres_agent_is_never_doubled_by_pg_ctl(self, prod, layout):
+        """PostgreSQL that launchd loaded but that didn't come up stays launchd's to start."""
+        install_plists(layout)
+        events: list[str] = []
+        mac = Mac(layout, loaded=("postgres",), events=events)
+        cluster = FakeCluster(events, ready=False)
+        said: list[str] = []
+        with pytest.raises(agents.AgentError, match="did not start under launchd"):
+            self.install(
+                prod, layout, mac, events, said, upgrade=lambda s, **kw: None, cluster=cluster
+            )
+        assert "postgres" in mac.loaded and events.count("cluster start") == 0
+
+    def test_a_failure_before_anything_stopped_changes_nothing(self, prod, layout):
+        install_plists(layout)
+        events: list[str] = []
+        mac = Mac(layout, loaded=agents.AGENTS, status=" M budgetapp/db.py\0", events=events)
+        said: list[str] = []
+        with pytest.raises(agents.DirtyTreeError):
+            self.install(prod, layout, mac, events, said, upgrade=self.real_upgrade(events))
+        assert mac.loaded == set(agents.AGENTS) and mac.launchd_verbs() == []
+        assert not any("again" in line or "NOT running" in line for line in said)
+
+    def test_ctrl_c_during_the_install_loads_the_agents_again(self, prod, layout):
+        install_plists(layout)
+        events: list[str] = []
+        mac = Mac(layout, loaded=agents.AGENTS, events=events)
+
+        def interrupted(settings, **kwargs):  # the upgrade had stopped the app agents
+            mac.loaded.difference_update({"sync", "backup", "web"})
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            self.install(prod, layout, mac, events, [], upgrade=interrupted, with_web=True)
+        assert mac.loaded == set(agents.AGENTS)
+
+    def test_the_command_says_what_is_still_stopped(self, monkeypatch, prod, layout, capsys):
+        install_plists(layout)
+        events: list[str] = []
+        mac = Mac(layout, loaded=agents.AGENTS, events=events)
+        mac.fail_bootstrap = {"sync", "backup"}
+        monkeypatch.setattr(agents, "default_layout", lambda settings: layout)
+        monkeypatch.setattr(agents, "default_runner", lambda: mac)
+        monkeypatch.setattr(agents, "Cluster", lambda: FakeCluster(events))
+        monkeypatch.setattr(agents, "upgrade_install", self.real_upgrade(events))
+        args = argparse.Namespace(with_web=True, dry_run=False)
+        assert agents_command.run_install(args, prod) == 1
+        out, err = capsys.readouterr()
+        assert "Started the web agent(s) again (loaded before the install)." in out
+        assert "NOT running now: the sync, backup agent(s)" in out
+        assert "error: launchctl bootstrap local.budgetapp.sync failed" in err
 
 
 class TestStamp:

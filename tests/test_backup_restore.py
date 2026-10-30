@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
+import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -14,7 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
-from budgetapp import db
+from budgetapp import cli, db
 from budgetapp.commands import backup as backup_command
 from budgetapp.config import load_settings
 from budgetapp.services import backup
@@ -310,7 +313,9 @@ class TestProductionAgents:
         assert result.stopped_agents == ("web", "backup", "sync")
         assert said[0] == "Stopped the web, backup, sync agent(s) for the restore."
         assert said[-1] == "Started the web, backup, sync agent(s) again."
-        assert tools.calls[0] == "pg_dump" and tools.calls[-1] == "psql"
+        # The dump is read into the script first, then the current data is copied (and
+        # verified twice), then the one-transaction replay.
+        assert tools.calls == ["pg_restore", "pg_dump", "pg_restore", "pg_restore", "psql"]
 
     def test_agents_start_again_after_a_failure(self, prod, scratch, tmp_path):
         _, engine = scratch
@@ -334,8 +339,17 @@ class TestProductionAgents:
 # --------------------------------------------------------------------------- command
 
 
-def restore_args(path, force=False):
-    return argparse.Namespace(file=str(path), force_disconnect=force)
+def restore_args(path, force=False, without_copy=False):
+    return argparse.Namespace(
+        file=str(path), force_disconnect=force, without_safety_copy=without_copy
+    )
+
+
+def parse_printed(command: str) -> argparse.Namespace:
+    """What the shell and ./run make of a printed ``./run …`` command line."""
+    argv = shlex.split(command)
+    assert argv[0] == "./run"
+    return cli.build_parser().parse_args(argv[1:])
 
 
 class TestRestoreCommand:
@@ -435,3 +449,253 @@ def test_restore_scripts_drop_functions_types_and_sequences_too(scratch):
 def test_no_backup_names_collide_with_the_live_clock():
     when = dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.UTC)
     assert when.strftime(backup.TIMESTAMP_FORMAT) == "20260102T030405Z"
+
+
+# --------------------------------------------------------------------------- review regressions
+
+
+def fill_with_newer_dumps(settings, count: int, start: dt.datetime) -> list[Path]:
+    """``count`` final-named files, a day apart after ``start`` (only names matter to rotation)."""
+    made = []
+    for day in range(1, count + 1):
+        when = start + dt.timedelta(days=day)
+        path = Path(settings.backups_dir) / f"{settings.db_name}-{when:%Y%m%dT%H%M%SZ}.dump"
+        path.write_bytes(b"PGDMP")
+        os.chmod(path, 0o600)
+        made.append(path)
+    return made
+
+
+class TestRestoreKeepsTheBackups:
+    """Review blocker: after 30 nights the folder holds exactly 30 dumps, and restoring the
+    OLDEST (the likely pick when the recent ones already hold the damage) deleted it: the copy
+    of the current data made 31 and the rotation removed the file about to be restored."""
+
+    @pytest.fixture
+    def thirty(self, scratch):
+        settings, engine = scratch
+        seed(engine, "Coffee")
+        start = dt.datetime.now(dt.UTC) - dt.timedelta(days=31)
+        oldest = backup.run_backup(settings, now=start).path
+        newer = fill_with_newer_dumps(settings, 29, start)
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM transactions"))
+        seed(engine, "Lunch")
+        assert len(backup.list_backups(settings)) == 30
+        return settings, engine, oldest, newer
+
+    def test_restoring_the_oldest_of_30_keeps_it_and_every_other_backup(self, thirty):
+        settings, engine, oldest, newer = thirty
+        plan = backup.inspect_backup(settings, oldest)
+        result = backup.restore(settings, plan, engine=engine, say=print)
+        assert names(engine) == ["Coffee"]
+        assert oldest.exists() and all(path.exists() for path in newer)
+        kept = [b.path for b in backup.list_backups(settings, pre_restore=False)]
+        assert len(kept) == 30 and kept[-1] == oldest
+        copies = [b.path for b in backup.list_backups(settings, pre_restore=True)]
+        assert copies == [result.pre_restore.path] and result.pruned == ()
+
+    def test_the_command_restores_the_oldest_of_30(self, thirty, monkeypatch, capsys):
+        settings, engine, oldest, newer = thirty
+        engine.dispose()
+        monkeypatch.setattr(backup_command, "prompt", lambda text: "test")
+        assert backup_command.run_restore(restore_args(oldest), settings) == 0
+        assert "Not restored" not in capsys.readouterr().err
+        assert oldest.exists() and names(engine) == ["Coffee"]
+
+    def test_failed_restores_delete_no_backup(self, thirty, monkeypatch):
+        settings, engine, oldest, newer = thirty
+        monkeypatch.setattr(backup, "_CHECK", "DO $x$ BEGIN RAISE EXCEPTION 'no'; END $x$;")
+        for _ in range(2):  # each failed attempt used to delete one more old dump
+            with pytest.raises(backup.RestoreFailed, match="database is unchanged"):
+                backup.restore(
+                    settings, backup.inspect_backup(settings, oldest), engine=engine, say=print
+                )
+        assert oldest.exists() and all(path.exists() for path in newer)
+        assert len(backup.list_backups(settings, pre_restore=True)) == 2  # both copies stay
+        assert names(engine) == ["Lunch"]
+
+    def test_the_dump_is_read_before_anything_else_happens(self, dumped, monkeypatch):
+        """Whatever happens to the file later, the restore already holds all of it."""
+        settings, engine, dump = dumped
+        plan = backup.inspect_backup(settings, dump)
+        real = backup.run_backup
+
+        def copy_then_lose_the_file(*args, **kwargs):
+            dump.unlink()  # e.g. a manual backup's rotation in another Terminal
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(backup, "run_backup", copy_then_lose_the_file)
+        backup.restore(settings, plan, engine=engine, say=print)
+        assert names(engine) == ["Coffee"]
+
+    def test_copies_are_pruned_after_success_but_never_the_restored_file(self, dumped):
+        settings, engine, dump = dumped
+        start = dt.datetime.now(dt.UTC) - dt.timedelta(days=10)
+        copies = [
+            backup.run_backup(settings, pre_restore=True, now=start + dt.timedelta(days=d)).path
+            for d in range(5)
+        ]
+        # An undo with the OLDEST copy: the pruning after it must not delete that copy.
+        first = backup.restore(
+            settings, backup.inspect_backup(settings, copies[0]), engine=engine, say=print
+        )
+        assert first.pruned == () and copies[0].exists()
+        assert len(backup.list_backups(settings, pre_restore=True)) == 6
+        said: list[str] = []
+        second = backup.restore(
+            settings, backup.inspect_backup(settings, dump), engine=engine, say=said.append
+        )
+        assert set(second.pruned) == {copies[0], copies[1]}
+        kept = {b.path for b in backup.list_backups(settings, pre_restore=True)}
+        assert kept == {second.pre_restore.path, first.pre_restore.path, *copies[2:]}
+        assert "Removed 2 older pre-restore copy(ies); the newest 5 are kept." in said
+        assert dump.exists() and names(engine) == ["Coffee"]
+
+
+class KillingAgents:
+    """``launchctl bootout`` ends the agents' processes, which releases a sync lock they held."""
+
+    def __init__(self, release):
+        self.release = release
+        self.events: list[str] = []
+
+    def stop_app_agents(self):
+        self.events.append("stop")
+        self.release()
+        return ["web", "backup", "sync"]
+
+    def start_agents(self, names):
+        self.events.append("start")
+        return list(names)
+
+
+class TestRestoreAndAgentSyncs:
+    """Review minor: the agents were booted out BEFORE the sync locks were checked, so a sync
+    the sync or web agent was running got killed instead of the restore being refused."""
+
+    @pytest.fixture
+    def linked(self, scratch):
+        settings, engine = scratch
+        seed(engine, "Coffee", item=True)
+        plan = backup.inspect_backup(settings, backup.run_backup(settings).path)
+        with engine.connect() as conn:
+            item_id = conn.execute(text("SELECT id FROM plaid_items")).scalar_one()
+        other = db.make_engine(settings, poolclass=NullPool)
+        yield settings, engine, plan, item_id, other
+        other.dispose()
+
+    def test_an_agent_sync_refuses_the_restore_before_any_agent_stops(self, linked):
+        settings, engine, plan, item_id, other = linked
+        with contextlib.ExitStack() as running_sync:
+            assert running_sync.enter_context(db.sync_lock(other, item_id))
+            control = KillingAgents(running_sync.close)
+            with pytest.raises(backup.RestoreRefused, match="A sync is running"):
+                backup.restore(settings, plan, agents=control, engine=engine, say=print)
+        assert control.events == []  # nothing stopped, so nothing was killed
+        assert list(Path(settings.backups_dir).glob("*-pre-restore.dump")) == []
+        assert names(engine) == ["Coffee"]
+
+    def test_a_sync_an_agent_starts_during_the_stop_is_skipped(self, linked):
+        settings, engine, plan, item_id, other = linked
+        seen: list[bool] = []
+
+        class StartingAgents(KillingAgents):
+            def stop_app_agents(self):  # the sync agent fires while launchd stops the others
+                with db.sync_lock(other, item_id) as acquired:
+                    seen.append(acquired)
+                return super().stop_app_agents()
+
+        control = StartingAgents(lambda: None)
+        said: list[str] = []
+        result = backup.restore(settings, plan, agents=control, engine=engine, say=said.append)
+        assert seen == [False]  # the lock was already the restore's: the run records "skipped"
+        assert control.events == ["stop", "start"] and result.terminated == ()
+        assert said[0] == "Holding the sync lock of 1 Item(s) until the restore ends."
+        assert said[1] == "Stopped the web, backup, sync agent(s) for the restore."
+
+
+class TestPrintedCommands:
+    """Review minor: the undo command printed an unquoted path, which the shell splits at the
+    space in ~/Library/Application Support."""
+
+    def test_the_undo_command_survives_the_shell_in_a_folder_with_a_space(
+        self, scratch, tmp_path, monkeypatch, capsys
+    ):
+        settings, engine = scratch
+        spaced = settings.replace(backups_dir=tmp_path / "Application Support" / "backups")
+        seed(engine, "Coffee")
+        dump = backup.run_backup(spaced).path
+        engine.dispose()
+        monkeypatch.setattr(backup_command, "prompt", lambda text: "test")
+        assert backup_command.run_restore(restore_args(dump), spaced) == 0
+        out = capsys.readouterr().out
+        line = next(x for x in out.splitlines() if x.startswith("To undo"))
+        args = parse_printed(line.split(": ", 1)[1])
+        assert args.command == "restore" and " " in args.file
+        assert Path(args.file).name.endswith("-pre-restore.dump") and Path(args.file).exists()
+
+    def test_production_commands_name_the_environment(self, tmp_path):
+        prod = load_settings(
+            "production", data_dir=tmp_path / "App Support" / "budgetapp", logs_dir=tmp_path
+        )
+        path = prod.backups_dir / "budgetapp-20261029T023000Z.dump"
+        command = backup_command.restore_command(
+            prod, path, force_disconnect=True, without_safety_copy=True
+        )
+        args = parse_printed(command)
+        assert Path(args.file) == path and args.env == "production"
+        assert args.force_disconnect and args.without_safety_copy
+        assert backup_command.restore_command(load_settings("test"), path).endswith(
+            shlex.quote(str(path))
+        )
+
+
+class TestWithoutSafetyCopy:
+    """Review minor: when pg_dump can't read the current data (a damaged table), the copy taken
+    first always failed and the restore was refused with no way forward."""
+
+    @pytest.fixture
+    def unreadable(self, scratch):
+        settings, engine = scratch
+        seed(engine, "Coffee")
+        good = backup.run_backup(settings).path
+        seed(engine, "Lunch")
+        with engine.begin() as conn:  # pg_dump now fails on this table, as on a damaged one
+            conn.execute(text("REVOKE SELECT ON transactions FROM CURRENT_USER"))
+        engine.dispose()
+        return settings, engine, good
+
+    def test_the_refusal_offers_the_explicit_override(self, unreadable, monkeypatch, capsys):
+        settings, engine, good = unreadable
+        monkeypatch.setattr(backup_command, "prompt", lambda text: "test")
+        assert backup_command.run_restore(restore_args(good, force=True), settings) == 1
+        err = capsys.readouterr().err
+        assert "Not restored: The copy of the current data failed (pg_dump failed:" in err
+        assert "permission denied for table transactions" in err
+        assert "the database was not changed" in err and "WITHOUT saving it first" in err
+        args = parse_printed(err.strip().splitlines()[-1])
+        assert Path(args.file) == good and args.without_safety_copy and args.force_disconnect
+        assert list(Path(settings.backups_dir).glob("*-pre-restore.dump")) == []
+
+    def test_the_override_restores_and_says_nothing_was_saved(
+        self, unreadable, monkeypatch, capsys
+    ):
+        settings, engine, good = unreadable
+        monkeypatch.setattr(backup_command, "prompt", lambda text: "test")
+        assert backup_command.run_restore(restore_args(good, without_copy=True), settings) == 0
+        out = capsys.readouterr().out
+        assert "the current data is NOT backed up first (--without-safety-copy)" in out
+        assert "Not saving the current data first (--without-safety-copy)." in out
+        assert "The data it replaced was not saved (--without-safety-copy)." in out
+        assert "To undo" not in out
+        assert names(engine) == ["Coffee"]
+        assert list(Path(settings.backups_dir).glob("*-pre-restore.dump")) == []
+
+    def test_the_service_skips_only_the_copy(self, unreadable):
+        settings, engine, good = unreadable
+        plan = backup.inspect_backup(settings, good)
+        with pytest.raises(backup.SafetyCopyFailed, match="permission denied"):
+            backup.restore(settings, plan, engine=engine, say=print)
+        result = backup.restore(settings, plan, engine=engine, say=print, safety_copy=False)
+        assert result.pre_restore is None and names(engine) == ["Coffee"]

@@ -9,7 +9,8 @@ backup fails or the newest one is over 26 hours old.
 ``./run restore FILE`` replaces this environment's database with a backup of that same database.
 It shows what it will do and asks you to type the environment's name; production needs an
 explicit ``--env production``. The current data is backed up first, and the restore runs in one
-transaction, so it either completes or changes nothing.
+transaction, so it either completes or changes nothing. When the current data can no longer be
+backed up (a damaged table), ``--without-safety-copy`` restores without saving it first.
 """
 
 from __future__ import annotations
@@ -17,11 +18,12 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from budgetapp import clock, secrets
 from budgetapp.commands import add_command
@@ -65,6 +67,12 @@ def register(subparsers: Any) -> None:
     restore.add_argument("file", metavar="FILE", help="a .dump file made by ./run backup")
     restore.add_argument(
         "--force-disconnect", action="store_true", help="disconnect running app processes first"
+    )
+    restore.add_argument(
+        "--without-safety-copy",
+        action="store_true",
+        help="don't back up the current data first (only when it can't be backed up any more: "
+        "it is then lost)",
     )
 
 
@@ -189,7 +197,28 @@ def env_was_explicit(argv: list[str] | None = None) -> bool:
     return any(arg == "--env" or arg.startswith("--env=") for arg in argv)
 
 
-def _plan_text(settings: Settings, plan: backups.RestorePlan) -> list[str]:
+def restore_command(
+    settings: Settings,
+    path: Path,
+    *,
+    force_disconnect: bool = False,
+    without_safety_copy: bool = False,
+) -> str:
+    """The ``./run restore`` command line for ``path``, quoted for the shell (the real backup
+    folder is under "Application Support")."""
+    parts = ["./run", "restore", shlex.quote(str(path))]
+    if settings.is_production:  # sandbox is the default; the test env has no command line
+        parts += ["--env", "production"]
+    if force_disconnect:
+        parts.append("--force-disconnect")
+    if without_safety_copy:
+        parts.append("--without-safety-copy")
+    return " ".join(parts)
+
+
+def _plan_text(
+    settings: Settings, plan: backups.RestorePlan, *, safety_copy: bool = True
+) -> list[str]:
     target = f"the {settings.env.upper()} database {settings.db_name}"
     lines = [
         f"Restore this backup into {target}?",
@@ -203,9 +232,19 @@ def _plan_text(settings: Settings, plan: backups.RestorePlan) -> list[str]:
             else f" (this code needs {plan.code_head}: you upgrade after)"
         ),
         "",
-        f"Everything in {settings.db_name} is replaced by the backup. The current data is backed "
-        "up first, and the restore runs in one transaction (it completes or changes nothing).",
     ]
+    if safety_copy:
+        lines.append(
+            f"Everything in {settings.db_name} is replaced by the backup. The current data is "
+            "backed up first, and the restore runs in one transaction (it completes or changes "
+            "nothing)."
+        )
+    else:
+        lines.append(
+            f"Everything in {settings.db_name} is replaced by the backup, and the current data "
+            "is NOT backed up first (--without-safety-copy): it is lost unless an older backup "
+            "has it. The restore runs in one transaction (it completes or changes nothing)."
+        )
     if settings.is_production:
         lines.append("The web, sync and backup agents stop during the restore and start again.")
     return lines
@@ -213,6 +252,7 @@ def _plan_text(settings: Settings, plan: backups.RestorePlan) -> list[str]:
 
 def run_restore(args: argparse.Namespace, settings: Settings) -> int:
     path = Path(args.file).expanduser()
+    safety_copy = not getattr(args, "without_safety_copy", False)
     if settings.is_production and not env_was_explicit():
         print(
             "error: restoring PRODUCTION needs an explicit --env production on the command line "
@@ -228,7 +268,7 @@ def run_restore(args: argparse.Namespace, settings: Settings) -> int:
     except backups.RestoreRefused as exc:
         print(f"Not restored: {exc}", file=sys.stderr)
         return 1
-    print("\n".join(_plan_text(settings, plan)))
+    print("\n".join(_plan_text(settings, plan, safety_copy=safety_copy)))
     try:
         answer = prompt(f'\nType "{settings.env}" to restore, anything else to cancel: ')
     except EOFError:
@@ -245,24 +285,34 @@ def run_restore(args: argparse.Namespace, settings: Settings) -> int:
             settings,
             plan,
             force_disconnect=args.force_disconnect,
+            safety_copy=safety_copy,
             agents=control,
             say=lambda line: print(f"  {line}", flush=True),
         )
+    except backups.SafetyCopyFailed as exc:
+        anyway = restore_command(
+            settings, path, force_disconnect=args.force_disconnect, without_safety_copy=True
+        )
+        print(
+            f"Not restored: {exc}\n"
+            "If the current data is damaged and you want to replace it anyway, this restores "
+            f"WITHOUT saving it first (it is then lost):\n  {anyway}",
+            file=sys.stderr,
+        )
+        return 1
     except backups.RestoreRefused as exc:
         print(f"Not restored: {exc}", file=sys.stderr)
         return 1
     except backups.RestoreFailed as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except backups.BackupError as exc:
-        print(
-            f"Not restored: the backup of the current data failed ({exc}). Nothing was changed.",
-            file=sys.stderr,
-        )
-        return 1
     except OperationalError as exc:
         detail = str(exc.orig or exc).strip().splitlines()[0]
         print(f"error: the database connection failed: {detail}", file=sys.stderr)
+        return 1
+    except SQLAlchemyError as exc:  # e.g. a damaged table the restore had to read
+        detail = str(getattr(exc, "orig", None) or exc).strip().splitlines()[0]
+        print(f"error: the database reported: {detail}. Nothing was restored.", file=sys.stderr)
         return 1
     counts = ", ".join(
         f"{count:,} {table.replace('_', ' ')}" for table, count in result.counts.items()
@@ -270,8 +320,8 @@ def run_restore(args: argparse.Namespace, settings: Settings) -> int:
     print(f"Done in {result.seconds:.1f} s. The database now holds {counts}.")
     print(result.schema_message)
     if result.pre_restore is not None and result.pre_restore.path is not None:
-        print(
-            f"To undo, restore the copy taken first: ./run restore {result.pre_restore.path}"
-            + (" --env production" if settings.is_production else "")
-        )
+        undo = restore_command(settings, result.pre_restore.path)
+        print(f"To undo, restore the copy taken first: {undo}")
+    else:
+        print("The data it replaced was not saved (--without-safety-copy).")
     return 0

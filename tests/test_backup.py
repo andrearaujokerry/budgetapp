@@ -176,12 +176,33 @@ class TestListing:
         assert backup.list_backups(bk) == [] and backup.newest_backup(bk) is None
         assert backup.is_due(bk)
 
-    def test_rotation_counts_pre_restore_dumps_and_needs_one(self, bk):
-        paths = [fake_dump(bk, NOW + dt.timedelta(hours=h), pre=h == 1) for h in range(4)]
+    def test_rotation_never_counts_or_touches_pre_restore_copies(self, bk):
+        backups = [fake_dump(bk, NOW + dt.timedelta(hours=h)) for h in range(4)]
+        copies = [fake_dump(bk, NOW + dt.timedelta(hours=h, minutes=30), pre=True) for h in (0, 3)]
         removed = backup.rotate(bk, keep=2)
-        assert set(removed) == set(paths[:2])
+        assert removed == [backups[1], backups[0]]  # 2 backups stay; the copies don't count
+        assert all(path.exists() for path in [*backups[2:], *copies])
+        assert [b.path for b in backup.list_backups(bk, pre_restore=False)] == backups[:1:-1]
+        assert [b.path for b in backup.list_backups(bk, pre_restore=True)] == copies[::-1]
         with pytest.raises(ValueError):
             backup.rotate(bk, keep=0)
+
+    def test_pre_restore_copies_keep_their_newest_and_never_a_protected_one(self, bk):
+        copies = [fake_dump(bk, NOW + dt.timedelta(hours=h), pre=True) for h in range(4)]
+        nightly = fake_dump(bk, NOW - dt.timedelta(days=1))
+        removed = backup.prune_pre_restore(bk, keep=2, protect=(copies[0],))
+        assert removed == [copies[1]]  # copies[0] is being restored (an undo): never deleted
+        assert copies[0].exists() and nightly.exists()
+        assert backup.prune_pre_restore(bk, keep=2) == [copies[0]]
+
+    def test_a_copy_taken_before_a_restore_is_not_a_backup(self, bk):
+        """Due/stale/newest describe the nightly backups; a restore's copy says nothing about
+        them (and holds the data the restore replaced)."""
+        nightly = fake_dump(bk, NOW - dt.timedelta(hours=30))
+        fake_dump(bk, NOW - dt.timedelta(hours=1), pre=True)
+        assert backup.newest_backup(bk).path == nightly
+        assert backup.is_due(bk, now=NOW)
+        assert backup.backup_health(bk, now=NOW) == (True, backup.newest_backup(bk))
 
     def test_stale_temporary_files_are_cleaned_up(self, bk):
         directory = backup.ensure_backup_dir(bk)
