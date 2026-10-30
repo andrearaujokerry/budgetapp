@@ -19,6 +19,7 @@ come back with status 422 and the message next to the field.
 from __future__ import annotations
 
 import datetime as dt
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -32,6 +33,7 @@ from budgetapp.money import format_money
 from budgetapp.periods import MONTH, Period
 from budgetapp.services import budgets
 from budgetapp.services.budgets import ANNUAL, MONTHLY, BudgetChange, BudgetError, BudgetOverview
+from budgetapp.services.spending import BASIS_POSTED_DATE, BASIS_SPEND_DATE
 from budgetapp.web.deps import FormDep, SessionDep
 from budgetapp.web.flash import flash_oob, redirect
 from budgetapp.web.templating import date_long, date_short, is_htmx, render
@@ -44,6 +46,11 @@ NAV = "budgets"
 #: suggestions step past a period's ends, which overflows near years 1 and 9999.
 YEARS = range(1900, 3000)
 
+#: Ids are PostgreSQL ``bigint``s: a larger number in a path or form can't name a row (and
+#: would make the query fail rather than find nothing).
+MAX_ID = 2**63 - 1
+_ID = re.compile(r"[0-9]{1,19}")
+
 
 # --------------------------------------------------------------------------- helpers
 
@@ -54,16 +61,35 @@ def page_url(period: Period | None = None) -> str:
 
 
 def form_day(period: Period) -> dt.date:
-    """The day a form names its period by: the middle of it, so that a closing date which moves
-    by a few days after the page was drawn (a new or corrected statement) still finds that
-    cycle rather than its neighbour."""
-    return period.start + (period.end - period.start) // 2
+    """The day a form names its period by: its middle (``budgets.middle_day``), so that a closing
+    date which moves by a few days after the page was drawn (a new or corrected statement)
+    still finds that cycle rather than its neighbour."""
+    return budgets.middle_day(period)
 
 
-def transactions_url(category_id: int | None, start: dt.date, end: dt.date) -> str:
-    """The Transactions page filtered to a category and a date range (the "spent" links)."""
-    category = "" if category_id is None else f"category={category_id}&"
-    return f"/transactions?{category}from={start.isoformat()}&to={end.isoformat()}"
+def transactions_url(
+    category_id: int | None,
+    start: dt.date,
+    end: dt.date,
+    *,
+    basis: str = BASIS_SPEND_DATE,
+    include_pending: bool = True,
+) -> str:
+    """The Transactions page filtered to a category and a date range (the "spent" links).
+
+    ``basis`` and ``include_pending`` are the budget's (``PeriodSpending.basis`` /
+    ``.include_pending``), so the list holds what the figure counts: ``status=posted`` when
+    pending charges don't count, and ``basis=posted_date`` when the budget counts posting
+    dates (statement mode). The Transactions page dates rows by spend date unless it honours
+    ``basis``.
+    """
+    params = [] if category_id is None else [f"category={category_id}"]
+    params += [f"from={start.isoformat()}", f"to={end.isoformat()}"]
+    if basis == BASIS_POSTED_DATE:
+        params.append(f"basis={BASIS_POSTED_DATE}")
+    if not include_pending:
+        params.append("status=posted")
+    return "/transactions?" + "&".join(params)
 
 
 def period_label(period: Period, today: dt.date) -> str:
@@ -106,17 +132,30 @@ def _labels(ov: BudgetOverview, suggestions: budgets.Suggestions) -> dict[str, s
 
 
 def _context(session: Session, period: Period, today: dt.date, **extra: Any) -> dict[str, Any]:
-    """Everything the page and its partials read."""
+    """Everything the page and its partials read.
+
+    ``annual`` is the annual section edits apply to (the year of the period's end, as of that
+    day); ``annual_closed`` holds the full-year tally of a year that ends inside the period (a
+    statement cycle across Dec 31), shown read-only above it.
+    """
     ov = budgets.overview(session, period, today=today)
     suggestions = budgets.suggestions(session, today=today, before=period)
+    *annual_closed, annual = budgets.annual_overviews(session, period, today=today)
+    basis, pending = ov.spending.basis, ov.spending.include_pending
+
+    def spent_href(
+        category_id: int, start: dt.date = period.start, end: dt.date = period.end
+    ) -> str:
+        return transactions_url(category_id, start, end, basis=basis, include_pending=pending)
+
     context: dict[str, Any] = {
         "ov": ov,
-        "annual": budgets.annual_overview(session, period.end.year, today=today, as_of=period.end),
+        "annual": annual,
+        "annual_closed": tuple(annual_closed),
+        "edit_day": budgets.edit_day(period),
         "sugg": suggestions,
         "labels": _labels(ov, suggestions),
-        "spent_href": lambda category_id, start=period.start, end=period.end: transactions_url(
-            category_id, start, end
-        ),
+        "spent_href": spent_href,
         "categories": _visible_categories(session),
         "errors": {},
         "dialog": None,
@@ -150,7 +189,8 @@ def _period(session: Session, value: object, today: dt.date) -> Period:
 
 
 def _category(session: Session, category_id: int) -> Category:
-    category = session.get(Category, category_id)
+    """The category a path names; 404 for an unknown or impossible id."""
+    category = session.get(Category, category_id) if 0 < category_id <= MAX_ID else None
     if category is None:
         raise HTTPException(404)
     return category
@@ -326,7 +366,7 @@ def add_budget(request: Request, session: SessionDep, form: FormDep) -> Response
     raw_category = str(form.get("category_id", ""))
     errors: dict[str, str] = {}
     category = None
-    if raw_category.isdigit():
+    if _ID.fullmatch(raw_category) and 0 < int(raw_category) <= MAX_ID:
         category = session.get(Category, int(raw_category))
     if category is None or category.kind != "expense":
         errors["category_id"] = "Choose a category."

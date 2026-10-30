@@ -1,0 +1,64 @@
+{#- The full Jan 1 – Dec 31 tally of a year that ends inside the period shown (a statement cycle
+    across Dec 31, e.g. Dec 28 – Jan 27; `annual_closed`, usually empty). Late-December spending in
+    annual categories is in no monthly figure, so this is where that year's total shows. Read
+    only: an edit made in this period applies from its edit day (`edit_day`), so it belongs to
+    the annual section below. #annual-closed is always present: an annual edit updates it out of
+    band (its rows are in force on Dec 31 when the edit day falls in the old year). -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "budgets/_macros.html" as bud -%}
+<div id="annual-closed" class="budget-years"{% if oob is defined and oob %} hx-swap-oob="true"{% endif %}>
+{%- for closed in annual_closed if closed.lines -%}
+{%- set key = 'annual-closed-' ~ closed.year -%}
+<section class="section" id="{{ key }}" aria-labelledby="{{ key }}-title">
+<div class="section__header">
+<div>
+<h2 class="section__title" id="{{ key }}-title">Annual budgets · {{ closed.year }}</h2>
+<p class="section__subtitle">
+{%- if closed.as_of < ov.today %}{{ closed.year }} ended on Dec 31, during this {{ labels.unit }}: spending from Jan 1 through Dec 31, the year’s final tally.
+{%- else %}{{ closed.year }} ends on Dec 31, during this {{ labels.unit }}: spending so far this year{% if closed.pace_percent is not none %}; the marker shows where an even pace would be ({{ closed.pace_percent|pct }} of the year){% endif %}.{% endif %}
+{% if edit_day > closed.as_of %}Changes made in this {{ labels.unit }} apply to {{ annual.year }}. To change a {{ closed.year }} budget, open <a href="/budgets?period={{ ov.previous_period.start.isoformat() }}" id="{{ key }}-previous">{{ labels.previous }}</a>.
+{%- else %}Changes made in this {{ labels.unit }} apply from {{ edit_day|date_long }}, so they count for {{ closed.year }} too.{% endif -%}
+</p>
+</div>
+</div>
+{% call ui.card(flush=true, id=key ~ '-card') %}
+<div class="table-wrap">
+<table class="table budget-table" id="{{ key }}-lines">
+<thead><tr>
+<th scope="col" class="col-grow">Category</th>
+<th scope="col" class="num">Annual budget</th>
+<th scope="col" class="num">Spent in {{ closed.year }}</th>
+<th scope="col" class="num">Remaining</th>
+<th scope="col" class="budget-table__meter col-optional-sm">Used</th>
+</tr></thead>
+<tbody>
+{%- for entry in closed.lines %}
+{%- set category = entry.category %}
+<tr id="{{ key }}-{{ category.id }}">
+<td class="col-grow">
+<span class="table__primary">{{ ui.category_badge(category) }}</span>
+{{- bud.phone_status(entry.spent, entry.percent_used, entry.status, entry.remaining) }}
+{%- if entry.pace_amount is not none %}<span class="table__secondary budget-pace">On an even pace: {{ entry.pace_amount|money }} by now</span>{% endif %}
+</td>
+<td class="num">{{ ui.money(entry.budget, tone='neutral') }}</td>
+<td class="num"><a class="budget-spent" id="{{ key }}-spent-{{ category.id }}" href="{{ spent_href(category.id, closed.period.start, closed.as_of) }}" aria-label="{{ ui.money_text(entry.spent) }} spent on {{ category.name }} in {{ closed.year }}: see the transactions">{{ ui.money(entry.spent) }}</a></td>
+<td class="num">{{ ui.money(entry.remaining, tone='over' if entry.remaining < 0 else 'neutral') }}</td>
+<td class="budget-table__meter col-optional-sm">{{ bud.meter(entry.percent_used, entry.status, entry.pace_percent, category.name ~ ' annual budget for ' ~ closed.year, entry.remaining) }}</td>
+</tr>
+{%- endfor %}
+</tbody>
+<tfoot>
+<tr>
+<th scope="row" class="col-grow">Total</th>
+<td class="num">{{ ui.money(closed.budget_total, tone='neutral') }}</td>
+<td class="num">{{ ui.money(closed.spent_total, tone='neutral') }}</td>
+<td class="num">{{ ui.money(closed.remaining_total, tone='over' if closed.remaining_total < 0 else 'neutral') }}</td>
+<td class="col-optional-sm"></td>
+</tr>
+</tfoot>
+</table>
+</div>
+{% endcall %}
+</section>
+{%- endfor -%}
+</div>

@@ -1,12 +1,17 @@
-{#- The monthly budgets' totals row (visible rows; #budget-totals, out of band after an edit). -#}
+{#- The monthly budgets' totals row (visible rows; #budget-totals, out of band after an edit).
+    The Budget column adds up the budgets above it; what rolled over (the rows' carry notes) is
+    noted under it, and Remaining counts both: budgets + rolled over − spent. -#}
 {%- import "components/ui.html" as ui -%}
-{%- set available = ov.lines|sum(attribute='available') -%}
+{%- set budget = ov.lines|sum(attribute='budget') -%}
+{%- set carry = ov.lines|sum(attribute='carry_in') -%}
 {%- set spent = ov.lines|sum(attribute='spent') -%}
-{%- set remaining = available - spent -%}
+{%- set remaining = budget + carry - spent -%}
 <tfoot id="budget-totals"{% if oob is defined and oob %} hx-swap-oob="true"{% endif %}>
 <tr>
 <th scope="row" class="col-grow">Total</th>
-<td class="num">{{ ui.money(available, tone='neutral') }}</td>
+<td class="num">{{ ui.money(budget, tone='neutral') }}
+{%- if carry != 0 %}<span class="table__secondary budget-total-carry {{ 'text-ok' if carry > 0 else 'text-over' }}" id="budget-totals-carry">{{ ui.money_text(carry, signed=true) }} rolled over</span>{% endif -%}
+</td>
 <td class="num">{{ ui.money(spent, tone='neutral') }}</td>
 <td class="num">{{ ui.money(remaining, tone='over' if remaining < 0 else 'neutral') }}</td>
 <td class="col-optional-sm"></td>

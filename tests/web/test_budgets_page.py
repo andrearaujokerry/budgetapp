@@ -182,6 +182,116 @@ class TestPage:
         assert "Spending without a budget" not in text_of(response)
         assert "Includes $10.00 in hidden categories." in text_of(response)
 
+    def test_hidden_spending_without_a_budget_is_explained(self, client, db, cat, spend, groceries):
+        """Review finding: the tile and the card's subtitle counted hidden categories that the
+        list leaves out ("Not budgeted $300 · every category with spending has a budget")."""
+        education = cat("Education")
+        education.is_hidden = True
+        spend(education, "300.00", "2026-10-02")
+        page = text_of(client.get("/budgets"))
+        assert "Not budgeted $300 all in hidden categories" in page
+        assert "every category with spending has a budget" not in page
+        spend(cat("Dining & Drinks"), "45.00", "2026-10-02")
+        page = text_of(client.get("/budgets"))
+        assert "Not budgeted $345 1 category listed below, $300 in hidden ones" in page
+        assert (
+            "Spending without a budget $45.00 in Oct 2026, not in any budget (plus $300.00 in "
+            "hidden categories, not listed)"
+        ) in page
+        education.is_hidden = False
+        db.flush()
+        page = text_of(client.get("/budgets"))
+        assert "Not budgeted $345 2 categories, listed below" in page
+        assert "Spending without a budget $345.00 in Oct 2026, not in any budget" in page
+        assert "hidden categories, not listed" not in page
+
+    def test_the_totals_row_adds_up_the_budgets_shown(self, client, db, cat, spend):
+        """Review finding: the Budget column's total added the carry-ins the rows above don't
+        show in that column."""
+        care, home = cat("Personal Care"), cat("Home")
+        make_budget(db, care, "120.00", effective_from=day("2026-09-01"), rollover=True)
+        make_budget(db, home, "100.00", effective_from=day("2026-09-01"))
+        spend(care, "104.06", "2026-09-10")  # $15.94 rolls into October
+        spend(care, "30.00", "2026-10-02")
+        spend(home, "40.00", "2026-10-02")
+        response = client.get("/budgets")
+        totals = re.search(r'<tfoot id="budget-totals">.*?</tfoot>', response.text, re.S).group(0)
+        cells = [
+            " ".join(html.unescape(re.sub(r"<[^>]+>", " ", c)).split())
+            for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", totals, re.S)
+        ]
+        assert cells[:4] == ["Total", "$220.00 +$15.94 rolled over", "$70.00", "$165.94"]
+        spend(care, "-15.94", "2026-09-11")  # a refund: now $31.88 rolls over
+        totals = re.search(
+            r'<tfoot id="budget-totals">.*?</tfoot>', client.get("/budgets").text, re.S
+        )
+        assert "+$31.88 rolled over" in html.unescape(totals.group(0))
+        make_budget(db, care, "120.00", effective_from=day("2026-10-01"))  # rollover off
+        totals = re.search(
+            r'<tfoot id="budget-totals">.*?</tfoot>', client.get("/budgets").text, re.S
+        )
+        assert "rolled over" not in totals.group(0)
+
+    def test_spent_links_hold_what_the_budget_counts(self, client, db, account, groceries):
+        """Review finding: the Spent figure follows the budget's date basis and pending setting;
+        its link asks the Transactions page for the same."""
+        expected = f"/transactions?category={groceries.id}&amp;from=2026-10-01&amp;to=2026-10-31"
+        assert f'href="{expected}"' in row_of(client.get("/budgets"), "line", groceries)
+        set_app_settings(db, include_pending_in_budgets=False)
+        row = row_of(client.get("/budgets"), "line", groceries)
+        assert f'href="{expected}&amp;status=posted"' in row
+        account.statement_closing_day = 27
+        make_statement(db, account, "2026-09-27")
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id)
+        row = row_of(client.get("/budgets"), "line", groceries)
+        cycle = "from=2026-09-28&amp;to=2026-10-27&amp;basis=posted_date&amp;status=posted"
+        assert f'href="/transactions?category={groceries.id}&amp;{cycle}"' in row
+
+    def test_a_flagged_cycle_says_why_it_is_long(self, client, db, account, groceries):
+        """Review finding: a missing statement made a 61-day cycle without a word."""
+        account.statement_closing_day = 27
+        for closing in ("2026-08-27", "2026-10-27"):
+            make_statement(db, account, closing)
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id)
+        response = client.get("/budgets")
+        banner = re.search(
+            r'<div class="banner[^"]*"[^>]*id="cycle-notice".*?</div>\s*</div>', response.text, re.S
+        )
+        assert banner is not None and 'href="/statements"' in banner.group(0)
+        assert (
+            "Unusual statement cycle. This cycle is 61 days long, so a statement seems to be "
+            "missing"
+        ) in text_of(response)
+        assert csp_problems(response.text, rendered=True) == []
+        normal = client.get("/budgets?period=2026-10-28")
+        assert 'id="cycle-notice"' not in normal.text
+
+    def test_a_year_that_has_not_started_says_so(self, client, db, cat):
+        travel = cat("Travel")
+        make_budget(db, travel, "6000.00", effective_from=day("2026-01-01"), period="annual")
+        page = text_of(client.get("/budgets?period=2027-01-01"))
+        assert "Annual budgets · 2027 2027 hasn’t started yet: its spending counts from Jan 1." in (
+            page
+        )
+        assert "Spending so far this year" not in page
+
+    def test_category_names_are_escaped(self, client, db, spend):
+        hostile = make_category(db, '"><img src=x onerror=alert(1)>&amp;</td>')
+        make_budget(db, hostile, "100.00", effective_from=day("2026-01-01"))
+        spend(hostile, "10.00", "2026-10-02")
+        unbudgeted = make_category(db, "<b>Unbudgeted</b>")
+        spend(unbudgeted, "5.00", "2026-09-02")
+        spend(unbudgeted, "5.00", "2026-10-02")
+        response = client.get("/budgets")
+        assert "<img src=x" not in response.text and "<b>Unbudgeted</b>" not in response.text
+        assert "&#34;&gt;&lt;img src=x onerror=alert(1)&gt;&amp;amp;&lt;/td&gt;" in response.text
+        response = client.post(
+            f"/budgets/category/{hostile.id}",
+            data={"amount": "-1", "period": "2026-10-16"},
+            headers=HTMX,
+        )
+        assert response.status_code == 422 and "<img src=x" not in response.text
+
     def test_rows_are_sorted_by_percent_used_then_name(self, client, db, cat, spend):
         pets = make_category(db, "Pets")
         for category, budget, spent in (
@@ -220,7 +330,7 @@ class TestPage:
 
     def test_suggest_buttons_carry_the_suggestion(self, client, db, cat, spend, groceries):
         for month, amount in ((7, "600.00"), (8, "612.40"), (9, "625.00")):
-            spend(groceries, amount, f"2026-{month:02d}-10")
+            spend(groceries, amount, f"2026-{month:02d}-01")  # history from Jul 1
         response = client.get("/budgets")
         button = re.search(rf'<button[^>]*id="suggest-budget-{groceries.id}"[^>]*>', response.text)
         assert button is not None
@@ -283,6 +393,17 @@ class TestPeriods:
         assert client.get("/budgets?period=1900-01-01").status_code == 200
         assert client.get("/budgets?period=2999-12-31").status_code == 200
 
+    @pytest.mark.parametrize("far", ["1900-01-01", "1960-06-01", "2090-06-01", "2999-12-31"])
+    def test_far_off_statement_periods(self, app, make_client, db, account, far):
+        """Far from the stored closing dates (beyond the 50 years ``periods`` generates) the page
+        still shows the period containing the day, without an error."""
+        account.statement_closing_day = 27
+        make_statement(db, account, "2026-09-27")
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id)
+        response = make_client(app, raise_server_exceptions=False).get(f"/budgets?period={far}")
+        assert response.status_code == 200
+        assert response.context["ov"].period.contains(day(far))
+
     def test_statement_cycles(self, client, db, account):
         account.statement_closing_day = 27
         make_statement(db, account, "2026-09-27")
@@ -316,7 +437,7 @@ class TestPeriods:
         ]
         assert rows(db, groceries) == [
             ("monthly", day("2026-01-01"), D("500.00"), False),
-            ("monthly", day("2026-09-30"), D("650.00"), False),
+            ("monthly", day("2026-10-13"), D("650.00"), False),  # its middle day
         ]
 
     def test_statement_mode_without_a_card_says_so(self, client, db):
@@ -379,8 +500,9 @@ class TestMonthlyEdits:
     def test_row_responses_keep_out_of_band_parts_in_templates(
         self, client, db, cat, groceries, path, data, kind, status, totals
     ):
-        """After the row, the totals, the overall card (with its form) and the unbudgeted list
-        (with its table) each come in a <template>, so htmx's parser keeps them whole."""
+        """After the row, the totals, the overall card (with its form), the unbudgeted list
+        (with its table) and, for an annual row, a closed year's tally each come in a
+        <template>, so htmx's parser keeps them whole."""
         if kind == "annual":
             travel = cat("Travel")
             make_budget(db, travel, "6000.00", effective_from=day("2026-01-01"), period="annual")
@@ -393,7 +515,8 @@ class TestMonthlyEdits:
         assert response.status_code == status
         assert response.text.lstrip().startswith(f'<tr id="{kind}-{target.id}">')
         outside, oob_ids = oob_parts(response)
-        assert oob_ids == [totals, "overall-card", "unbudgeted"]
+        closed = ["annual-closed"] if kind == "annual" else []
+        assert oob_ids == [totals, "overall-card", "unbudgeted", *closed]
         after_row = outside.split("</tr>", 1)[1]
         assert not re.search(r"<(table|thead|tbody|tfoot|tr|section|form)\b", after_row)
         assert re.findall(r'hx-swap-oob="([^"]+)"', outside) == (
@@ -480,6 +603,18 @@ class TestMonthlyEdits:
     def test_an_unknown_category_is_a_404(self, client):
         response = client.post(
             "/budgets/category/999999999", data={"amount": "1", "period": OCT_1}, headers=HTMX
+        )
+        assert response.status_code == 404
+
+    @pytest.mark.parametrize("suffix", ["", "/annual", "/rollover"])
+    @pytest.mark.parametrize("category_id", ["99999999999999999999", str(2**63), "0", "-1"])
+    def test_an_impossible_category_id_is_a_404(self, app, make_client, suffix, category_id):
+        """Review finding: an id beyond PostgreSQL's bigint was a 500 (out of range)."""
+        client = make_client(app, raise_server_exceptions=False)
+        response = client.post(
+            f"/budgets/category/{category_id}{suffix}",
+            data={"amount": "10", "period": OCT_1, "enabled": "1"},
+            headers=HTMX,
         )
         assert response.status_code == 404
 
@@ -661,6 +796,115 @@ class TestAnnualEdits:
         assert page.context["ov"].lines == ()
 
 
+class TestAcrossTheYearEnd:
+    """Review finding: on Dec 30 the statement cycle Dec 28 – Jan 27 showed only "Annual budgets
+    · 2027", and no view showed 2026's Jan 1 – Dec 31 tally (the Dec 29 charge was in none)."""
+
+    @pytest.fixture
+    def travel(self, db, cat, spend, account, freeze_today):
+        freeze_today("2026-12-30")
+        account.statement_closing_day = 27
+        for closing in ("2026-11-27", "2026-12-27"):
+            make_statement(db, account, closing)
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id)
+        travel = cat("Travel")
+        make_budget(db, travel, "6000.00", effective_from=day("2026-01-01"), period="annual")
+        spend(travel, "1000.00", "2026-06-10")
+        spend(travel, "500.00", "2026-12-29")
+        return travel
+
+    def tally_row(self, response, year, category) -> str:
+        found = re.search(
+            rf'<tr id="annual-closed-{year}-{category.id}">.*?</tr>', response.text, re.S
+        )
+        assert found is not None, f"no {year} tally row for {category.name}"
+        return found.group(0)
+
+    def test_the_year_that_ends_in_the_cycle_shows_its_full_tally(self, client, travel):
+        response = client.get("/budgets")
+        ov, annual = response.context["ov"], response.context["annual"]
+        (closed,) = response.context["annual_closed"]
+        assert (ov.period.start, ov.period.end) == (day("2026-12-28"), day("2027-01-27"))
+        assert (annual.year, annual.as_of) == (2027, day("2027-01-27"))
+        assert (closed.year, closed.as_of, closed.lines[0].spent) == (
+            2026,
+            day("2026-12-31"),
+            D("1500.00"),
+        )
+        page = text_of(response)
+        assert page.index("Annual budgets · 2026") < page.index("Annual budgets · 2027")
+        assert "2026 ends on Dec 31, during this cycle: spending so far this year" in page
+        assert (
+            "Changes made in this cycle apply to 2027. To change a 2026 budget, open "
+            "Nov 28 – Dec 27"
+        ) in page
+        assert "2027 hasn’t started yet: its spending counts from Jan 1." in page
+        row = self.tally_row(response, 2026, travel)
+        assert "$1,500.00" in row and "<input" not in row and "<form" not in row
+        assert "On an even pace: $5,983.56 by now" in html.unescape(row)
+        span = "from=2026-01-01&amp;to=2026-12-31&amp;basis=posted_date"
+        assert f'href="/transactions?category={travel.id}&amp;{span}"' in row
+        assert 'href="/budgets?period=2026-11-28"' in response.text
+        assert csp_problems(response.text, rendered=True) == []
+
+    def test_an_edit_in_the_cycle_applies_to_the_new_year(self, client, db, travel):
+        response = client.post(
+            f"/budgets/category/{travel.id}/annual",
+            data={"amount": "7000", "period": "2027-01-12"},  # the cycle's middle day
+            headers=HTMX,
+        )
+        assert response.status_code == 200
+        _, oob_ids = oob_parts(response)
+        assert oob_ids == ["annual-totals", "overall-card", "unbudgeted", "annual-closed"]
+        assert 'value="7000.00"' in row_of(response, "annual", travel)
+        assert rows(db, travel) == [
+            ("annual", day("2026-01-01"), D("6000.00"), False),
+            ("annual", day("2027-01-12"), D("7000.00"), False),
+        ]
+        page = client.get("/budgets")
+        assert page.context["annual"].lines[0].budget == D("7000.00")
+        assert page.context["annual_closed"][0].lines[0].budget == D("6000.00")
+
+    def test_a_past_cycle_shows_the_years_final_tally(self, client, travel, freeze_today):
+        freeze_today("2027-03-10")
+        response = client.get("/budgets?period=2026-12-28")
+        page = text_of(response)
+        assert (
+            "2026 ended on Dec 31, during this cycle: spending from Jan 1 through Dec 31, the "
+            "year’s final tally."
+        ) in page
+        assert "On an even pace" not in self.tally_row(response, 2026, travel)
+        assert response.context["annual"].as_of == day("2027-01-27")
+        assert "Spending from Jan 1 through Jan 27, 2027" in page
+
+    def test_when_the_edit_day_falls_in_the_old_year_the_tally_follows(
+        self, client, db, cat, spend, account, freeze_today
+    ):
+        freeze_today("2026-12-20")
+        account.statement_closing_day = 14
+        make_statement(db, account, "2026-12-14")
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id)
+        gifts = cat("Gifts & Donations")
+        make_budget(db, gifts, "800.00", effective_from=day("2026-01-01"), period="annual")
+        spend(gifts, "120.00", "2026-12-16")
+        page = client.get("/budgets")
+        ov = page.context["ov"]
+        assert (ov.period.start, ov.period.end) == (day("2026-12-15"), day("2027-01-14"))
+        assert (
+            "Changes made in this cycle apply from Dec 30, 2026, so they count for 2026 too."
+        ) in text_of(page)
+        response = client.post(
+            f"/budgets/category/{gifts.id}/annual",
+            data={"amount": "900", "period": "2026-12-30"},
+            headers=HTMX,
+        )
+        closed = re.search(
+            r'<template>\s*(<div id="annual-closed".*?)</template>', response.text, re.S
+        )
+        assert closed is not None and "$900.00" in closed.group(1)
+        assert rows(db, gifts)[-1] == ("annual", day("2026-12-30"), D("900.00"), False)
+
+
 # --------------------------------------------------------------------------- adding budgets
 
 
@@ -776,6 +1020,22 @@ class TestAdding:
         assert response.status_code == 422
         assert re.search(r'<dialog id="add-annual"[^>]*data-dialog-autoopen', response.text)
         assert not re.search(r'<dialog id="add-monthly"[^>]*data-dialog-autoopen', response.text)
+
+    @pytest.mark.parametrize(
+        "value", ["²", "٣", "99999999999999999999", str(2**63), "0", "-3", "1e3", " 7"]
+    )
+    def test_a_malformed_category_is_a_422(self, app, make_client, db, value):
+        """Review finding: ``str.isdigit`` let "²" and 20-digit ids through to ``int()`` and the
+        database (500s); "٣" (an Arabic-Indic 3) silently meant category 3."""
+        client = make_client(app, raise_server_exceptions=False)
+        response = client.post(
+            "/budgets/add",
+            data={"category_id": value, "kind": "monthly", "amount": "10", "period": OCT_1},
+            headers=HTMX,
+        )
+        assert response.status_code == 422
+        assert "Choose a category." in response.text
+        assert rows(db) == []
 
     def test_only_spending_categories_can_be_added(self, client, db):
         payments = card_payments(db)

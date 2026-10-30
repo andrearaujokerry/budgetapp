@@ -1,7 +1,7 @@
 {#- HTMX answer to an annual row edit: the row, then out-of-band updates of what it changes
-    (removing an annual budget moves its spending into the monthly view). The out-of-band parts
-    sit in <template>s, as in budgets/_line_update.html, so they survive htmx's parsing after a
-    <tr>. -#}
+    (removing an annual budget moves its spending into the monthly view; a closed year's tally
+    shows the edit when the period's edit day falls in that year). The out-of-band parts sit in
+    <template>s, as in budgets/_line_update.html, so they survive htmx's parsing after a <tr>. -#}
 {%- set ns = namespace(entry=none) -%}
 {%- for a in annual.lines if a.category.id == category.id %}{% set ns.entry = a %}{% endfor -%}
 {%- set entry = ns.entry -%}
@@ -10,3 +10,4 @@
 <template>{% include "budgets/_annual_totals.html" %}</template>
 <template>{% include "budgets/_overall.html" %}</template>
 <template>{% include "budgets/_unbudgeted.html" %}</template>
+<template>{% include "budgets/_annual_closed.html" %}</template>

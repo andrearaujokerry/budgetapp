@@ -6,7 +6,8 @@
   margin-top: 24px;
 }
 
-.budgets-page > * + .section {
+.budgets-page > * + .section,
+.budgets-page > * + .budget-years {
   margin-top: 40px;
 }
 

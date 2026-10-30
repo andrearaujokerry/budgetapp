@@ -382,7 +382,9 @@ with user edits are listed on the Connection page before they are pruned.
 
 Unique `NULLS NOT DISTINCT (category_id, period, effective_from)`. The amount for a period is
 the row with the latest `effective_from <= period.end`. An edit updates the row whose
-`effective_from` falls inside the current period, or inserts one at `period.start`. A category
+`effective_from` falls inside the current period, or inserts one at `period.start` (for a
+statement cycle, at its middle day: the cycle's ends come from closing dates that can still move
+by a few days, and a row at its start would then fall inside the previous cycle). A category
 has at most one active period type: setting a monthly budget writes an amount-null annual row
 from the same date, and vice versa.
 
@@ -538,7 +540,8 @@ inserted rows, after every CSV import and after attaching a manual account:
 
 ### Budget math (BUD-1..5)
 - `available = budget amount + carry-in` (carry-in only when `rollover`: the previous period's
-  `available − spent`, starting at 0 in the first rollover period; may be negative).
+  `available − spent`, starting at 0 in the first rollover period; may be negative; a flagged
+  statement cycle ends the chain).
 - `remaining = available − spent`; `percent_used = spent / available` (undefined when
   `available ≤ 0`).
 - **Overall target (BUD-3):** compared with spending in categories that have no active annual
@@ -547,7 +550,8 @@ inserted rows, after every CSV import and after attaching a manual account:
 - **Annual budgets (BUD-5):** calendar year; year-to-date spending uses the same basis rule as
   `period_spending`; shown with a pace line (`amount × elapsed days / days in year`) in a
   separate Annual section, never inside monthly totals.
-- "Suggest from last 3 months" = mean of the last 3 complete periods, rounded up to $5.
+- "Suggest from last 3 months" = mean of the last 3 complete periods (ended, wholly inside the
+  history, not flagged), rounded up to $5.
 - `days_left` counts today: `(period.end − today).days + 1`.
 
 ### Statement cycles and reconciliation (INS-4, REL-3, Gate D)

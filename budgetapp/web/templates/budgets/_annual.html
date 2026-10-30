@@ -1,12 +1,15 @@
 {#- Annual budgets (BUD-5) for the year of the period shown, as of that period's end: spending
-    from Jan 1, with a pace marker. Never part of the monthly totals. -#}
+    from Jan 1, with a pace marker. Never part of the monthly totals. A year that ends inside the
+    period (a statement cycle across Dec 31) has its full-year tally in budgets/_annual_closed.html
+    above this. -#}
 {%- import "components/ui.html" as ui -%}
 <section class="section" id="annual-section" aria-labelledby="annual-title">
 <div class="section__header">
 <div>
 <h2 class="section__title" id="annual-title">Annual budgets · {{ annual.year }}</h2>
 <p class="section__subtitle">
-{%- if annual.as_of < ov.today %}Spending from Jan 1 through {{ annual.as_of|date_long }}, the end of {{ labels.period }}.
+{%- if annual.period.start > ov.today %}{{ annual.year }} hasn’t started yet: its spending counts from Jan 1.
+{%- elif annual.as_of < ov.today %}Spending from Jan 1 through {{ annual.as_of|date_long }}, the end of {{ labels.period }}.
 {%- else %}Spending so far this year{% if annual.pace_percent is not none %}; the marker shows where an even pace would be ({{ annual.pace_percent|pct }} of the year){% endif %}.{% endif -%}
 </p>
 </div>

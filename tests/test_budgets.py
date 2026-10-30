@@ -327,6 +327,25 @@ class TestSpent:
         assert result.totals.budgeted == D("100.00")
         assert result.overall.spent == D("90.00")
 
+    def test_hidden_unbudgeted_spending_is_reported_apart(self, db, cats, spend):
+        """Review finding: the unbudgeted rows leave hidden categories out, so their spending is
+        reported separately and the listed total matches the rows."""
+        education = get_category(db, "Education")
+        education.is_hidden = True
+        spend(cats["dining"], "45.00", "2026-10-02")
+        spend(education, "300.00", "2026-10-02")
+        totals = overview(db, OCT, today=TODAY).totals
+        result = overview(db, OCT, today=TODAY)
+        assert [(u.category.name, u.spent) for u in result.unbudgeted] == [
+            ("Dining & Drinks", D("45.00"))
+        ]
+        assert (totals.unbudgeted_spent, totals.unbudgeted_hidden_spent) == (
+            D("345.00"),
+            D("300.00"),
+        )
+        assert totals.unbudgeted_listed_spent == D("45.00")
+        assert totals.hidden_spent == D("300.00")
+
     def test_an_empty_database(self, db):
         result = overview(db, OCT, today=TODAY)
         assert result.lines == () and result.unbudgeted == ()
@@ -515,17 +534,88 @@ class TestStatementModeEdits:
         statement_mode(db, account, "2026-08-27", "2026-09-27", closing_day=27)
         cycle = budgets.period_for(db, TODAY)  # Sep 28 – Oct 27 (generated)
         set_budget(db, cats["groceries"].id, D("700.00"), effective_from=cycle)
-        assert rows(db, cats["groceries"]) == [(MONTHLY, day("2026-09-28"), D("700.00"), False)]
+        # A cycle's new row starts on its middle day, not on its (movable) first day.
+        assert rows(db, cats["groceries"]) == [(MONTHLY, day("2026-10-12"), D("700.00"), False)]
         # The statement arrives and closes two days early: the cycle is now Sep 28 – Oct 25.
         make_statement(db, account, "2026-10-25")
         shifted = budgets.period_for(db, TODAY)
         assert (shifted.start, shifted.end) == (day("2026-09-28"), day("2026-10-25"))
         assert line(overview(db, shifted, today=TODAY), cats["groceries"]).budget == D("700.00")
         set_budget(db, cats["groceries"].id, D("720.00"), effective_from=shifted)
-        assert rows(db, cats["groceries"]) == [(MONTHLY, day("2026-09-28"), D("720.00"), False)]
+        assert rows(db, cats["groceries"]) == [(MONTHLY, day("2026-10-12"), D("720.00"), False)]
         following = budgets.next_period(db, shifted)
         assert following.start == day("2026-10-26")
         assert line(overview(db, following, today=TODAY), cats["groceries"]).budget == D("720.00")
+        before = budgets.previous_period(db, shifted)
+        assert before.end == day("2026-09-27")
+        assert overview(db, before, today=TODAY).line_for(cats["groceries"].id) is None
+
+    def test_a_planned_cycle_stays_out_of_the_current_one_when_the_closing_date_is_later(
+        self, db, cats, account
+    ):
+        """Review finding: next cycle's budget, planned while its start was generated, must not
+        reach back into the current cycle when the statement then closes two days later."""
+        groceries = cats["groceries"]
+        statement_mode(db, account, "2026-08-27", "2026-09-27", closing_day=27)
+        make_budget(db, groceries, "700.00", effective_from=day("2026-01-01"))
+        current = budgets.current_period(db, today=TODAY)
+        upcoming = budgets.next_period(db, current)
+        assert (upcoming.start, upcoming.end) == (day("2026-10-28"), day("2026-11-27"))
+        set_budget(db, groceries.id, D("900.00"), effective_from=upcoming, today=TODAY)
+        make_statement(db, account, "2026-10-29")  # closes on the 29th, not the generated 27th
+        current = budgets.current_period(db, today=TODAY)
+        assert (current.start, current.end) == (day("2026-09-28"), day("2026-10-29"))
+        assert line(overview(db, current, today=TODAY), groceries).budget == D("700.00")
+        upcoming = budgets.next_period(db, current)
+        assert upcoming.start == day("2026-10-30")
+        assert line(overview(db, upcoming, today=TODAY), groceries).budget == D("900.00")
+
+    def test_an_edit_made_before_the_statement_arrives_stays_out_of_the_closed_cycle(
+        self, db, cats, account
+    ):
+        """Review finding: on Oct 28 the cycle starts at the generated Oct 28; the user edits it,
+        then the statement arrives closing Oct 29. The closed cycle keeps its budget, and so does
+        the overall target, rollover and the other type's end row (every write of the edit)."""
+        groceries, care, travel = cats["groceries"], cats["personal"], cats["travel"]
+        statement_mode(db, account, "2026-08-27", "2026-09-27", closing_day=27)
+        for category in (groceries, care, travel):
+            make_budget(db, category, "700.00", effective_from=day("2026-01-01"))
+        make_budget(db, None, "3000.00", effective_from=day("2026-01-01"))
+        today = day("2026-10-28")
+        current = budgets.current_period(db, today=today)
+        assert (current.start, current.end) == (day("2026-10-28"), day("2026-11-27"))
+        set_budget(db, groceries.id, D("400.00"), effective_from=current, today=today)
+        set_budget(db, None, D("2500.00"), effective_from=current, today=today)
+        set_rollover(db, care.id, True, effective_from=current, today=today)
+        set_budget(db, travel.id, D("5000.00"), effective_from=current, period=ANNUAL)
+        middle = day("2026-11-12")  # Oct 28 + 15 of the 31 days
+        assert {(r[1], r[0]) for r in rows(db) if r[1] != day("2026-01-01")} == {
+            (middle, MONTHLY),
+            (middle, ANNUAL),
+        }
+        make_statement(db, account, "2026-10-29")
+        closed = budgets.period_for(db, day("2026-10-20"))
+        assert (closed.start, closed.end) == (day("2026-09-28"), day("2026-10-29"))
+        result = overview(db, closed, today=today)
+        assert line(result, groceries).budget == D("700.00")
+        assert line(result, care).rollover is False
+        assert line(result, travel).budget == D("700.00")  # still monthly
+        assert result.overall.target == D("3000.00")
+        after = budgets.next_period(db, closed)
+        assert (after.start, after.end) == (day("2026-10-30"), day("2026-11-27"))
+        result = overview(db, after, today=today)
+        assert line(result, groceries).budget == D("400.00")
+        assert line(result, care).rollover is True
+        assert result.line_for(travel.id) is None and travel.id in result.annual_category_ids
+        assert result.overall.target == D("2500.00")
+
+    def test_the_edit_day(self, db, account):
+        assert budgets.edit_day(OCT) == OCT.start
+        assert budgets.middle_day(OCT) == day("2026-10-16")
+        statement_mode(db, account, "2026-09-27", closing_day=27)
+        cycle = budgets.period_for(db, TODAY)  # Sep 28 – Oct 27: 30 days
+        assert budgets.edit_day(cycle) == budgets.middle_day(cycle) == day("2026-10-12")
+        assert budgets.middle_day(budgets.period_for(db, day("2026-10-28"))) == day("2026-11-12")
 
     def test_calendar_rows_apply_in_statement_mode_and_back(self, db, cats, account):
         set_budget(db, cats["groceries"].id, D("600.00"), effective_from=SEP)
@@ -548,18 +638,71 @@ class TestStatementModeEdits:
 
     def test_statement_rows_apply_in_calendar_mode(self, db, cats, account):
         statement_mode(db, account, "2026-09-27", closing_day=27)
-        cycle = budgets.period_for(db, TODAY)
-        set_budget(db, cats["dining"].id, D("500.00"), effective_from=cycle)  # row at Sep 28
+        cycle = budgets.period_for(db, TODAY)  # Sep 28 – Oct 27
+        set_budget(db, cats["dining"].id, D("500.00"), effective_from=cycle)  # row at Oct 12
         set_app_settings(db, budget_period_mode="calendar")
+        # The cycle's row applies from the month it mostly covers, not the month before.
         assert line(overview(db, OCT, today=TODAY), cats["dining"]).budget == D("500.00")
-        # The latest effective_from <= the period's end: Sep 28 is inside September too.
-        assert line(overview(db, SEP, today=TODAY), cats["dining"]).budget == D("500.00")
-        assert overview(db, AUG, today=TODAY).line_for(cats["dining"].id) is None
+        assert overview(db, SEP, today=TODAY).line_for(cats["dining"].id) is None
+        # An October edit updates the row that starts inside October: no duplicate.
         set_budget(db, cats["dining"].id, D("450.00"), effective_from=OCT)
+        assert rows(db, cats["dining"]) == [(MONTHLY, day("2026-10-12"), D("450.00"), False)]
+        set_budget(db, cats["dining"].id, D("400.00"), effective_from=NOV)
         assert rows(db, cats["dining"]) == [
-            (MONTHLY, day("2026-09-28"), D("500.00"), False),
-            (MONTHLY, OCT.start, D("450.00"), False),
+            (MONTHLY, day("2026-10-12"), D("450.00"), False),
+            (MONTHLY, NOV.start, D("400.00"), False),
         ]
+
+
+class TestFlaggedCycles:
+    """Review finding: a missing statement makes a ~60-day cycle; the overview says so."""
+
+    def test_a_long_cycle_says_a_statement_seems_to_be_missing(self, db, cats, account, spend):
+        statement_mode(db, account, "2026-08-27", "2026-10-27", closing_day=27)
+        make_budget(db, cats["groceries"], "500.00", effective_from=day("2026-01-01"))
+        spend(cats["groceries"], "400.00", "2026-09-05")
+        spend(cats["groceries"], "400.00", "2026-10-05")
+        period = budgets.current_period(db, today=TODAY)
+        assert (period.start, period.end, period.flagged) == (
+            day("2026-08-28"),
+            day("2026-10-27"),
+            True,
+        )
+        result = overview(db, period, today=TODAY)
+        assert line(result, cats["groceries"]).status == "over"
+        assert result.cycle_notice == (
+            "This cycle is 61 days long, so a statement seems to be missing: the monthly budgets "
+            "here cover 61 days of spending. Add the missing statement on the Statements page."
+        )
+        assert result.notice is None
+        following = overview(db, budgets.next_period(db, period), today=TODAY)
+        assert following.period.flagged is False and following.cycle_notice is None
+
+    def test_a_short_cycle_says_a_date_may_be_wrong(self, db, cats, account):
+        statement_mode(db, account, "2026-09-27", closing_day=10)  # the closing day changed
+        period = budgets.current_period(db, today=day("2026-10-05"))
+        assert (period.start, period.end, period.days) == (day("2026-09-28"), day("2026-10-10"), 13)
+        notice = overview(db, period, today=day("2026-10-05")).cycle_notice
+        assert notice.startswith("This cycle is only 13 days long, so a closing date may be wrong")
+        assert notice.endswith("Check the closing dates on the Statements page.")
+
+    def test_a_flagged_cycle_ends_the_rollover_chain(self, db, cats, account, spend):
+        statement_mode(db, account, "2026-06-27", "2026-07-27", "2026-09-27", closing_day=27)
+        home = cats["home"]
+        make_budget(db, home, "100.00", effective_from=day("2026-06-28"), rollover=True)
+        spend(home, "50.00", "2026-07-10")  # Jun 28 – Jul 27: $50 left
+        spend(home, "180.00", "2026-08-10")  # Jul 28 – Sep 27, 62 days: flagged
+        flagged = budgets.period_for(db, day("2026-08-10"))
+        assert flagged.flagged
+        result = overview(db, flagged, today=TODAY)
+        assert (line(result, home).carry_in, line(result, home).available) == (
+            D("50.00"),
+            D("150.00"),
+        )
+        assert "rollover starts again after this cycle" in result.cycle_notice
+        # What is "left" of the flagged cycle (−$30) doesn't carry: a new chain starts after it.
+        after = overview(db, budgets.next_period(db, flagged), today=TODAY)
+        assert line(after, home).carry_in == D("0.00")
 
 
 # --------------------------------------------------------------------------- rollover (BUD-4)
@@ -623,6 +766,31 @@ class TestRollover:
         sep = line(overview(db, SEP, today=TODAY), care)
         assert (sep.budget, sep.carry_in, sep.available) == (D("150.00"), D("-10.00"), D("140.00"))
         assert line(overview(db, OCT, today=TODAY), care).carry_in == D("90.00")
+
+    def test_rollover_switched_on_in_a_past_month_carries_forward(self, db, cats, spend):
+        care = cats["personal"]
+        make_budget(db, care, "100.00", effective_from=day("2026-01-01"))
+        spend(care, "80.00", "2026-08-10")
+        spend(care, "50.00", "2026-09-10")
+        set_rollover(db, care.id, True, effective_from=AUG, today=TODAY)
+        assert line(overview(db, SEP, today=TODAY), care).carry_in == D("20.00")
+        assert line(overview(db, OCT, today=TODAY), care).carry_in == D("70.00")
+        july = line(overview(db, month_period(2026, 7), today=TODAY), care)
+        assert (july.rollover, july.carry_in) == (False, D("0.00"))
+
+    def test_rollover_stays_off_through_later_edits(self, db, cats):
+        care = cats["personal"]
+        make_budget(db, care, "100.00", effective_from=day("2026-06-01"), rollover=True)
+        set_rollover(db, care.id, False, effective_from=OCT, today=TODAY)
+        assert set_budget(db, care.id, D("150.00"), effective_from=OCT).row.rollover is False
+        assert set_budget(db, care.id, D("160.00"), effective_from=NOV).row.rollover is False
+
+    def test_removing_and_adding_a_budget_back_starts_without_rollover(self, db, cats):
+        care = cats["personal"]
+        make_budget(db, care, "100.00", effective_from=day("2026-06-01"), rollover=True)
+        set_budget(db, care.id, None, effective_from=SEP)
+        assert set_budget(db, care.id, D("100.00"), effective_from=OCT).row.rollover is False
+        assert line(overview(db, OCT, today=TODAY), care).carry_in == D("0.00")
 
     def test_rollover_needs_a_monthly_budget(self, db, cats):
         with pytest.raises(BudgetError, match="monthly budget first"):
@@ -803,6 +971,35 @@ class TestAnnual:
         cats["gifts"].is_hidden = True
         assert [a.category.name for a in annual_overview(db, 2026, today=TODAY).lines] == ["Travel"]
 
+    def test_a_period_shows_the_years_it_touches(self, db, cats, account, spend):
+        """Review finding: the cycle Dec 28 – Jan 27 showed only 2027, so late-December spending
+        in annual categories (in no monthly figure) was in no annual view either."""
+        travel = cats["travel"]
+        make_budget(db, travel, "6000.00", effective_from=day("2026-01-01"), period=ANNUAL)
+        spend(travel, "1000.00", "2026-06-10")
+        spend(travel, "500.00", "2026-12-29")
+        statement_mode(db, account, "2026-11-27", "2026-12-27", closing_day=27)
+        today = day("2026-12-30")
+        cycle = budgets.current_period(db, today=today)
+        assert (cycle.start, cycle.end) == (day("2026-12-28"), day("2027-01-27"))
+        old, new = budgets.annual_overviews(db, cycle, today=today)
+        assert (old.year, old.as_of, new.year, new.as_of) == (
+            2026,
+            day("2026-12-31"),
+            2027,
+            day("2027-01-27"),
+        )
+        (entry,) = old.lines
+        assert (entry.spent, entry.remaining) == (D("1500.00"), D("4500.00"))
+        assert entry.pace_amount == D("5983.56")  # Dec 30 is day 364: 6000 × 364 / 365
+        (entry,) = new.lines  # the 2026 row is still in force
+        assert (entry.spent, entry.pace_amount) == (D("0.00"), None)
+        # A cycle inside one year, and a calendar month: one overview, as of the period's end.
+        (only,) = budgets.annual_overviews(db, budgets.previous_period(db, cycle), today=today)
+        assert (only.year, only.as_of, only.spent_total) == (2026, day("2026-12-27"), D("1000.00"))
+        (only,) = budgets.annual_overviews(db, month_period(2026, 12), today=today)
+        assert (only.year, only.as_of) == (2026, day("2026-12-31"))
+
     def test_over_an_annual_budget(self, db, cats, spend):
         make_budget(db, cats["gifts"], "100.00", period=ANNUAL)
         spend(cats["gifts"], "150.00", "2026-03-01")
@@ -840,11 +1037,23 @@ class TestSuggestions:
         assert budgets.round_up_suggestion(D("-20.00")) == D("0.00")
 
     def test_fewer_than_three_periods(self, db, cats, spend):
-        spend(cats["groceries"], "100.00", "2026-08-20")  # history starts in August
+        spend(cats["groceries"], "100.00", "2026-08-01")  # history starts on Aug 1
         spend(cats["groceries"], "201.00", "2026-09-05")
         result = suggestions(db, today=TODAY)
         assert [p.label for p in result.periods] == ["Sep 2026", "Aug 2026"]
         assert result.for_category(cats["groceries"].id) == D("155.00")  # 150.50 → 155
+
+    def test_the_first_partial_period_is_not_averaged(self, db, cats, spend):
+        """Review finding: history starting Aug 20 holds 12 days of August, which isn't a
+        complete period (averaging it as one gave the demo's $215 for a $3,274 month)."""
+        spend(cats["groceries"], "100.00", "2026-08-20")
+        spend(cats["groceries"], "201.00", "2026-09-05")
+        result = suggestions(db, today=TODAY)
+        assert [p.label for p in result.periods] == ["Sep 2026"]
+        assert result.for_category(cats["groceries"].id) == D("205.00")  # 201 → 205
+        spend(cats["groceries"], "50.00", "2026-09-20")  # history from September only
+        assert suggest(db, cats["groceries"].id, today=TODAY) == D("255.00")
+        assert suggest(db, cats["groceries"].id, today=TODAY, before=SEP) is None
 
     def test_no_data(self, db, cats, spend):
         assert suggest(db, cats["groceries"].id, today=TODAY) is None
@@ -853,12 +1062,12 @@ class TestSuggestions:
         assert suggest(db, cats["groceries"].id, today=TODAY) is None
 
     def test_a_category_without_spending_suggests_zero(self, db, cats, spend):
-        spend(cats["groceries"], "50.00", "2026-09-03")
+        spend(cats["groceries"], "50.00", "2026-09-01")
         assert suggest(db, cats["home"].id, today=TODAY) == D("0.00")
 
     def test_periods_before_a_viewed_period(self, db, cats, spend):
         for month, amount in ((5, "100.00"), (6, "200.00"), (7, "300.00"), (8, "900.00")):
-            spend(cats["home"], amount, f"2026-{month:02d}-15")
+            spend(cats["home"], amount, f"2026-{month:02d}-01")
         assert suggest(db, cats["home"].id, today=TODAY, before=AUG) == D("200.00")
         # A future period skips the current, incomplete one.
         result = suggestions(db, today=TODAY, before=NOV)
@@ -873,11 +1082,26 @@ class TestSuggestions:
 
     def test_suggestions_follow_statement_cycles(self, db, cats, account, spend):
         statement_mode(db, account, "2026-08-27", "2026-09-27", closing_day=27)
+        spend(cats["groceries"], "10.00", "2026-08-01")  # history from Aug 1
         spend(cats["home"], "90.00", "2026-09-27")  # Aug 28 – Sep 27
         spend(cats["home"], "60.00", "2026-09-28")  # the current cycle: not complete
         result = suggestions(db, today=TODAY)
-        assert result.periods[0].end == day("2026-09-27")
+        assert [p.end for p in result.periods] == [day("2026-09-27")]  # Jul 28 – Aug 27: partial
         assert result.for_category(cats["home"].id) == D("90.00")
+
+    def test_a_flagged_cycle_is_not_averaged(self, db, cats, account, spend):
+        """A 61-day cycle (September's statement missing) would count two cycles' spending as
+        one: the suggestion averages the cycles around it instead."""
+        statement_mode(db, account, "2026-06-27", "2026-07-27", "2026-09-27", closing_day=27)
+        spend(cats["home"], "100.00", "2026-06-01")  # history from June
+        spend(cats["home"], "100.00", "2026-07-10")  # Jun 28 – Jul 27
+        spend(cats["home"], "400.00", "2026-08-10")  # Jul 28 – Sep 27: flagged
+        today = day("2026-10-15")
+        result = suggestions(db, today=today)
+        assert [(p.start, p.end) for p in result.periods] == [
+            (day("2026-06-28"), day("2026-07-27"))
+        ]
+        assert result.for_category(cats["home"].id) == D("100.00")
 
 
 def test_a_new_category_can_be_budgeted(db):

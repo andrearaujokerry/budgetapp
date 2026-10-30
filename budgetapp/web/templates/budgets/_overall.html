@@ -36,7 +36,20 @@
 {{ ui.stat('Spent', ui.money(t.spent, cents=false), sub='in all categories', icon='credit-card', id='overall-spent') }}
 {{ ui.stat('Remaining', ui.money(none), sub='no budget set', icon='target', id='overall-remaining') }}
 {%- endif %}
-{{ ui.stat('Not budgeted', ui.money(t.unbudgeted_spent, cents=false), sub=('counts toward the target' if o.has_target else (ov.unbudgeted|length|pluralize('category', 'categories') ~ ', listed below') if ov.unbudgeted else 'every category with spending has a budget'), icon='list', id='overall-unbudgeted') }}
+{#- Not budgeted counts hidden categories too (like every figure on this card); the list below
+    leaves them out, so the sub line says how the amount splits. #}
+{%- if not ov.unbudgeted and t.unbudgeted_hidden_spent == 0 %}
+{%- set unbudgeted_sub = 'every category with spending has a budget' %}
+{%- elif o.has_target %}
+{%- set unbudgeted_sub = 'counts toward the target' %}
+{%- elif not ov.unbudgeted %}
+{%- set unbudgeted_sub = 'all in hidden categories' %}
+{%- elif t.unbudgeted_hidden_spent != 0 %}
+{%- set unbudgeted_sub = (ov.unbudgeted|length|pluralize('category', 'categories')) ~ ' listed below, ' ~ ui.money_text(t.unbudgeted_hidden_spent, cents=false) ~ ' in hidden ones' %}
+{%- else %}
+{%- set unbudgeted_sub = (ov.unbudgeted|length|pluralize('category', 'categories')) ~ ', listed below' %}
+{%- endif %}
+{{ ui.stat('Not budgeted', ui.money(t.unbudgeted_spent, cents=false), sub=unbudgeted_sub, icon='list', id='overall-unbudgeted') }}
 {{ ui.stat('Annual budgets', ui.money(t.annual_spent, cents=false), sub=('spent this ' ~ labels.unit if ov.is_current else 'spent in ' ~ labels.period) ~ ', tracked by year', icon='calendar', id='overall-annual') }}
 </div>
 {%- if t.hidden_spent != 0 %}

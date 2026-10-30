@@ -26,6 +26,9 @@
 {%- if ov.notice %}
 {{ ui.banner('warn', ov.notice, title='Statement cycles unavailable.', action_href='/settings', action_label='Open Settings', id='period-notice') }}
 {%- endif %}
+{%- if ov.cycle_notice %}
+{{ ui.banner('warn', ov.cycle_notice, title='Unusual statement cycle.', action_href='/statements', action_label='Open Statements', id='cycle-notice') }}
+{%- endif %}
 {%- if ov.is_past %}
 {{ ui.banner('info', 'Changes you make here apply from ' ~ labels.period ~ ' on, until a later change; earlier periods keep their budgets.', title='You are looking at a past ' ~ labels.unit ~ '.', id='edit-note') }}
 {%- elif ov.is_future %}
@@ -37,6 +40,8 @@
 {% include "budgets/_lines.html" %}
 
 {% include "budgets/_unbudgeted.html" %}
+
+{% include "budgets/_annual_closed.html" %}
 
 {% include "budgets/_annual.html" %}
 

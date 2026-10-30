@@ -15,16 +15,20 @@ back to calendar months and :attr:`BudgetOverview.notice` says so. :func:`previo
 **Versioned amounts (ARCHITECTURE §5).** A ``budgets`` row holds an amount from its
 ``effective_from`` on; the amount for a period is the row with the latest
 ``effective_from <= period.end`` (an amount of ``NULL`` = no budget). An edit (:func:`set_budget`,
-:func:`set_rollover`) updates the row that starts inside the edited period, else inserts one at the
-period's start, so earlier periods keep their amounts. A category has at most one active type:
-setting a monthly amount writes an amount-``NULL`` annual row from the same date, and vice versa.
-Should both still be set for a period (for example after a category merge), the more recent row
-wins (monthly on a tie).
+:func:`set_rollover`) updates the row that starts inside the edited period, else inserts one at
+:func:`edit_day`: the period's start, or a statement cycle's middle day. A cycle's ends come from
+closing dates that can still move by a few days (a generated date replaced by the real one, or a
+corrected one), and a row at the middle stays inside its cycle when they do, so neither the cycle
+before nor a planned cycle after it changes. Earlier periods keep their amounts. A category has at
+most one active type: setting a monthly amount writes an amount-``NULL`` annual row from the same
+date, and vice versa. Should both still be set for a period (for example after a category merge),
+the more recent row wins (monthly on a tie).
 
 **Rollover (BUD-4).** ``available = budget + carry_in``. With rollover on, ``carry_in`` is the
 previous period's ``available − spent`` (negative after an overspend), chained back to the first
-period of an unbroken run of rollover periods, whose carry-in is 0. It is computed on the fly, at
-most :data:`MAX_ROLLOVER_PERIODS` periods back.
+period of an unbroken run of rollover periods, whose carry-in is 0. A flagged statement cycle
+(outside 25–35 days, usually a missing statement) ends the chain: the cycle after it starts a new
+one. It is computed on the fly, at most :data:`MAX_ROLLOVER_PERIODS` periods back.
 
 **Overall target (BUD-3) and annual budgets (BUD-5).** The overall target (the ``overall`` monthly
 row) is compared with spending in every category without an active annual budget. Without a
@@ -43,12 +47,13 @@ period elapsed, counting today, for periods in progress (``None`` for past and f
 "today" from :mod:`budgetapp.clock` unless ``today`` is given, and never commits):
 
 * :func:`current_period`, :func:`period_for`, :func:`previous_period`, :func:`next_period` and
-  :func:`period_settings`: the budget periods.
+  :func:`period_settings`: the budget periods; :func:`middle_day` and :func:`edit_day`.
 * :func:`overview` → :class:`BudgetOverview` for one period: ``lines`` (monthly budgets; categories
   without one are in ``unbudgeted``, so a line's status is never ``none``), ``overall``,
-  ``totals``, ``notice``, ``days_left``, ``pace_percent``. Budget alerts read ``lines`` (and
-  ``overall``) of the current period.
-* :func:`annual_overview` → :class:`AnnualOverview` for a calendar year.
+  ``totals``, ``notice``, ``cycle_notice``, ``days_left``, ``pace_percent``. Budget alerts read
+  ``lines`` (and ``overall``) of the current period.
+* :func:`annual_overview` → :class:`AnnualOverview` for a calendar year;
+  :func:`annual_overviews` → one per calendar year a budget period touches.
 * :func:`suggestions` / :func:`suggest`: the "Suggest" amounts.
 * :func:`set_budget` / :func:`set_rollover` → :class:`BudgetChange`; the caller commits.
   :func:`parse_amount` / :func:`check_amount` validate amounts; :class:`BudgetError` messages are
@@ -115,6 +120,26 @@ def notice_no_closing_date(card: str) -> str:
     return (
         f"No statement closing date is known for {card} yet. Budgets use calendar months until "
         "the first statement arrives, or until you enter the closing day in Settings."
+    )
+
+
+def notice_flagged_cycle(period: Period, *, rollover: bool = False) -> str:
+    """Why a flagged statement cycle (outside 25–35 days, ARCHITECTURE §6) looks wrong.
+
+    ``rollover``: mention that rollover starts again after the cycle (some budget rolls over).
+    """
+    days = period.days
+    restart = ", and rollover starts again after this cycle" if rollover else ""
+    if days > periods.MAX_CYCLE_DAYS:
+        return (
+            f"This cycle is {days} days long, so a statement seems to be missing: the monthly "
+            f"budgets here cover {days} days of spending{restart}. Add the missing statement on "
+            "the Statements page."
+        )
+    return (
+        f"This cycle is only {days} days long, so a closing date may be wrong (or the closing "
+        f"day changed): the monthly budgets here cover {days} days of spending{restart}. Check "
+        "the closing dates on the Statements page."
     )
 
 
@@ -214,7 +239,12 @@ class OverallLine:
 @dataclass(frozen=True, slots=True)
 class BudgetTotals:
     """Where the period's spending went; ``spent = budgeted_spent + unbudgeted_spent +
-    annual_spent``. Hidden categories count everywhere (``hidden_spent`` is their share)."""
+    annual_spent``. Hidden categories count everywhere (``hidden_spent`` is their share).
+
+    ``unbudgeted_hidden_spent`` is the part of ``unbudgeted_spent`` in hidden categories, which
+    :attr:`BudgetOverview.unbudgeted` leaves out: the listed rows add up to
+    :attr:`unbudgeted_listed_spent`.
+    """
 
     spent: Decimal
     budgeted: Decimal
@@ -223,6 +253,12 @@ class BudgetTotals:
     unbudgeted_spent: Decimal
     annual_spent: Decimal
     hidden_spent: Decimal
+    unbudgeted_hidden_spent: Decimal = ZERO
+
+    @property
+    def unbudgeted_listed_spent(self) -> Decimal:
+        """Unbudgeted spending in visible categories: what the ``unbudgeted`` rows add up to."""
+        return self.unbudgeted_spent - self.unbudgeted_hidden_spent
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +321,10 @@ class BudgetOverview:
     include hidden categories. Annual budgets are reported by :func:`annual_overview` instead;
     ``annual_category_ids`` lists the categories whose spending they cover in this period.
     ``spending`` is the period's :func:`period_spending` result (every expense category).
+
+    ``notice``: statement mode can't be used (no card or no closing date), so periods are
+    calendar months. ``cycle_notice``: the period is a flagged statement cycle (outside 25–35
+    days, usually a missing statement), so its budgets cover an unusual stretch of spending.
     """
 
     period: Period
@@ -302,6 +342,7 @@ class BudgetOverview:
     annual_category_ids: frozenset[int]
     settings: PeriodSettings
     spending: PeriodSpending
+    cycle_notice: str | None = None
 
     @property
     def is_current(self) -> bool:
@@ -435,6 +476,25 @@ def previous_period(session: Session, period: Period) -> Period:
 def next_period(session: Session, period: Period) -> Period:
     """The budget period after ``period``."""
     return period_settings(session).next(period)
+
+
+def middle_day(period: Period) -> dt.date:
+    """The middle day of ``period`` (the earlier one of two). It stays inside the period when a
+    closing date moves its ends by a few days, so it names a statement cycle reliably (the
+    Budgets page's forms send it)."""
+    return period.start + dt.timedelta(days=(period.days - 1) // 2)
+
+
+def edit_day(period: Period) -> dt.date:
+    """The ``effective_from`` an edit of ``period`` inserts (ARCHITECTURE §5): the period's start,
+    or a statement cycle's :func:`middle_day`.
+
+    A cycle's start is the previous closing date + 1, and that date can still move: a generated
+    closing date is replaced by the statement's real one, or the user corrects it. A row at the
+    start would then fall inside the cycle before (whose budget the lookup "latest
+    ``effective_from <= period.end``" would change); a row at the middle stays in its cycle.
+    """
+    return middle_day(period) if period.kind == periods.STATEMENT else period.start
 
 
 # --------------------------------------------------------------------------- math helpers
@@ -613,13 +673,19 @@ class _Context:
         return self.spending(period).amount_for(category_id)
 
     def carry_in(self, category_id: int, period: Period, row: BudgetRow) -> Decimal:
-        """BUD-4: what rolls into ``period`` (0 without rollover or in a chain's first period)."""
+        """BUD-4: what rolls into ``period`` (0 without rollover or in a chain's first period).
+
+        A flagged cycle ends the chain: what is left of a 61-day cycle (a missing statement)
+        compares one budget with two cycles of spending, so nothing carries out of it.
+        """
         if not row.rollover:
             return ZERO
         chain: list[tuple[Period, Decimal]] = []
         earlier = period
         for _ in range(MAX_ROLLOVER_PERIODS):
             earlier = self.settings.previous(earlier)
+            if earlier.flagged:
+                break
             previous = self.versions.active(category_id, earlier.end)
             if previous is None or previous.period != MONTHLY or not previous.rollover:
                 break
@@ -663,7 +729,8 @@ def overview(session: Session, period: Period, *, today: dt.date | None = None) 
     unbudgeted: list[UnbudgetedLine] = []
     annual_ids: set[int] = set()
     budgeted = budgeted_spent = unbudgeted_spent = annual_spent = hidden_spent = ZERO
-    has_monthly = False
+    unbudgeted_hidden_spent = ZERO
+    has_monthly = rolls_over = False
     for category in ctx.categories.values():
         spent = spending.amount_for(category.id)
         if category.is_hidden:
@@ -671,7 +738,9 @@ def overview(session: Session, period: Period, *, today: dt.date | None = None) 
         row = ctx.versions.active(category.id, on)
         if row is None:
             unbudgeted_spent += spent
-            if spent != 0 and not category.is_hidden:
+            if category.is_hidden:
+                unbudgeted_hidden_spent += spent
+            elif spent != 0:
                 unbudgeted.append(UnbudgetedLine(category, spent))
             continue
         if row.period == ANNUAL:
@@ -683,6 +752,7 @@ def overview(session: Session, period: Period, *, today: dt.date | None = None) 
         available = row.amount + carry
         percent, status = usage(available, spent)
         has_monthly = True
+        rolls_over = rolls_over or row.rollover
         budgeted += available
         budgeted_spent += spent
         if category.is_hidden:
@@ -727,6 +797,7 @@ def overview(session: Session, period: Period, *, today: dt.date | None = None) 
             pace,
         )
 
+    flagged = period.kind == periods.STATEMENT and period.flagged
     return BudgetOverview(
         period=period,
         mode=ctx.settings.effective_mode,
@@ -743,6 +814,7 @@ def overview(session: Session, period: Period, *, today: dt.date | None = None) 
             unbudgeted_spent=unbudgeted_spent,
             annual_spent=annual_spent,
             hidden_spent=hidden_spent,
+            unbudgeted_hidden_spent=unbudgeted_hidden_spent,
         ),
         today=today,
         pace_percent=pace,
@@ -751,6 +823,7 @@ def overview(session: Session, period: Period, *, today: dt.date | None = None) 
         annual_category_ids=frozenset(annual_ids),
         settings=ctx.settings,
         spending=spending,
+        cycle_notice=notice_flagged_cycle(period, rollover=rolls_over) if flagged else None,
     )
 
 
@@ -766,8 +839,9 @@ def annual_overview(
     The annual rows in force on ``as_of`` apply, against spending from Jan 1 through ``as_of``
     (year to date, same date basis and pending setting as :func:`period_spending`). ``as_of``
     defaults to the end of the current budget period when that falls in ``year`` (so: year to
-    date), else Dec 31; it is clamped into the year. The Budgets page passes the end of the period
-    it shows, so its annual section matches that period. Hidden categories are left out.
+    date), else Dec 31; it is clamped into the year. The Budgets page shows
+    :func:`annual_overviews` of the period it shows, so its annual section matches that period.
+    Hidden categories are left out.
     """
     today = today or clock.today()
     year_period = periods.year_period(year)
@@ -825,6 +899,26 @@ def annual_overview(
     )
 
 
+def annual_overviews(
+    session: Session, period: Period, *, today: dt.date | None = None
+) -> tuple[AnnualOverview, ...]:
+    """Annual budgets as budget ``period`` sees them: one :func:`annual_overview` per calendar
+    year the period touches, oldest first.
+
+    Each is as of the period's end, or Dec 31 for a year that ends inside the period, so a
+    statement cycle that crosses the year end (Dec 28 – Jan 27) gives the old year's full
+    Jan 1 – Dec 31 tally (late-December spending in annual categories is in no monthly figure,
+    so it must show here) and the new year to the cycle's end. The last one is always as of
+    ``period.end``: the rows an edit made in ``period`` writes are in force there (an earlier
+    year's tally shows them only when :func:`edit_day` falls in that year).
+    """
+    today = today or clock.today()
+    return tuple(
+        annual_overview(session, year, today=today, as_of=min(period.end, dt.date(year, 12, 31)))
+        for year in range(period.start.year, period.end.year + 1)
+    )
+
+
 # --------------------------------------------------------------------------- suggestions
 
 
@@ -838,10 +932,13 @@ def suggestions(
     """Mean spending per category (and for the overall target) over the last ``periods``
     COMPLETE budget periods before ``before`` (default: the current period), rounded up to $5.
 
-    Fewer periods are averaged when the history is shorter (periods that end before the first
-    transaction don't count; a period with no spending in a category counts as 0). No complete
-    period with history → no suggestions. The overall suggestion leaves out categories whose
-    budget in ``before`` is annual, like the overall target does.
+    A complete period has ended and lies wholly inside the history: the first period, which
+    the first transaction falls in the middle of, holds only part of a period's spending and
+    doesn't count. Neither does a flagged statement cycle (outside 25–35 days, usually a
+    missing statement). Fewer periods are averaged when the history is shorter (a period with
+    no spending in a category counts as 0); no complete period → no suggestions. The overall
+    suggestion leaves out categories whose budget in ``before`` is annual, like the overall
+    target does.
     """
     today = today or clock.today()
     ctx = _Context(session)
@@ -855,9 +952,9 @@ def suggestions(
         if len(chosen) >= periods:
             break
         earlier = ctx.settings.previous(earlier)
-        if earlier.end < history:
+        if earlier.start < history:
             break
-        if earlier.end < today:
+        if earlier.end < today and not earlier.flagged:
             chosen.append(earlier)
     if not chosen:
         return Suggestions(())
@@ -896,13 +993,15 @@ def suggest(
 
 def _edit_window(
     session: Session, effective_from: Period | dt.date | None, today: dt.date | None
-) -> tuple[dt.date, dt.date]:
+) -> tuple[tuple[dt.date, dt.date], dt.date]:
+    """``((start, end), day)``: rows starting inside ``[start, end]`` are this edit's; a new row
+    starts on ``day`` (:func:`edit_day` of a period, or the exact date given)."""
     if effective_from is None:
         effective_from = current_period(session, today=today)
     if isinstance(effective_from, Period):
-        return effective_from.start, effective_from.end
+        return (effective_from.start, effective_from.end), edit_day(effective_from)
     if isinstance(effective_from, dt.date) and not isinstance(effective_from, dt.datetime):
-        return effective_from, effective_from
+        return (effective_from, effective_from), effective_from
     raise TypeError("effective_from must be a Period or a date")
 
 
@@ -959,12 +1058,13 @@ def set_budget(
     ``effective_from`` on; ``amount=None`` removes it from then on (BUD-1, BUD-3, BUD-5).
 
     ``effective_from`` is the budget period being edited (default: the current one): the row that
-    starts inside it is updated, else a row is inserted at its start, so earlier periods keep
-    their amounts (ARCHITECTURE §5). An exact ``date`` edits the row for that date. ``period`` is
-    ``monthly`` or ``annual``; an annual amount covers the calendar year of each period it is in
-    force for. Setting one type writes an amount-``NULL`` row of the other type from the same date
-    when that one is set, so a category keeps one active type. A new monthly row keeps the rollover
-    setting of the one before it. Nothing is written when the amount in force is already the same.
+    starts inside it is updated, else a row is inserted at its :func:`edit_day` (the start; a
+    statement cycle's middle day), so earlier periods keep their amounts (ARCHITECTURE §5). An
+    exact ``date`` edits the row for that date. ``period`` is ``monthly`` or ``annual``; an annual
+    amount covers the calendar year of each period it is in force for. Setting one type writes an
+    amount-``NULL`` row of the other type from the same date when that one is set, so a category
+    keeps one active type. A new monthly row keeps the rollover setting of the one before it.
+    Nothing is written when the amount in force is already the same.
 
     Raises :class:`BudgetError` (amount below 0, more than two decimals, not a spending category)
     and ``LookupError`` for an unknown category.
@@ -976,8 +1076,8 @@ def set_budget(
     amount = check_amount(amount)
     if category_id is not None:
         _budget_category(session, category_id)
-    window = _edit_window(session, effective_from, today)
-    start, end = window
+    window, start = _edit_window(session, effective_from, today)
+    end = window[1]
     versions = _load_versions(session)
     active = versions.active(category_id, end)
     same_type = active is not None and active.period == period
@@ -1023,8 +1123,8 @@ def set_rollover(
     monthly budget in that period.
     """
     category = _budget_category(session, category_id)
-    window = _edit_window(session, effective_from, today)
-    start, end = window
+    window, start = _edit_window(session, effective_from, today)
+    end = window[1]
     versions = _load_versions(session)
     active = versions.active(category_id, end)
     if active is None or active.period != MONTHLY:
