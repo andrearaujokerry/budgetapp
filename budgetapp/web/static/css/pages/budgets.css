@@ -143,6 +143,16 @@
 }
 
 @media (max-width: 599px) {
+  /* A cycle named with years (another year, or across Dec 31) doesn't fit next to "This cycle":
+     the "Statement" tag goes (the subtitle says "Statement cycle") and the row wraps. */
+  .period-nav {
+    flex-wrap: wrap;
+  }
+
+  .period-nav__kind {
+    display: none;
+  }
+
   .budget-phone {
     display: block;
   }
