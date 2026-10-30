@@ -7,8 +7,9 @@ and the pending setting apply to every number here.
 
 **Periods (BUD-2).** :func:`current_period` / :func:`period_for` follow
 ``app_settings.budget_period_mode``: calendar months, or the statement cycles of the card named by
-``app_settings.budget_cycle_account_id`` (closing dates from ``statements``, extended with the
-card's ``statement_closing_day``). Statement mode without a card or any known closing date falls
+``app_settings.budget_cycle_account_id``, built from ``statements.cycle_inputs`` (its closing
+dates, ``statement_closing_day`` and the earliest statement's period start), so they are exactly
+the Statements page's cycles. Statement mode without a card or any known closing date falls
 back to calendar months and :attr:`BudgetOverview.notice` says so. :func:`previous_period` /
 :func:`next_period` step through them.
 
@@ -79,12 +80,12 @@ from budgetapp.models import (
     Account,
     Budget,
     Category,
-    Statement,
     get_app_settings,
     v_allocations,
 )
 from budgetapp.money import CENT, MAX_AMOUNT, ZERO, is_cents, parse_money_input, to_money
 from budgetapp.periods import Period
+from budgetapp.services import statements
 from budgetapp.services.spending import PeriodSpending, basis_date, basis_for_mode, period_spending
 
 MONTHLY = "monthly"
@@ -432,14 +433,8 @@ def period_settings(session: Session) -> PeriodSettings:
     )
     if account is None:
         return PeriodSettings(mode, CALENDAR, notice=NOTICE_NO_CARD)
-    rows = session.execute(
-        select(Statement.closing_date, Statement.period_start_override)
-        .where(Statement.account_id == account.id)
-        .order_by(Statement.closing_date)
-    ).all()
-    closings = tuple(row.closing_date for row in rows)
-    closing_day = account.statement_closing_day
-    if not closings and closing_day is None:
+    cycles = statements.cycle_inputs(session, account.id)  # the Statements page's cycles
+    if not cycles.known:
         return PeriodSettings(
             mode,
             CALENDAR,
@@ -452,9 +447,9 @@ def period_settings(session: Session) -> PeriodSettings:
         STATEMENT,
         account.id,
         account.display_name,
-        closings,
-        closing_day,
-        rows[0].period_start_override if rows else None,
+        cycles.closings,
+        cycles.closing_day,
+        cycles.first_period_start,
     )
 
 

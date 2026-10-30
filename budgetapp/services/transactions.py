@@ -49,14 +49,13 @@ from budgetapp.models import (
     Category,
     CsvImport,
     Rule,
-    Statement,
     Transaction,
     TransactionSplit,
     TransactionTombstone,
     get_app_settings,
 )
 from budgetapp.money import ZERO, format_money, is_cents, parse_money_input, to_money
-from budgetapp.services import categorize, spending, userstate
+from budgetapp.services import budgets, categorize, spending, userstate
 
 PER_PAGE = 50
 MAX_PER_PAGE = 200
@@ -525,27 +524,10 @@ class DateRange:
 
 
 def budget_period(session: Session, today: dt.date) -> periods.Period:
-    """The budget period containing ``today`` (``app_settings``: calendar month or the budget
-    card's statement cycle, falling back to the calendar month when no cycle is known)."""
-    settings = get_app_settings(session)
-    if settings.budget_period_mode != "statement" or settings.budget_cycle_account_id is None:
-        return periods.month_of(today)
-    account_id = settings.budget_cycle_account_id
-    statements = session.execute(
-        select(Statement.closing_date, Statement.period_start_override)
-        .where(Statement.account_id == account_id)
-        .order_by(Statement.closing_date)
-    ).all()
-    closing_day = session.scalar(
-        select(Account.statement_closing_day).where(Account.id == account_id)
-    )
-    return periods.budget_period_for(
-        today,
-        mode="statement",
-        closings=[s.closing_date for s in statements],
-        closing_day=closing_day,
-        first_period_start=statements[0].period_start_override if statements else None,
-    )
+    """The budget period containing ``today``, exactly as the Budgets page cuts it
+    (``budgets.period_for``: the calendar month, or the budget card's statement cycle as the
+    Statements page shows it, falling back to the calendar month when no cycle is known)."""
+    return budgets.period_for(session, today)
 
 
 def _period_option_label(period: periods.Period) -> str:

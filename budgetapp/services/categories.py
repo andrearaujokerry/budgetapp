@@ -52,22 +52,19 @@ from budgetapp.db import ledger_lock
 from budgetapp.models import (
     CATEGORY_KINDS,
     MAPPING_SOURCES,
-    Account,
     AlertEvent,
     Budget,
     Category,
     CategoryMapping,
     Rule,
-    Statement,
     Transaction,
     TransactionSplit,
     TransactionTombstone,
-    get_app_settings,
     v_allocations,
 )
 from budgetapp.money import ZERO
-from budgetapp.periods import STATEMENT, Period, budget_period_for
-from budgetapp.services import spending, userstate
+from budgetapp.periods import STATEMENT, Period
+from budgetapp.services import budgets, spending, userstate
 from budgetapp.services.categorize import (
     CREDIT_KEY_SUFFIX,
     Categorizer,
@@ -247,28 +244,10 @@ def all_categories(session: Session) -> list[Category]:
 
 
 def current_period(session: Session, *, today: dt.date | None = None) -> Period:
-    """The budget period containing ``today`` (the setting's calendar month or statement cycle).
-
-    Statement mode uses the budget card's stored closing dates and closing day, like the Budgets
-    page; without them it falls back to the calendar month.
-    """
-    day = today or clock.today()
-    settings = get_app_settings(session)
-    if settings.budget_period_mode != "statement" or settings.budget_cycle_account_id is None:
-        return budget_period_for(day, mode="calendar")
-    account = session.get(Account, settings.budget_cycle_account_id)
-    rows = session.execute(
-        select(Statement.closing_date, Statement.period_start_override)
-        .where(Statement.account_id == settings.budget_cycle_account_id)
-        .order_by(Statement.closing_date)
-    ).all()
-    return budget_period_for(
-        day,
-        mode="statement",
-        closings=[r.closing_date for r in rows],
-        closing_day=account.statement_closing_day if account is not None else None,
-        first_period_start=rows[0].period_start_override if rows else None,
-    )
+    """The budget period containing ``today``, exactly as the Budgets page cuts it
+    (``budgets.current_period``: the calendar month, or the budget card's statement cycle; the
+    calendar month when no cycle is known)."""
+    return budgets.current_period(session, today=today)
 
 
 def list_categories(session: Session, *, today: dt.date | None = None) -> CategoryOverview:
