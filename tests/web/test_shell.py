@@ -546,13 +546,22 @@ def test_htmx_redirect(probe_client):
     assert toast_texts(probe_client.get("/_probe/page").text) == ["Rule saved"]
 
 
+def _tampered(value: str) -> str:
+    """``value`` with one character in the middle of its signature changed: always a different
+    signature (overwriting the last two characters with "AA" left it valid about 1 run in 256)."""
+    payload, _, signature = value.partition(".")
+    i = len(signature) // 2
+    flipped = "B" if signature[i] == "A" else "A"
+    return f"{payload}.{signature[:i]}{flipped}{signature[i + 1 :]}"
+
+
 @pytest.mark.parametrize(
     "value",
     [
         "",
         "garbage",
         "a.b",
-        flash_module.encode([("success", "x")])[:-2] + "AA",  # tampered signature
+        _tampered(flash_module.encode([("success", "x")])),
         flash_module._b64(b'[["success","forged"]]') + ".AAAAAAAAAAAAAAAAAAAAAA",
     ],
 )

@@ -1,4 +1,5 @@
 import csv
+import os
 from pathlib import Path
 
 import pytest
@@ -292,12 +293,14 @@ class TestSeedData:
         assert mapped["OTHER_OTHER"] == "Other"
 
     def test_seed_matches_plaids_csv_when_available(self):
-        csv_path = Path(
-            "/private/tmp/claude-501/-Users-andrearaujokerry-Desktop-budgetapp/"
-            "26193c1b-37e3-48b9-9278-3fb6a7b619fe/scratchpad/dl/csv/pfc-taxonomy-all.csv"
-        )
-        if not csv_path.exists():
-            pytest.skip("Plaid's taxonomy CSV is not on this machine")
+        """Set ``BUDGETAPP_PFC_CSV`` to Plaid's PFC taxonomy CSV (all versions) to check the seed
+        against it."""
+        location = os.environ.get("BUDGETAPP_PFC_CSV")
+        if not location:
+            pytest.skip("set BUDGETAPP_PFC_CSV to Plaid's taxonomy CSV to run this check")
+        csv_path = Path(location).expanduser()
+        if not csv_path.is_file():
+            pytest.fail(f"BUDGETAPP_PFC_CSV={location} is not a file")
         with csv_path.open(newline="", encoding="utf-8-sig") as fh:
             rows = [
                 r for r in list(csv.reader(fh))[1:] if r and r[0] and not r[0].startswith("Note")
