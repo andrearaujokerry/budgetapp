@@ -11,7 +11,7 @@ from sqlalchemy import select, text
 from budgetapp import periods
 from budgetapp.db import LEDGER_KEY, LOCK_NS_GLOBAL
 from budgetapp.models import Rule, Transaction
-from budgetapp.services import categorize, spending, userstate
+from budgetapp.services import categorize, rules, spending, userstate
 from budgetapp.services import transactions as txns
 from budgetapp.services.transactions import TransactionEditError
 from tests.factories import (
@@ -573,6 +573,39 @@ class TestOneClickDraft:
         )
         rule = Rule(merchant_pattern=draft.merchant_pattern, match_type="contains")
         assert categorize.rule_matches(rule, plaid_row) and categorize.rule_matches(rule, csv_row)
+
+    def test_with_nothing_to_outrank_it_goes_last_like_a_rule_made_on_the_rules_page(
+        self, db, card, cats
+    ):
+        """The Rules page renumbers priorities 10, 20, … when a rule moves (CAT), so a fixed
+        100 could land between rules and outrank ones that already decide other charges."""
+        for n in range(10):
+            make_rule(db, cats["home"], merchant_pattern=f"HARDWARE {n}")
+        catering = make_rule(
+            db, cats["shopping"], merchant_pattern="Blue Bottle", amount_min="100.00"
+        )
+        rules.renumber(db)  # what moving any rule on the Rules page does: 10, 20, … 110
+        assert catering.priority == 110
+        coffee = make_transaction(
+            db, card, name="BLUE BOTTLE COFFEE", merchant_name="Blue Bottle", amount="6.50"
+        )
+        draft = txns.one_click_draft(db, coffee.id)
+        assert draft.runs_before is None and draft.priority == rules.next_priority(db)
+        made = txns.create_one_click_rule(
+            db,
+            coffee.id,
+            merchant_pattern=draft.merchant_pattern,
+            category_id=cats["dining"].id,
+            apply_to_past=False,
+        )
+        assert [row.id for row in rules.list_rules(db)][-1] == made.rule_id
+        big = make_transaction(
+            db, card, name="BLUE BOTTLE CATERING", merchant_name="Blue Bottle", amount="120.00"
+        )
+        categorize.recategorize(db, transaction_ids=[big.id, coffee.id])
+        db.expire_all()
+        assert (big.category_id, big.rule_id) == (cats["shopping"].id, catering.id)
+        assert (coffee.category_id, coffee.rule_id) == (cats["dining"].id, made.rule_id)
 
     def test_runs_before_the_rule_that_matched(self, db, card, cats):
         older = make_rule(db, cats["shopping"], merchant_pattern="COSTCO", priority=40)

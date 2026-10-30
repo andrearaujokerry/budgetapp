@@ -56,6 +56,7 @@ from budgetapp.models import (
 )
 from budgetapp.money import ZERO, format_money, is_cents, parse_money_input, to_money
 from budgetapp.services import budgets, categorize, spending, userstate
+from budgetapp.services.rules import next_priority
 
 PER_PAGE = 50
 MAX_PER_PAGE = 200
@@ -78,8 +79,6 @@ MAX_TAG_LENGTH = 40
 MAX_TAGS = 20
 MAX_SPLIT_PARTS = 12
 MAX_SPLIT_NOTE_LENGTH = 200
-#: ``rules.priority`` when nothing needs outranking (the column default).
-DEFAULT_RULE_PRIORITY = 100
 
 #: How the source of a category is shown (``system`` is the fixed card-payment step).
 CATEGORY_SOURCE_LABELS = {
@@ -1444,10 +1443,12 @@ def _first_matching_rule(session: Session, txn: Transaction) -> Rule | None:
 
 
 def _one_click_priority(session: Session, txn: Transaction) -> tuple[int, Rule | None]:
-    """Just before the first active rule matching ``txn`` (so the new rule wins), else 100."""
+    """Just before the first active rule matching ``txn`` (so the new rule wins for it), else
+    last, like any new rule (``rules.next_priority``; the Rules page renumbers priorities 10, 20,
+    … when rules move, so a fixed 100 could land between them)."""
     first = _first_matching_rule(session, txn)
     if first is None:
-        return DEFAULT_RULE_PRIORITY, None
+        return next_priority(session), None
     return first.priority - 1, first
 
 
