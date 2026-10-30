@@ -33,6 +33,7 @@ from budgetapp.config import ConfigError, Settings, load_settings
 from budgetapp.db import (
     code_head,
     current_revision,
+    drop_database,
     make_engine,
     make_session_factory,
     run_migrations,
@@ -212,7 +213,7 @@ def _exists(conn: psycopg.Connection, db_name: str) -> bool:
 def _drop(conn: psycopg.Connection, db_name: str) -> None:
     if not db_name.startswith(DEMO_DB_PREFIX):  # pragma: no cover - names are validated
         raise DemoError(f"refusing to drop {db_name!r}")
-    conn.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(db_name)))
+    drop_database(conn, db_name)
 
 
 def demo_settings(name: str, *, port: int = DEMO_PORT) -> Settings:

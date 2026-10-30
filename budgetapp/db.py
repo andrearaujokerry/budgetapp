@@ -38,6 +38,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import psycopg
+from psycopg import sql
 from sqlalchemy import URL, Connection, Engine, create_engine, func, select, text
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.orm import Session, sessionmaker
@@ -213,6 +214,33 @@ def admin_connect(settings: Settings, dbname: str = "postgres") -> psycopg.Conne
         connect_timeout=10,
         application_name="budgetapp-admin",
     )
+
+
+def drop_database(conn: psycopg.Connection, name: str, *, attempts: int = 5) -> None:
+    """``DROP DATABASE IF EXISTS name WITH (FORCE)`` on an autocommit connection, even while
+    autovacuum works in it.
+
+    For a role that isn't a superuser, FORCE can't end an autovacuum worker (it raises
+    "permission denied to terminate process"), which a freshly filled scratch or demo database
+    often has; a plain ``DROP DATABASE`` stops autovacuum itself, but refuses while sessions are
+    still connected, which FORCE ends. So a refused FORCE is followed by a plain DROP, and the pair
+    is retried briefly.
+    """
+    force = sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
+    plain = sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(name))
+    for attempt in range(attempts):
+        try:
+            conn.execute(force)
+            return
+        except psycopg.errors.InsufficientPrivilege:
+            pass  # an autovacuum worker is connected
+        try:
+            conn.execute(plain)
+            return
+        except psycopg.errors.ObjectInUse:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.2)
 
 
 def wait_for_db(settings: Settings, timeout: float = 120.0, *, interval: float = 1.0) -> bool:

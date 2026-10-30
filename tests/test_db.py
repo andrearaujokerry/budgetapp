@@ -2,6 +2,7 @@ import threading
 import time
 from decimal import Decimal
 
+import psycopg
 import pytest
 from sqlalchemy import exc, func, select, text
 
@@ -27,7 +28,11 @@ from budgetapp.db import (
 )
 from budgetapp.models import Transaction
 from budgetapp.plaid_gateway import parse_json
-from tests.conftest import create_scratch_database, drop_scratch_database
+from tests.conftest import (
+    create_scratch_database,
+    drop_scratch_database,
+    maintenance_connection,
+)
 from tests.factories import make_account, make_transaction
 
 
@@ -94,6 +99,62 @@ class TestSyncLock:
         finally:
             holder_engine.dispose()
             drop_scratch_database(settings, other)
+
+
+class TestDropDatabase:
+    """``drop_database``: FORCE ends our own sessions; an autovacuum worker, which FORCE can't end
+    for the test role, is left to a plain DROP (the flaky "permission denied to terminate
+    process" when a freshly filled database is dropped)."""
+
+    class Conn:
+        def __init__(self, *outcomes):
+            self.outcomes = list(outcomes)
+            self.statements: list[str] = []
+
+        def execute(self, statement):
+            self.statements.append("force" if "FORCE" in repr(statement) else "plain")
+            outcome = self.outcomes.pop(0) if self.outcomes else None
+            if outcome is not None:
+                raise outcome
+
+    @pytest.fixture(autouse=True)
+    def no_sleep(self, monkeypatch):
+        monkeypatch.setattr(dbmod.time, "sleep", lambda _seconds: None)
+
+    def test_force_is_enough_without_autovacuum(self):
+        conn = self.Conn()
+        dbmod.drop_database(conn, "budgetapp_test_x")
+        assert conn.statements == ["force"]
+
+    def test_a_plain_drop_stops_an_autovacuum_worker(self):
+        conn = self.Conn(psycopg.errors.InsufficientPrivilege("permission denied"))
+        dbmod.drop_database(conn, "budgetapp_test_x")
+        assert conn.statements == ["force", "plain"]
+
+    def test_sessions_and_autovacuum_together_are_retried(self):
+        denied = psycopg.errors.InsufficientPrivilege("permission denied")
+        busy = psycopg.errors.ObjectInUse("being accessed by other users")
+        conn = self.Conn(denied, busy, None)
+        dbmod.drop_database(conn, "budgetapp_test_x")
+        assert conn.statements == ["force", "plain", "force"]
+        stuck = self.Conn(*[denied, busy] * 3)
+        with pytest.raises(psycopg.errors.ObjectInUse):
+            dbmod.drop_database(stuck, "budgetapp_test_x", attempts=3)
+        assert stuck.statements == ["force", "plain"] * 3
+
+    def test_a_real_database_with_a_session_is_dropped(self, settings):
+        name = f"{settings.db_name}_drop"
+        create_scratch_database(settings, name)
+        other = make_engine(settings, dbname=name)
+        held = other.connect()  # a session of our own: FORCE ends it
+        try:
+            with maintenance_connection(settings) as conn:
+                dbmod.drop_database(conn, name)
+                row = conn.execute("SELECT count(*) FROM pg_database WHERE datname = %s", (name,))
+                assert row.fetchone() == (0,)
+        finally:
+            held.invalidate()
+            other.dispose()
 
 
 def test_every_global_lock_key_is_registered_once():

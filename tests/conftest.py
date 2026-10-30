@@ -40,7 +40,13 @@ from budgetapp.config import (  # noqa: E402
     load_settings,
     scratch_dir_for_tests,
 )
-from budgetapp.db import admin_connect, is_ready, make_engine, run_migrations  # noqa: E402
+from budgetapp.db import (  # noqa: E402
+    admin_connect,
+    drop_database,
+    is_ready,
+    make_engine,
+    run_migrations,
+)
 from budgetapp.services.notify import RecordingNotifier  # noqa: E402
 from tests.fake_plaid import FakePlaidGateway  # noqa: E402
 
@@ -80,9 +86,7 @@ def create_scratch_database(settings: Settings, name: str) -> None:
     if not name.startswith(TEST_DB_PREFIX):
         _refuse(f"{name!r} is not a budgetapp_test_* database")
     with maintenance_connection(settings) as conn:
-        conn.execute(
-            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
-        )
+        drop_database(conn, name)
         conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
 
 
@@ -90,9 +94,7 @@ def drop_scratch_database(settings: Settings, name: str) -> None:
     if not name.startswith(TEST_DB_PREFIX):
         _refuse(f"{name!r} is not a budgetapp_test_* database")
     with maintenance_connection(settings) as conn:
-        conn.execute(
-            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
-        )
+        drop_database(conn, name)
 
 
 @pytest.fixture(scope="session")
