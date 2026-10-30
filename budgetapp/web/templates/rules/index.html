@@ -1,10 +1,14 @@
-{#- Placeholder from the web shell; the CAT package replaces this file. -#}
+{#- Rules (CAT-3) and "Re-apply rules to past transactions" (CAT-4). -#}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
 {% block title %}Rules{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/rules.css">{% endblock %}
 {% block content %}
-{{ ui.page_header("Rules", "Automatic categories for the merchants you choose.") }}
-<div class="card">
-{{ ui.empty_state("Coming soon", "This page is being built.", icon="wand") }}
-</div>
+{% call ui.page_header("Rules", "Your rules run first, top to bottom: the first one that matches a charge sets its category. Charges no rule matches go by Plaid’s or Amex’s category.") %}
+{{ ui.button("New rule", icon="plus", variant="primary", href="/rules/new") }}
+{% endcall %}
+{{ ui.banner("info", "Card payments always go to Card Payments, and a category you set yourself on a transaction never changes.", title="Rules never touch two things.") }}
+<div id="rules-list">{% include "rules/_list.html" %}</div>
+<section class="section" id="reapply">{% include "rules/_reapply.html" %}</section>
+<p class="sr-only" id="reapply-status" role="status"></p>
 {% endblock %}
