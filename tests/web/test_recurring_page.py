@@ -89,6 +89,9 @@ class TestPage:
         assert "Monthly cost $27 About $330 a year · 2 active charges" in text
         assert "Next charge $15.49 Netflix · Nov 5" in text
         assert "Netflix Monthly · next Nov 5" in text
+        # Phones wrap at the dot, never inside the date or the old price.
+        assert '<span class="rec-when">next Nov 5</span>' in page
+        assert '<span class="table__secondary rec-was">was $10.99</span>' in page
         assert "was $10.99" in text
         assert "Total $27.48" in text
         assert "Lapsed" in text and "HULU 877" in text

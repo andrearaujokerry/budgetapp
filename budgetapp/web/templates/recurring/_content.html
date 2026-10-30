@@ -10,7 +10,7 @@
 {%- macro merchant_cell(s, phone) -%}
 <td class="col-grow">
 <a class="table__primary" href="/transactions?q={{ s.search_text|urlencode }}">{{ s.merchant }}</a>
-<span class="table__secondary"><span class="rec-narrow">{{ s.cadence_label }} · {{ phone }}</span><span class="rec-wide">{{ s.count|pluralize("charge") }} since {{ s.first_date|month_label }}
+<span class="table__secondary"><span class="rec-narrow">{{ s.cadence_label }} · <span class="rec-when">{{ phone }}</span></span><span class="rec-wide">{{ s.count|pluralize("charge") }} since {{ s.first_date|month_label }}
 {%- if s.pending_date %} · the {{ s.pending_date|date_short }} charge is pending{% endif %}
 {%- if s.is_confirmed %} · kept by you{% endif %}
 {%- if not s.detected %} · irregular{% endif %}</span></span>

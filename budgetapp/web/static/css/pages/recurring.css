@@ -33,8 +33,10 @@
     white-space: normal;
   }
 
-  /* "was $17.99" stays on one line (more specific than the rule above). */
-  .rec-table .rec-was {
+  /* "was $17.99" and "next Nov 3" stay on one line (more specific than the rule above), so a
+     narrow cell wraps at the dot, never inside a date or an amount. */
+  .rec-table .rec-was,
+  .rec-table .rec-when {
     white-space: nowrap;
   }
 
