@@ -107,6 +107,28 @@
   color: var(--ok-text);
 }
 
+/* "Remove statement" (user-added statements only), under the check. */
+.stmt-remove {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.stmt-remove__text,
+.stmt-later {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.stmt-remove form {
+  margin: 0;
+}
+
 /* Boundaries ---------------------------------------------------------------- */
 .stmt-boundary + .stmt-boundary {
   border-top: 1px solid var(--border);

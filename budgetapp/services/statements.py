@@ -6,12 +6,16 @@ anything else that shows a statement total call :func:`summary` or :func:`overvi
 
 * **Cycles.** A cycle is ``(previous closing date, closing date]`` by POSTING date
   (``COALESCE(posted_date, date)`` of posted rows). Pending rows and suspected duplicates never
-  count. Closing dates come from the ``statements`` table; :func:`periods.statement_cycles`
-  generates dates only before the first and after the last stored one (from the account's
-  ``statement_closing_day``) and flags cycles outside 25–35 days. A period's start is always the
-  previous closing date + 1, except the earliest statement's ``period_start_override``. A
-  ``liabilities`` row within 10 days of a ``user`` row is the same statement: the user's date
-  wins, and the snapshot only fills values the user left empty.
+  count. Closing dates are exactly the ``statements`` rows (the same dates budgets use, see
+  :func:`cycle_inputs`); :func:`periods.statement_cycles` generates dates only before the first
+  and after the last stored one (from the account's ``statement_closing_day``) and flags cycles
+  outside 25–35 days. A period's start is always the previous closing date + 1, except the
+  earliest statement's ``period_start_override``.
+* **Editing dates.** Closing dates are kept between 2000 and 45 days from today, and a period
+  start within two months before its closing date. Moving a user-entered statement onto the
+  date of the Amex (Liabilities) statement next to it, within 10 days, combines the two (the
+  values typed win). A statement the user added can be removed. The open period's estimated
+  date is never saved: its statement doesn't exist yet.
 * **Status.** ``open`` until the closing date has passed, ``settling`` for
   ``app_settings.statement_settle_days`` after it, then ``final``.
 * **Buckets, by sign first.** Negative: ``payments`` (Card Payments category or
@@ -82,9 +86,17 @@ AMEX_FEES_CATEGORY_RE = r"^\s*fees\s*&\s*adjustments"
 
 #: Days either side of a closing date that :func:`near_boundary` lists.
 BOUNDARY_DAYS = 3
-#: A snapshot row this close to a user-entered closing date is the same statement.
+#: Two closing dates this close are the same statement (one is a mistake).
 SAME_STATEMENT_DAYS = periods.DROP_WITHIN_DAYS
 MAX_NOTES_LENGTH = 2000
+#: Plausible closing dates: none before this, none more than MAX_FUTURE_DAYS from today.
+EARLIEST_CLOSING_DATE = dt.date(2000, 1, 1)
+MAX_FUTURE_DAYS = 45
+#: The earliest statement's period start lies at most this many days before its closing date.
+MAX_FIRST_PERIOD_DAYS = 62
+#: :func:`cycles` never looks outside these dates (stored dates are validated well inside).
+_RANGE_FLOOR = dt.date(1900, 1, 1)
+_RANGE_CEILING = dt.date(2200, 12, 31)
 
 CHECK_PASS = "pass"
 CHECK_FAIL = "fail"
@@ -195,6 +207,8 @@ class StatementCycle:
     is_earliest_statement: bool = False
     #: Its period start may be set: it is (or, once saved, would be) the earliest statement.
     can_set_period_start: bool = False
+    #: The user added this statement (no Amex snapshot), so it can be removed.
+    removable: bool = False
     reported: Reported = field(default_factory=Reported)
     previous_statement_id: int | None = None
     #: The previous statement's reported New Balance (the app's Previous Balance).
@@ -226,6 +240,37 @@ class StatementCycle:
     def key(self) -> str:
         """The cycle's id in URLs: its closing date."""
         return self.closing_date.isoformat()
+
+    @property
+    def is_estimate_open(self) -> bool:
+        """The open period whose closing date is only an estimate: nothing can be saved on it."""
+        return self.status == OPEN and self.generated
+
+
+@dataclass(frozen=True, slots=True)
+class CycleInputs:
+    """What a card's statement cycles are built from, for anything else that needs the same
+    cycles (statement-mode budget periods): pass these to ``periods`` as they are."""
+
+    account_id: int
+    closings: tuple[dt.date, ...]
+    closing_day: int | None
+    first_period_start: dt.date | None
+
+    @property
+    def known(self) -> bool:
+        """False when no cycle can be computed (no stored date and no closing day)."""
+        return bool(self.closings) or self.closing_day is not None
+
+    def period_for(self, day: dt.date) -> periods.Period:
+        """The statement cycle containing ``day`` (the calendar month when none is known)."""
+        return periods.budget_period_for(
+            day,
+            mode="statement",
+            closings=self.closings,
+            closing_day=self.closing_day,
+            first_period_start=self.first_period_start,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,65 +477,50 @@ def _account(session: Session, account_id: int) -> Account:
 # --------------------------------------------------------------------------- stored statements
 
 
-@dataclass(slots=True)
-class _Stored:
-    """A ``statements`` row as cycles see it, with a shadowed snapshot row merged in."""
-
-    row: Statement
-    shadow: Statement | None = None
-
-    @property
-    def closing_date(self) -> dt.date:
-        return self.row.closing_date
-
-    def reported(self) -> Reported:
-        def pick(name: str) -> Any:
-            value = getattr(self.row, name)
-            if value is None and self.shadow is not None:
-                return getattr(self.shadow, name)
-            return value
-
-        new_balance = self.row.reported_new_balance
-        source = self.row.reported_new_balance_source
-        if new_balance is None and self.shadow is not None:
-            new_balance = self.shadow.reported_new_balance
-            source = self.shadow.reported_new_balance_source
-        return Reported(
-            previous_balance=pick("reported_previous_balance"),
-            payments_credits=pick("reported_payments_credits"),
-            new_charges=pick("reported_new_charges"),
-            fees=pick("reported_fees"),
-            interest=pick("reported_interest"),
-            new_balance=new_balance,
-            new_balance_source=source if new_balance is not None else None,
-        )
+def _reported(row: Statement) -> Reported:
+    new_balance = row.reported_new_balance
+    return Reported(
+        previous_balance=row.reported_previous_balance,
+        payments_credits=row.reported_payments_credits,
+        new_charges=row.reported_new_charges,
+        fees=row.reported_fees,
+        interest=row.reported_interest,
+        new_balance=new_balance,
+        new_balance_source=row.reported_new_balance_source if new_balance is not None else None,
+    )
 
 
-def _stored(session: Session, account_id: int) -> list[_Stored]:
-    """The account's statements, oldest first; a snapshot near a user date folds into it."""
-    rows = list(
+def _stored(session: Session, account_id: int) -> list[Statement]:
+    """The account's statements, oldest first. Every row is a statement (no row is hidden)."""
+    return list(
         session.scalars(
             select(Statement)
             .where(Statement.account_id == account_id)
             .order_by(Statement.closing_date)
         )
     )
-    users = [r for r in rows if r.closing_date_source == "user"]
-    shadows: dict[int, Statement] = {}
-    kept: list[Statement] = []
-    for row in rows:
-        if row.closing_date_source != "user":
-            near = [
-                u
-                for u in users
-                if abs((u.closing_date - row.closing_date).days) <= SAME_STATEMENT_DAYS
-            ]
-            if near:
-                owner = min(near, key=lambda u: abs((u.closing_date - row.closing_date).days))
-                shadows.setdefault(owner.id, row)
-                continue
-        kept.append(row)
-    return [_Stored(row, shadows.get(row.id)) for row in kept]
+
+
+def _removable(row: Statement) -> bool:
+    """A statement the user added (Amex's own statements, with a Plaid issue date, stay)."""
+    return row.closing_date_source == "user" and row.plaid_issue_date is None
+
+
+def cycle_inputs(session: Session, account_id: int) -> CycleInputs:
+    """The closing dates, closing day and earliest period start the card's cycles come from.
+
+    Statement-mode budget periods must use these (``CycleInputs.period_for(day)``, or the
+    fields passed to ``periods.budget_period_for``) so they are the cycles this page shows.
+    Raises ``LookupError`` for an unknown account.
+    """
+    account = _account(session, account_id)
+    stored = _stored(session, account_id)
+    return CycleInputs(
+        account_id=account_id,
+        closings=tuple(r.closing_date for r in stored),
+        closing_day=account.statement_closing_day,
+        first_period_start=stored[0].period_start_override if stored else None,
+    )
 
 
 # --------------------------------------------------------------------------- cycles
@@ -519,7 +549,7 @@ def _counted(account_id: int) -> tuple[Any, ...]:
 
 
 def _default_range(
-    session: Session, account_id: int, stored: Sequence[_Stored], today: dt.date
+    session: Session, account_id: int, stored: Sequence[Statement], today: dt.date
 ) -> tuple[dt.date, dt.date]:
     """From the earliest posted transaction or stored statement through today."""
     earliest = session.scalar(select(func.min(_posting_date())).where(*_counted(account_id)))
@@ -552,46 +582,44 @@ def cycles(
         end = end or default_end
     if end < start:
         start, end = end, start
-    first_override = stored[0].row.period_start_override if stored else None
+    if end < _RANGE_FLOOR or start > _RANGE_CEILING:
+        return []
+    start, end = max(start, _RANGE_FLOOR), min(end, _RANGE_CEILING)
+    first_override = stored[0].period_start_override if stored else None
     found = periods.statement_cycles(
-        [s.closing_date for s in stored],
+        [r.closing_date for r in stored],
         account.statement_closing_day,
         start,
         end,
         first_period_start=first_override,
     )
-    by_closing = {s.closing_date: s for s in stored}
+    by_closing = {r.closing_date: r for r in stored}
     earliest = stored[0] if stored else None
     out = []
     for period in found:
-        own = by_closing.get(period.end)
+        row = by_closing.get(period.end)
         previous = by_closing.get(period.start - dt.timedelta(days=1))
-        row = own.row if own else None
-        is_earliest = own is not None and own is earliest
-        issue_date = None
-        if own is not None:
-            issue_date = row.plaid_issue_date or (
-                own.shadow.plaid_issue_date if own.shadow else None
-            )
+        is_earliest = row is not None and row is earliest
         out.append(
             StatementCycle(
                 account_id=account_id,
                 start=period.start,
                 closing_date=period.end,
-                generated=own is None,
+                generated=row is None,
                 flagged=period.flagged,
                 status=status_for(period.end, today, settle_days),
                 final_on=period.end + dt.timedelta(days=settle_days + 1),
                 statement_id=row.id if row else None,
                 closing_date_source=row.closing_date_source if row else None,
-                plaid_issue_date=issue_date,
+                plaid_issue_date=row.plaid_issue_date if row else None,
                 period_start_override=row.period_start_override if is_earliest else None,
                 is_earliest_statement=is_earliest,
                 can_set_period_start=is_earliest
-                or (own is None and (earliest is None or period.end < earliest.closing_date)),
-                reported=own.reported() if own else Reported(),
-                previous_statement_id=previous.row.id if previous else None,
-                previous_new_balance=previous.reported().new_balance if previous else None,
+                or (row is None and (earliest is None or period.end < earliest.closing_date)),
+                removable=row is not None and _removable(row),
+                reported=_reported(row) if row else Reported(),
+                previous_statement_id=previous.id if previous else None,
+                previous_new_balance=previous.reported_new_balance if previous else None,
                 checked_at=row.checked_at if row else None,
                 notes=row.notes if row else None,
             )
@@ -600,11 +628,19 @@ def cycles(
     return out
 
 
+def _plausible(day: dt.date, today: dt.date) -> bool:
+    """A date a statement can close on: from 2000 to the open period's closing date at most
+    (generated: within a month; added by the user: within :data:`MAX_FUTURE_DAYS`)."""
+    return EARLIEST_CLOSING_DATE <= day <= today + dt.timedelta(days=MAX_FUTURE_DAYS)
+
+
 def find_cycle(
     session: Session, account_id: int, closing_date: dt.date, *, today: dt.date | None = None
 ) -> StatementCycle | None:
     """The cycle that closes on ``closing_date`` (never one after the open cycle), else None."""
     today = today or clock.today()
+    if not _plausible(closing_date, today):
+        return None
     found = cycles(session, account_id, start=closing_date, end=closing_date, today=today)
     cycle = next((c for c in found if c.closing_date == closing_date), None)
     if cycle is None:
@@ -1022,17 +1058,17 @@ def _parse_reported(values: Mapping[str, Any], errors: dict[str, str]) -> dict[s
 # --------------------------------------------------------------------------- validation
 
 
-def _others(stored: Sequence[_Stored], exclude: Statement | None) -> list[Statement]:
-    """Every other statement row of the account (``exclude`` and the snapshot it shadows left
-    out)."""
-    out = []
-    for s in stored:
-        if exclude is not None and s.row.id == exclude.id:
-            continue
-        out.append(s.row)
-        if s.shadow is not None:
-            out.append(s.shadow)
-    return out
+def _closing_date_error(day: dt.date, today: dt.date) -> str | None:
+    """Why ``day`` can't be a statement's closing date (a year typo, say), else None."""
+    if day < EARLIEST_CLOSING_DATE:
+        return f"Enter a closing date in {EARLIEST_CLOSING_DATE.year} or later."
+    if day > today + dt.timedelta(days=MAX_FUTURE_DAYS):
+        return "That date is too far in the future."
+    return None
+
+
+def _days(n: int) -> str:
+    return f"{n} day{'s' if n != 1 else ''}"
 
 
 def _too_close(others: Sequence[Statement], day: dt.date) -> str | None:
@@ -1042,39 +1078,72 @@ def _too_close(others: Sequence[Statement], day: dt.date) -> str | None:
             return f"A statement already closes on {_long(day)}."
         if gap <= SAME_STATEMENT_DAYS:
             return (
-                f"That is {gap} day{'s' if gap != 1 else ''} from the statement that closes on "
+                f"That is {_days(gap)} from the statement that closes on "
                 f"{_long(other.closing_date)}; edit that one instead."
             )
     return None
 
 
-def _move_error(
-    stored: Sequence[_Stored],
+def _can_combine(
+    row: Statement | None, target: Statement, current: dt.date, stored: Sequence[Statement]
+) -> bool:
+    """Moving ``row`` (closing on ``current``) onto ``target`` combines them: the target is the
+    Amex statement next to it, within :data:`SAME_STATEMENT_DAYS`, and at most one of the two
+    carries a Plaid issue date (the snapshot key)."""
+    if row is None or target.id == row.id or target.closing_date_source != "liabilities":
+        return False
+    if abs((target.closing_date - current).days) > SAME_STATEMENT_DAYS:
+        return False
+    if row.plaid_issue_date is not None and target.plaid_issue_date is not None:
+        return False
+    low, high = sorted((current, target.closing_date))
+    return not any(low < r.closing_date < high for r in stored)
+
+
+def _move_check(
+    stored: Sequence[Statement],
     row: Statement | None,
     current: dt.date,
     new: dt.date,
     period_start: dt.date | None,
-) -> str | None:
-    """Why the statement closing on ``current`` can't move to ``new`` (None when it can)."""
+    today: dt.date,
+) -> tuple[str | None, Statement | None]:
+    """``(error, combine_with)`` for moving the statement closing on ``current`` to ``new``:
+    an error for the user, or the statement it combines with (both None: a plain move)."""
     if new == current:
-        return None
-    others = _others(stored, row)
-    own_shadow = next((s.shadow for s in stored if row is not None and s.row.id == row.id), None)
-    if own_shadow is not None and own_shadow.closing_date == new:
-        return f"A statement already closes on {_long(new)}."
+        return None, None
+    problem = _closing_date_error(new, today)
+    if problem:
+        return problem, None
+    others = [r for r in stored if row is None or r.id != row.id]
+    target = next((r for r in others if r.closing_date == new), None)
+    if target is not None and _can_combine(row, target, current, stored):
+        return None, target
+    near = sorted(
+        (r for r in others if abs((r.closing_date - new).days) <= SAME_STATEMENT_DAYS),
+        key=lambda r: abs((r.closing_date - new).days),
+    )
+    if near and near[0].closing_date != new and _can_combine(row, near[0], current, stored):
+        gap = abs((near[0].closing_date - new).days)
+        amex = _long(near[0].closing_date)
+        return (
+            f"That is {_days(gap)} from the statement Amex reported for {amex}. To combine the "
+            f"two, set this closing date to {amex}."
+        ), None
     problem = _too_close(others, new)
     if problem:
-        return problem
-    owners = [s.row for s in stored if row is None or s.row.id != row.id]
-    before = [o.closing_date for o in owners if o.closing_date < current]
-    after = [o.closing_date for o in owners if o.closing_date > current]
+        return problem, None
+    before = [r.closing_date for r in others if r.closing_date < current]
+    after = [r.closing_date for r in others if r.closing_date > current]
     if (before and new <= max(before)) or (after and new >= min(after)):
         low = _long(max(before)) if before else "the start"
         high = _long(min(after)) if after else "today"
-        return f"Keep the closing date between the statements on either side ({low} and {high})."
+        return (
+            f"Keep the closing date between the statements on either side ({low} and {high})."
+        ), None
     if period_start is not None and new < period_start:
-        return f"The closing date can't be before the period start ({_long(period_start)})."
-    return None
+        return f"The closing date can't be before the period start ({_long(period_start)}).", None
+    return None, None
 
 
 def _long(day: dt.date) -> str:
@@ -1110,22 +1179,60 @@ def _row(session: Session, cycle: StatementCycle) -> Statement:
     return row
 
 
-def add_statement(session: Session, account_id: int, closing_date: Any) -> Statement:
+def _not_yet_closed(cycle: StatementCycle) -> StatementError:
+    return StatementError(
+        {
+            "period": (
+                f"This period hasn't closed yet. Type its numbers once Amex issues the statement "
+                f"(it should close on {_long(cycle.closing_date)})."
+            )
+        }
+    )
+
+
+def add_statement(
+    session: Session, account_id: int, closing_date: Any, *, today: dt.date | None = None
+) -> Statement:
     """Record a statement the app doesn't know yet, by its closing date (source ``user``)."""
     _account(session, account_id)
+    today = today or clock.today()
     try:
         day = parse_date(closing_date)
     except ValueError as exc:
         raise StatementError({"closing_date": str(exc)}) from None
-    if day > clock.today() + dt.timedelta(days=45):
-        raise StatementError({"closing_date": "That date is too far in the future."})
-    problem = _too_close(_others(_stored(session, account_id), None), day)
+    stored = _stored(session, account_id)
+    problem = _closing_date_error(day, today) or _too_close(stored, day)
     if problem:
         raise StatementError({"closing_date": problem})
+    if stored and day < stored[0].closing_date:
+        # The old earliest statement now has a previous closing date: its start is derived.
+        stored[0].period_start_override = None
     row = Statement(account_id=account_id, closing_date=day, closing_date_source="user")
     session.add(row)
     session.flush()
     return row
+
+
+def remove_statement(
+    session: Session, account_id: int, closing_date: dt.date, *, today: dt.date | None = None
+) -> dt.date:
+    """Remove a statement the user added (a mistaken date); its typed values go with it.
+
+    Amex's own statements (with a Plaid issue date) can't be removed: sync would add them back.
+    Returns the removed closing date. ``LookupError`` when no stored statement closes that day.
+    """
+    cycle = _require_cycle(session, account_id, closing_date, today)
+    row = session.get(Statement, cycle.statement_id) if cycle.statement_id else None
+    if row is None:
+        raise LookupError(f"no stored statement of account {account_id} closes on {closing_date}")
+    if not _removable(row):
+        raise StatementError(
+            {"remove": "This statement came from Amex, so it can't be removed. Correct its date."}
+        )
+    removed = row.closing_date
+    session.delete(row)
+    session.flush()
+    return removed
 
 
 def set_closing_date(
@@ -1190,11 +1297,16 @@ def save_statement(
 
     ``values`` holds ``closing_date``, ``period_start`` (earliest statement only), the six
     reported amounts and ``notes``. Raises :class:`StatementError` with every field's problem
-    and changes nothing then; ``LookupError`` when no cycle closes on ``closing_date``.
+    and changes nothing then (``period`` when the cycle is the open period's estimate);
+    ``LookupError`` when no cycle closes on ``closing_date``. Moving a user-entered statement
+    onto the Amex statement next to it combines the two and returns that statement's row.
     """
+    today = today or clock.today()
     cycle = _require_cycle(session, account_id, closing_date, today)
+    if cycle.is_estimate_open:
+        raise _not_yet_closed(cycle)
     stored = _stored(session, account_id)
-    current = next((s.row for s in stored if s.row.id == cycle.statement_id), None)
+    current = next((r for r in stored if r.id == cycle.statement_id), None)
     errors: dict[str, str] = {}
 
     reported: dict[str, Any] | None = None
@@ -1221,15 +1333,27 @@ def save_statement(
         else:
             new_override = None
 
+    combine_with = None
     if "closing_date" not in errors and "period_start" not in errors:
-        problem = _move_error(stored, current, closing_date, new_closing, new_override)
+        problem, combine_with = _move_check(
+            stored, current, closing_date, new_closing, new_override, today
+        )
         if problem:
             errors["closing_date"] = problem
         elif new_override is not None and new_override > new_closing:
             errors["period_start"] = "The period start must be on or before the closing date."
+        elif new_override is not None and (new_closing - new_override).days > (
+            MAX_FIRST_PERIOD_DAYS
+        ):
+            errors["period_start"] = (
+                "The period start must be within two months before the closing date."
+            )
 
     if errors:
         raise StatementError(errors)
+
+    if combine_with is not None and current is not None:
+        return _combine(session, current, combine_with, reported, new_override, override_given)
 
     row = _row(session, cycle)
     if reported is not None:
@@ -1237,10 +1361,61 @@ def save_statement(
     if new_closing != row.closing_date:
         row.closing_date = new_closing
         row.closing_date_source = "user"
-    if override_given and row.period_start_override != new_override:
+    if not cycle.can_set_period_start:
+        # Not the earliest statement (any more): its start is the previous closing date + 1.
+        row.period_start_override = None
+    elif override_given and row.period_start_override != new_override:
         row.period_start_override = new_override
     session.flush()
     return row
+
+
+def _combine(
+    session: Session,
+    row: Statement,
+    target: Statement,
+    reported: Mapping[str, Any] | None,
+    override: dt.date | None,
+    override_given: bool,
+) -> Statement:
+    """Fold the statement the user is editing (``row``) into the Amex statement it duplicates.
+
+    The values being saved win; a value left empty keeps the Amex statement's. The issue date
+    (sync's key) stays on the surviving row, so later snapshots keep landing on it.
+    """
+    values = reported if reported is not None else _row_values(row)
+    for name, _label in REPORTED_FIELDS:
+        if name == "new_balance" or values[name] is None:
+            continue
+        setattr(target, f"reported_{name}", values[name])
+    new_balance = values["new_balance"]
+    if new_balance is not None:
+        source = "user" if reported is not None else row.reported_new_balance_source
+        if new_balance != target.reported_new_balance:
+            target.reported_new_balance = new_balance
+            target.reported_new_balance_source = source or "user"
+    if values["notes"]:
+        target.notes = values["notes"]
+    target.checked_at = row.checked_at or target.checked_at
+    was_earliest = target.closing_date > row.closing_date and not any(
+        r for r in _stored(session, row.account_id) if r.closing_date < row.closing_date
+    )
+    if was_earliest:
+        target.period_start_override = override if override_given else row.period_start_override
+    issue_date = row.plaid_issue_date
+    session.delete(row)
+    session.flush()
+    if target.plaid_issue_date is None and issue_date is not None:
+        target.plaid_issue_date = issue_date
+    session.flush()
+    return target
+
+
+def _row_values(row: Statement) -> dict[str, Any]:
+    reported = _reported(row)
+    values: dict[str, Any] = {name: getattr(reported, name) for name, _label in REPORTED_FIELDS}
+    values["notes"] = row.notes
+    return values
 
 
 def _apply_reported(row: Statement, values: Mapping[str, Any]) -> None:
@@ -1260,10 +1435,23 @@ def _apply_reported(row: Statement, values: Mapping[str, Any]) -> None:
 
 
 def mark_checked(
-    session: Session, account_id: int, closing_date: dt.date, *, checked: bool = True
-) -> Statement:
-    """Record that the user compared this statement (``checked=False`` clears it)."""
-    cycle = _require_cycle(session, account_id, closing_date)
+    session: Session,
+    account_id: int,
+    closing_date: dt.date,
+    *,
+    checked: bool = True,
+    today: dt.date | None = None,
+) -> Statement | None:
+    """Record that the user compared this statement (``checked=False`` clears it).
+
+    An open period can't be checked (``StatementError``): its statement isn't issued yet.
+    Clearing a period that has no stored statement changes nothing and returns None.
+    """
+    cycle = _require_cycle(session, account_id, closing_date, today)
+    if checked and cycle.status == OPEN:
+        raise _not_yet_closed(cycle)
+    if not checked and cycle.statement_id is None:
+        return None
     row = _row(session, cycle)
     row.checked_at = clock.now() if checked else None
     session.flush()

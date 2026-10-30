@@ -378,3 +378,117 @@ class TestMarkChecked:
     def test_unknown_period(self, client, db, card, periods):
         response = client.post(f"{url(card, '2026-09-20')}/checked", data={"checked": "1"})
         assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------- review fixes
+
+
+class TestImplausibleDates:
+    """Review finding: a year-1 period start was accepted and then every page gave a 500."""
+
+    def test_a_year_typo_in_the_period_start_is_refused(self, client, db, today, card):
+        make_statement(db, card, "2026-08-27")
+        make_statement(db, card, "2026-09-27")
+        response = client.post(
+            url(card, "2026-08-27"),
+            data={"closing_date": "2026-08-27", "period_start": "0001-01-01"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 422
+        assert "within two months before the closing date" in text_of(response.text)
+        assert csp_problems(response.text, rendered=True) == []
+        assert client.get("/statements").status_code == 200
+        assert client.get(url(card, "2026-08-27")).status_code == 200
+
+    @pytest.mark.parametrize("closing", ["9999-12-27", "0001-01-27", "1999-12-27"])
+    def test_far_dates_are_not_found(self, client, db, today, card, closing):
+        assert client.get(url(card, closing)).status_code == 404
+        response = client.post(url(card, closing), data={"closing_date": closing})
+        assert response.status_code == 404
+
+
+class TestOpenEstimate:
+    """Review finding: saving on the open period pinned its estimated closing date."""
+
+    def test_the_open_estimate_has_no_form(self, client, db, card, periods):
+        page = client.get(url(card, "2026-11-27")).text
+        text = text_of(page)
+        assert "You can type this statement's numbers once it closes, around Nov 27, 2026" in text
+        assert "Save statement" not in text and 'name="closing_date"' not in page
+        assert csp_problems(page, rendered=True) == []
+
+    def test_a_crafted_post_saves_nothing(self, client, db, card, periods):
+        response = client.post(
+            url(card, "2026-11-27"),
+            data={"closing_date": "2026-11-27", "notes": "expect the REI refund"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 422
+        assert "Nothing was saved. This period hasn't closed yet." in text_of(response.text)
+        response = client.post(
+            f"{url(card, '2026-11-27')}/checked", data={"checked": "1"}, follow_redirects=False
+        )
+        assert response.status_code == 303
+        page = client.get(response.headers["location"]).text
+        assert toasts(page) == [
+            "This period hasn't closed yet. Type its numbers once Amex issues the statement "
+            "(it should close on Nov 27, 2026)."
+        ]
+        closings = db.scalars(select(Statement.closing_date).order_by("closing_date")).all()
+        assert closings == [D(2026, 8, 27), D(2026, 9, 27)]
+
+
+class TestRemoveAndCombine:
+    """Review finding: a mistaken closing date could not be undone."""
+
+    def test_remove_a_statement_the_user_added(self, client, db, card, periods):
+        client.post("/statements", data={"account_id": str(card.id), "closing_date": "2026-09-10"})
+        page = client.get(url(card, "2026-09-10")).text
+        assert "Remove statement" in page
+        assert 'data-confirm="Remove the statement closing Sep 10, 2026?' in page
+        assert csp_problems(page, rendered=True) == []
+        assert "Remove statement" not in client.get(url(card, "2026-09-27")).text  # from Amex
+        response = client.post(f"{url(card, '2026-09-10')}/remove", follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == f"/statements?account={card.id}"
+        assert toasts(client.get(response.headers["location"]).text) == [
+            "Statement closing Sep 10, 2026 removed"
+        ]
+        closings = db.scalars(select(Statement.closing_date).order_by("closing_date")).all()
+        assert closings == [D(2026, 8, 27), D(2026, 9, 27)]
+
+    def test_amex_statements_stay(self, client, db, card, periods):
+        periods.plaid_issue_date = D(2026, 9, 27)
+        db.flush()
+        response = client.post(f"{url(card, '2026-09-27')}/remove", follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == url(card, "2026-09-27")
+        assert "came from Amex" in toasts(client.get(url(card, "2026-09-27")).text)[0]
+        assert db.get(Statement, periods.id) is not None
+        assert client.post(f"{url(card, '2026-10-27')}/remove").status_code == 404  # estimated
+
+    def test_moving_a_typo_onto_the_amex_date_combines_them(self, client, db, today, card):
+        make_statement(db, card, "2026-09-28", closing_date_source="liabilities")
+        client.post("/statements", data={"account_id": str(card.id), "closing_date": "2026-10-17"})
+        make_statement(
+            db,
+            card,
+            "2026-10-27",
+            closing_date_source="liabilities",
+            plaid_issue_date=D(2026, 10, 27),
+            reported_new_balance=Decimal("150.00"),
+            reported_new_balance_source="liabilities",
+        )
+        response = client.post(
+            url(card, "2026-10-17"),
+            data={"closing_date": "2026-10-27", "previous_balance": "100.00", "new_balance": ""},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == url(card, "2026-10-27")
+        page = client.get(url(card, "2026-10-27")).text
+        assert toasts(page) == [
+            "Statement saved and combined with the one Amex reported for Oct 27, 2026"
+        ]
+        assert "Sep 29 – Oct 27, 2026" in text_of(page)
+        assert client.get(url(card, "2026-10-17")).status_code == 404

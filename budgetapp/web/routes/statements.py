@@ -7,6 +7,7 @@ Amex statement to the cent. The numbers come from ``services.statements`` only.
 * ``POST /statements/<account_id>/<closing date>``: save the values typed from the statement,
   a corrected closing date, the earliest statement's period start and notes.
 * ``POST /statements/<account_id>/<closing date>/checked``: mark it checked (``checked=1``) or not.
+* ``POST /statements/<account_id>/<closing date>/remove``: remove a statement the user added.
 
 Forms are plain posts that redirect (303) on success and re-render with status 422 on errors.
 """
@@ -169,6 +170,7 @@ def save_statement(
 ) -> Response:
     values = {name: str(form.get(name, "")) for name in FORM_FIELDS if name in form}
     try:
+        before = statements.find_cycle(session, account_id, closing_date)
         row = statements.save_statement(session, account_id, closing_date, values)
     except LookupError:
         raise HTTPException(404) from None
@@ -185,8 +187,14 @@ def save_statement(
             status_code=422,
         )
     new_closing = row.closing_date
+    combined = before is not None and before.statement_id not in (None, row.id)
     session.commit()
-    return redirect(request, _detail_url(account_id, new_closing), "success", "Statement saved")
+    message = (
+        f"Statement saved and combined with the one Amex reported for {_long(new_closing)}"
+        if combined
+        else "Statement saved"
+    )
+    return redirect(request, _detail_url(account_id, new_closing), "success", message)
 
 
 @router.post("/statements/{account_id}/{closing_date}/checked")
@@ -198,6 +206,35 @@ def mark_checked(
         statements.mark_checked(session, account_id, closing_date, checked=checked)
     except LookupError:
         raise HTTPException(404) from None
+    except statements.StatementError as err:
+        session.rollback()
+        message = next(iter(err.errors.values()))
+        return redirect(request, _detail_url(account_id, closing_date), "error", message)
     session.commit()
     message = "Marked as checked" if checked else "No longer marked as checked"
     return redirect(request, _detail_url(account_id, closing_date), "success", message)
+
+
+@router.post("/statements/{account_id}/{closing_date}/remove")
+def remove_statement(
+    request: Request, session: SessionDep, account_id: int, closing_date: dt.date
+) -> Response:
+    try:
+        removed = statements.remove_statement(session, account_id, closing_date)
+    except LookupError:
+        raise HTTPException(404) from None
+    except statements.StatementError as err:
+        session.rollback()
+        message = next(iter(err.errors.values()))
+        return redirect(request, _detail_url(account_id, closing_date), "error", message)
+    session.commit()
+    return redirect(
+        request,
+        f"/statements?account={account_id}",
+        "success",
+        f"Statement closing {_long(removed)} removed",
+    )
+
+
+def _long(day: dt.date) -> str:
+    return f"{day:%b} {day.day}, {day.year}"

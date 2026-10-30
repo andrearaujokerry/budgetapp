@@ -6,7 +6,7 @@ import datetime as dt
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from budgetapp.models import Statement
 from budgetapp.services import statements as st
@@ -322,9 +322,13 @@ class TestCycles:
         with pytest.raises(LookupError):
             st.cycles(db, 999_999)
 
-    def test_a_user_date_overrides_a_nearby_liabilities_snapshot(self, db, today, card):
-        user = make_statement(db, card, "2026-09-25", closing_date_source="user")
-        make_statement(
+    def test_every_stored_row_is_a_statement_and_budgets_get_the_same_cycles(self, db, today, card):
+        # A user date 9 days from a snapshot (sync attaches only within 7): both are statements,
+        # shown as two short flagged periods, never one hidden under the other (review finding:
+        # the hidden row had no page and budgets saw different cycles).
+        make_statement(db, card, "2026-08-27", period_start_override=D(2026, 7, 30))
+        user = make_statement(db, card, "2026-09-21", closing_date_source="user")
+        snapshot = make_statement(
             db,
             card,
             "2026-09-30",
@@ -334,13 +338,35 @@ class TestCycles:
             reported_new_balance_source="liabilities",
         )
         found = {c.closing_date: c for c in st.cycles(db, card.id)}
-        assert D(2026, 9, 30) not in found
-        cycle = found[D(2026, 9, 25)]
-        assert cycle.statement_id == user.id and cycle.closing_date_source == "user"
-        assert cycle.plaid_issue_date == D(2026, 9, 30)
+        assert found[D(2026, 9, 21)].statement_id == user.id
+        assert found[D(2026, 9, 21)].reported.new_balance is None
+        cycle = found[D(2026, 9, 30)]
+        assert (cycle.statement_id, cycle.start, cycle.days, cycle.flagged) == (
+            snapshot.id,
+            D(2026, 9, 22),
+            9,
+            True,
+        )
         assert cycle.reported.new_balance == money("1234.56")
-        assert cycle.reported.new_balance_source == "liabilities"
-        assert found[D(2026, 10, 27)].start == D(2026, 9, 26)
+        inputs = st.cycle_inputs(db, card.id)
+        assert inputs.closings == (D(2026, 8, 27), D(2026, 9, 21), D(2026, 9, 30))
+        assert (inputs.closing_day, inputs.first_period_start, inputs.known) == (
+            27,
+            D(2026, 7, 30),
+            True,
+        )
+        for c in found.values():
+            for day in (c.start, c.closing_date):
+                budget = inputs.period_for(day)
+                assert (budget.start, budget.end) == (c.start, c.closing_date), day
+
+    def test_cycle_inputs_without_dates(self, db, today):
+        bare = make_account(db)
+        inputs = st.cycle_inputs(db, bare.id)
+        assert (inputs.closings, inputs.closing_day, inputs.known) == ((), None, False)
+        assert inputs.period_for(D(2026, 10, 5)).kind == "month"
+        with pytest.raises(LookupError):
+            st.cycle_inputs(db, 999_999)
 
     def test_correcting_a_snapshot_date_makes_it_the_users(self, db, today, card):
         row = make_statement(
@@ -445,6 +471,46 @@ class TestGateD:
         assert summary.previous_balance is None  # the app has no previous statement
         assert summary.balance_basis == "this_statement"
         assert summary.new_balance == money("1407.68")
+
+    def test_the_previous_new_balance_comes_before_this_statements_previous_balance(self, db, card):
+        # ARCHITECTURE §6: two consecutive New Balances; the typed Previous Balance is only a
+        # fallback. Here it is a typo (900.00), which the Previous Balance line shows.
+        two_statements(db, card, new_balance="1407.68")
+        db.execute(
+            Statement.__table__.update()
+            .where(Statement.closing_date == D(2026, 9, 27))
+            .values(reported_previous_balance=money("900.00"))
+        )
+        db.expire_all()
+        summary = summary_for(db, card, D(2026, 9, 27))
+        check = summary.check
+        assert check.passed and check.previous_source == "previous_statement"
+        assert (check.previous_balance, check.expected_activity) == (
+            money("1000.00"),
+            money("407.68"),
+        )
+        assert summary.balance_basis == "previous_statement"
+        line = next(f for f in summary.fields if f.key == "previous_balance")
+        assert (line.app, line.reported, line.difference) == (
+            money("1000.00"),
+            money("900.00"),
+            money("100.00"),
+        )
+
+    def test_a_snapshot_new_balance_feeds_the_next_check(self, db, card):
+        make_statement(
+            db,
+            card,
+            "2026-08-27",
+            closing_date_source="liabilities",
+            plaid_issue_date=D(2026, 8, 27),
+            reported_new_balance=money("1000.00"),
+            reported_new_balance_source="liabilities",
+        )
+        make_statement(db, card, "2026-09-27", reported_new_balance=money("1407.68"))
+        check = summary_for(db, card, D(2026, 9, 27)).check
+        assert check.passed and check.previous_source == "previous_statement"
+        assert check.previous_balance == money("1000.00")
 
     def test_needs_a_new_balance_and_a_previous_balance(self, db, card):
         make_statement(db, card, "2026-09-27")
@@ -749,6 +815,268 @@ class TestAddAndCheck:
         assert row.checked_at is None
 
 
+def statement_rows(db, card) -> list[Statement]:
+    return list(
+        db.scalars(
+            select(Statement).where(Statement.account_id == card.id).order_by("closing_date")
+        )
+    )
+
+
+class TestCombineAndRemove:
+    """Review finding: a mistaken closing date could not be undone (no removal, and the
+    statement it duplicated could not be reached)."""
+
+    @pytest.fixture
+    def typo(self, db, today, card):
+        """Sep 28 from Amex; the user added October as Oct 17 (a typo for 27); then the
+        Liabilities snapshot arrived for Oct 27, 10 days away (sync attaches within 7 only)."""
+        make_statement(
+            db,
+            card,
+            "2026-09-28",
+            closing_date_source="liabilities",
+            plaid_issue_date=D(2026, 9, 28),
+            reported_new_balance=money("100.00"),
+            reported_new_balance_source="liabilities",
+        )
+        user = st.add_statement(db, card.id, "2026-10-17")
+        snapshot = make_statement(
+            db,
+            card,
+            "2026-10-27",
+            closing_date_source="liabilities",
+            plaid_issue_date=D(2026, 10, 27),
+            reported_new_balance=money("150.00"),
+            reported_new_balance_source="liabilities",
+        )
+        make_transaction(db, card, amount="20.00", date=D(2026, 10, 5))
+        make_transaction(db, card, amount="30.00", date=D(2026, 10, 27))  # interest, say
+        return user, snapshot
+
+    def test_moving_the_typo_onto_the_amex_date_combines_the_two(self, db, card, typo):
+        user, snapshot = typo
+        assert cycle_for(db, card, D(2026, 10, 27)).days == 10  # both are visible
+        values = {
+            "closing_date": "2026-10-27",
+            "previous_balance": "100.00",
+            "new_balance": "",  # left empty: Amex's New Balance stays
+            "notes": "typed from the PDF",
+        }
+        kept = st.save_statement(db, card.id, D(2026, 10, 17), values)
+        assert kept is snapshot
+        assert [r.closing_date for r in statement_rows(db, card)] == [
+            D(2026, 9, 28),
+            D(2026, 10, 27),
+        ]
+        assert (kept.plaid_issue_date, kept.reported_new_balance) == (
+            D(2026, 10, 27),
+            money("150.00"),
+        )
+        assert kept.reported_new_balance_source == "liabilities"
+        assert (kept.reported_previous_balance, kept.notes) == (
+            money("100.00"),
+            "typed from the PDF",
+        )
+        cycle = cycle_for(db, card, D(2026, 10, 27))
+        assert (cycle.start, cycle.days, cycle.flagged) == (D(2026, 9, 29), 29, False)
+        assert st.summary(db, cycle).check.passed  # 50.00 == 150.00 - 100.00
+        assert st.find_cycle(db, card.id, D(2026, 10, 17)) is None
+
+    def test_a_typed_new_balance_wins_and_becomes_the_users(self, db, card, typo):
+        user, snapshot = typo
+        user.checked_at = dt.datetime(2026, 10, 28, tzinfo=dt.UTC)
+        kept = st.save_statement(
+            db, card.id, D(2026, 10, 17), {"closing_date": "2026-10-27", "new_balance": "150.01"}
+        )
+        assert (kept.reported_new_balance, kept.reported_new_balance_source) == (
+            money("150.01"),
+            "user",
+        )
+        assert kept.checked_at == dt.datetime(2026, 10, 28, tzinfo=dt.UTC)
+
+    def test_set_closing_date_combines_too(self, db, card, typo):
+        user, snapshot = typo
+        assert st.set_closing_date(db, card.id, D(2026, 10, 17), D(2026, 10, 27)) is snapshot
+        assert len(statement_rows(db, card)) == 2
+
+    def test_near_the_amex_date_says_how_to_combine(self, db, card, typo):
+        with pytest.raises(st.StatementError) as err:
+            st.set_closing_date(db, card.id, D(2026, 10, 17), "2026-10-25")
+        assert err.value.errors["closing_date"] == (
+            "That is 2 days from the statement Amex reported for Oct 27, 2026. To combine the "
+            "two, set this closing date to Oct 27, 2026."
+        )
+
+    def test_only_onto_the_amex_statement_next_to_it(self, db, today, card):
+        make_statement(db, card, "2026-08-27")
+        make_statement(db, card, "2026-09-27")  # a user row: never combined, edit that one
+        with pytest.raises(st.StatementError) as err:
+            st.set_closing_date(db, card.id, D(2026, 9, 27), "2026-08-27")
+        assert "already closes" in err.value.errors["closing_date"]
+        make_statement(db, card, "2026-10-27", closing_date_source="liabilities")
+        with pytest.raises(st.StatementError):  # more than 10 days away: not a duplicate
+            st.set_closing_date(db, card.id, D(2026, 9, 27), "2026-10-27")
+        assert len(statement_rows(db, card)) == 3
+
+    def test_two_snapshots_are_never_combined(self, db, today, card):
+        snapshot = {"closing_date_source": "liabilities"}
+        make_statement(db, card, "2026-09-20", plaid_issue_date=D(2026, 9, 20), **snapshot)
+        make_statement(db, card, "2026-09-28", plaid_issue_date=D(2026, 9, 28), **snapshot)
+        with pytest.raises(st.StatementError) as err:
+            st.set_closing_date(db, card.id, D(2026, 9, 20), "2026-09-28")
+        assert "already closes" in err.value.errors["closing_date"]
+
+    def test_the_earliest_statement_keeps_its_period_start_when_combined(self, db, today, card):
+        st.add_statement(db, card.id, "2026-09-19")
+        st.set_period_start(db, card.id, D(2026, 9, 19), "2026-08-29")
+        snapshot = make_statement(
+            db, card, "2026-09-28", closing_date_source="liabilities", plaid_issue_date=None
+        )
+        st.set_closing_date(db, card.id, D(2026, 9, 19), "2026-09-28")
+        assert snapshot.period_start_override == D(2026, 8, 29)
+        assert cycle_for(db, card, D(2026, 9, 28)).start == D(2026, 8, 29)
+
+    def test_remove_a_statement_added_by_mistake(self, db, today, card):
+        make_statement(db, card, "2026-05-25", reported_new_balance=money("100.00"))
+        make_statement(
+            db,
+            card,
+            "2026-06-26",
+            reported_previous_balance=money("100.00"),
+            reported_new_balance=money("130.00"),
+        )
+        make_transaction(db, card, amount="10.00", date=D(2026, 6, 1))
+        make_transaction(db, card, amount="20.00", date=D(2026, 6, 20))
+        st.add_statement(db, card.id, "2026-06-10")  # meant 2026-07-10
+        june = cycle_for(db, card, D(2026, 6, 26))
+        assert june.flagged and st.summary(db, june).check.failed
+        assert cycle_for(db, card, D(2026, 6, 10)).removable
+        assert st.remove_statement(db, card.id, D(2026, 6, 10)) == D(2026, 6, 10)
+        june = cycle_for(db, card, D(2026, 6, 26))
+        assert (june.start, june.flagged) == (D(2026, 5, 26), False)
+        assert st.summary(db, june).check.passed
+
+    def test_amex_statements_cannot_be_removed(self, db, today, card):
+        make_statement(db, card, "2026-09-27", closing_date_source="liabilities")
+        moved = make_statement(db, card, "2026-10-26", plaid_issue_date=D(2026, 10, 27))
+        assert not cycle_for(db, card, D(2026, 9, 27)).removable
+        assert not cycle_for(db, card, D(2026, 10, 26)).removable  # a corrected Amex date
+        for closing in (D(2026, 9, 27), D(2026, 10, 26)):
+            with pytest.raises(st.StatementError) as err:
+                st.remove_statement(db, card.id, closing)
+            assert "came from Amex" in err.value.errors["remove"]
+        assert moved in statement_rows(db, card)
+
+    def test_removing_needs_a_stored_statement(self, db, today, card):
+        make_statement(db, card, "2026-09-27")
+        with pytest.raises(LookupError):
+            st.remove_statement(db, card.id, D(2026, 8, 27))  # estimated: nothing stored
+        with pytest.raises(LookupError):
+            st.remove_statement(db, card.id, D(2026, 9, 20))
+
+
+class TestDateBounds:
+    """Review finding: year typos were accepted, and year-1 dates crashed every page."""
+
+    @pytest.mark.parametrize(
+        ("day", "message"),
+        [
+            ("0001-01-10", "in 2000 or later"),
+            ("1999-12-27", "in 2000 or later"),
+            ("2062-10-27", "too far in the future"),
+        ],
+    )
+    def test_closing_dates_must_be_plausible(self, db, today, card, day, message):
+        make_statement(db, card, "2026-09-27")
+        with pytest.raises(st.StatementError) as err:
+            st.add_statement(db, card.id, day)
+        assert message in err.value.errors["closing_date"]
+        with pytest.raises(st.StatementError) as err:
+            st.set_closing_date(db, card.id, D(2026, 9, 27), day)
+        assert message in err.value.errors["closing_date"]
+        assert [r.closing_date for r in statement_rows(db, card)] == [D(2026, 9, 27)]
+
+    def test_the_latest_statement_cannot_move_far_into_the_future(self, db, today, card):
+        make_statement(db, card, "2026-10-27")
+        with pytest.raises(st.StatementError) as err:
+            st.set_closing_date(db, card.id, D(2026, 10, 27), "2026-12-27")
+        assert "too far in the future" in err.value.errors["closing_date"]
+        st.set_closing_date(db, card.id, D(2026, 10, 27), "2026-10-26")  # a real correction
+
+    @pytest.mark.parametrize("start", ["0001-01-01", "0026-07-28", "2026-06-25"])
+    def test_the_period_start_is_within_two_months_of_the_closing_date(
+        self, db, today, card, start
+    ):
+        make_statement(db, card, "2026-08-27")
+        make_statement(db, card, "2026-09-27")
+        with pytest.raises(st.StatementError) as err:
+            st.set_period_start(db, card.id, D(2026, 8, 27), start)
+        assert "within two months" in err.value.errors["period_start"]
+        assert cycle_for(db, card, D(2026, 8, 27)).period_start_override is None
+        st.set_period_start(db, card.id, D(2026, 8, 27), "2026-06-26")  # 62 days before
+        assert cycle_for(db, card, D(2026, 8, 27)).days == 63
+        assert len(st.cycles(db, card.id)) >= 3
+
+    def test_far_dates_find_nothing(self, db, today, card):
+        # Only a closing day is known: generation used to step past the calendar's ends.
+        for day in (D(9999, 12, 27), D(1, 1, 27), D(1999, 12, 27), D(2027, 3, 27)):
+            assert st.find_cycle(db, card.id, day) is None
+            assert st.detail(db, card.id, day) is None
+        assert st.cycles(db, card.id, start=D(1, 1, 1), end=D(1, 2, 1)) == []
+        assert st.cycles(db, card.id, start=D(9999, 12, 1), end=D(9999, 12, 31)) == []
+
+    def test_a_statement_that_stops_being_the_earliest_drops_its_period_start(
+        self, db, today, card
+    ):
+        november = make_statement(db, card, "2025-11-27", period_start_override=D(2025, 11, 10))
+        make_statement(db, card, "2025-12-27")
+        st.add_statement(db, card.id, "2025-10-20")  # an older statement typed later
+        assert november.period_start_override is None
+        assert cycle_for(db, card, D(2025, 11, 27)).start == D(2025, 10, 21)
+        st.set_closing_date(db, card.id, D(2025, 11, 27), "2025-11-05")  # no CHECK violation
+        assert november.closing_date == D(2025, 11, 5)
+
+    def test_a_stale_period_start_is_cleared_on_save(self, db, today, card):
+        make_statement(db, card, "2025-10-20")
+        stale = make_statement(db, card, "2025-11-27", period_start_override=D(2025, 11, 10))
+        st.set_closing_date(db, card.id, D(2025, 11, 27), "2025-11-05")
+        assert (stale.closing_date, stale.period_start_override) == (D(2025, 11, 5), None)
+
+
+class TestOpenEstimate:
+    """Review finding: saving on the open, estimated period pinned the estimate as the user's
+    closing date, which sync never changes."""
+
+    def test_nothing_is_saved_on_the_open_estimated_period(self, db, today, card):
+        make_statement(db, card, "2026-10-27", closing_date_source="liabilities")
+        open_cycle = cycle_for(db, card, D(2026, 11, 27))
+        assert open_cycle.is_estimate_open
+        with pytest.raises(st.StatementError) as err:
+            st.save_statement(db, card.id, D(2026, 11, 27), {"notes": "expect the REI refund"})
+        assert "hasn't closed yet" in err.value.errors["period"]
+        with pytest.raises(st.StatementError):
+            st.set_closing_date(db, card.id, D(2026, 11, 27), "2026-11-25")
+        with pytest.raises(st.StatementError):
+            st.mark_checked(db, card.id, D(2026, 11, 27))
+        assert st.mark_checked(db, card.id, D(2026, 11, 27), checked=False) is None
+        assert [r.closing_date for r in statement_rows(db, card)] == [D(2026, 10, 27)]
+
+    def test_a_stored_open_statement_can_be_edited_but_not_checked(self, db, today, card):
+        make_statement(db, card, "2026-10-27")
+        upcoming = st.add_statement(db, card.id, "2026-11-25")  # the date Amex announced
+        assert not cycle_for(db, card, D(2026, 11, 25)).is_estimate_open
+        st.save_statement(db, card.id, D(2026, 11, 25), {"notes": "expect the REI refund"})
+        assert upcoming.notes == "expect the REI refund"
+        with pytest.raises(st.StatementError):
+            st.mark_checked(db, card.id, D(2026, 11, 25))
+
+    def test_a_closed_estimated_period_still_gets_a_statement(self, db, today, card):
+        make_statement(db, card, "2026-09-27")
+        row = st.save_statement(db, card.id, D(2026, 10, 27), {"new_balance": "12.00"})
+        assert (row.closing_date, row.closing_date_source) == (D(2026, 10, 27), "user")
+
+
 class TestAccounts:
     def test_linked_cards_first_and_the_budget_card_by_default(self, db):
         manual = make_account(db, manual=True)
@@ -773,3 +1101,77 @@ class TestAccounts:
         assert len(detail.boundaries) == 2
         assert st.detail(db, card.id, D(2026, 9, 20)) is None
         assert st.detail(db, 999_999, D(2026, 9, 27)) is None
+
+
+class TestEdgeCases:
+    """Probes from the independent review, kept as regression tests."""
+
+    def test_overview_and_the_check_equal_an_independent_sum(self, db, today, card):
+        make_statement(db, card, "2026-07-27", reported_new_balance=money("100.00"))
+        make_statement(db, card, "2026-08-28", reported_new_balance=money("50.00"))
+        make_statement(db, card, "2026-09-26", reported_new_balance=money("57.77"))
+        # A CSV row whose posting date (from the Reference) is after its Date and the close.
+        make_transaction(
+            db, card, amount="10.00", date=D(2026, 8, 27), posted_date=D(2026, 8, 29), source="csv"
+        )
+        make_transaction(db, card, amount="-60.00", date=D(2026, 8, 28), category=card_payments(db))
+        make_transaction(db, card, amount="10.00", date=D(2026, 8, 3))
+        make_transaction(db, card, amount="5.00", date=D(2026, 8, 1), pending=True)
+        make_transaction(db, card, amount="-2.23", date=D(2026, 9, 26))
+        make_transaction(db, card, amount="1.00", date=D(2026, 7, 27))
+        rows = st.overview(db, card.id)
+        for row in rows:
+            oracle = db.execute(
+                text(
+                    "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE account_id = :a "
+                    "AND NOT pending AND duplicate_status <> 'suspect' "
+                    "AND COALESCE(posted_date, date) BETWEEN :s AND :e"
+                ),
+                {"a": card.id, "s": row.cycle.start, "e": row.cycle.closing_date},
+            ).scalar_one()
+            assert row.net_activity == oracle, row.cycle.label
+        by = {r.cycle.closing_date: r for r in rows}
+        assert by[D(2026, 8, 28)].net_activity == money("-50.00")
+        assert by[D(2026, 8, 28)].check.passed
+        assert by[D(2026, 9, 26)].net_activity == money("7.77")
+        assert by[D(2026, 9, 26)].check.passed
+        assert by[D(2026, 7, 27)].check.state == st.CHECK_UNAVAILABLE
+
+    def test_zero_and_credit_balances_are_values(self, db, today, card):
+        make_statement(db, card, "2026-07-27", reported_new_balance=money("0.00"))
+        make_statement(db, card, "2026-08-27", reported_new_balance=money("-12.34"))
+        make_statement(db, card, "2026-09-27", reported_new_balance=money("-2.34"))
+        make_transaction(db, card, amount="-12.34", date=D(2026, 8, 1))
+        make_transaction(db, card, amount="10.00", date=D(2026, 9, 1))
+        assert summary_for(db, card, D(2026, 8, 27)).check.passed
+        assert summary_for(db, card, D(2026, 9, 27)).check.passed
+
+    def test_a_changed_closing_day_gives_a_short_flagged_transition(self, db, today, card):
+        make_statement(db, card, "2026-09-27")
+        make_statement(db, card, "2026-10-27")
+        card.statement_closing_day = 12
+        db.flush()
+        found = st.cycles(db, card.id)
+        assert found[0].closing_date == D(2026, 11, 12) and found[0].flagged
+        assert found[0].start == D(2026, 10, 28) and found[0].status == st.OPEN
+        first = cycle_for(db, card, D(2026, 9, 27))
+        assert first.start == D(2026, 9, 13) and first.flagged  # estimated from the new day
+
+    def test_month_end_with_stored_dates_and_a_leap_february(self, db, freeze_today):
+        freeze_today(D(2024, 4, 15))
+        card = make_account(db, statement_closing_day=31)
+        make_statement(db, card, "2024-01-31")
+        make_transaction(db, card, amount="5.00", date=D(2024, 2, 29))
+        make_transaction(db, card, amount="7.00", date=D(2024, 3, 1))
+        by = {c.closing_date: c for c in st.cycles(db, card.id)}
+        assert by[D(2024, 2, 29)].start == D(2024, 2, 1)
+        rows = {r.cycle.closing_date: r for r in st.overview(db, card.id)}
+        assert rows[D(2024, 2, 29)].net_activity == money("5.00")
+        assert rows[D(2024, 3, 31)].net_activity == money("7.00")
+
+    def test_today_on_a_closing_date(self, db, freeze_today, card):
+        freeze_today(D(2026, 10, 27))
+        make_statement(db, card, "2026-10-27")
+        found = st.cycles(db, card.id)
+        assert found[0].closing_date == D(2026, 10, 27) and found[0].status == st.OPEN
+        assert st.find_cycle(db, card.id, D(2026, 11, 27)) is None

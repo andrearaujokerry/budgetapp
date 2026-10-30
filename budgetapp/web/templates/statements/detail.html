@@ -73,7 +73,14 @@
 {%- endif %}
 
 {%- if cycle.flagged %}
+{%- if cycle.days < 25 %}
+{{ ui.banner("warn", "Statement periods are usually 28 to 31 days. If one of its closing dates was entered by mistake, open that statement and remove it, or set it to the date printed on the statement.", title="This period is " ~ cycle.days ~ " days long.", id="flagged-banner") }}
+{%- else %}
 {{ ui.banner("warn", "Statement periods are usually 28 to 31 days. If a statement is missing, add it by its closing date on the Statements page.", title="This period is " ~ cycle.days ~ " days long.", id="flagged-banner") }}
+{%- endif %}
+{%- endif %}
+{%- if errors.get("period") %}
+{{ ui.banner("over", errors.get("period"), title="Nothing was saved.", id="period-error") }}
 {%- endif %}
 {%- set identity = cycle.reported.identity_difference %}
 {%- if identity is not none and identity != 0 %}
@@ -113,6 +120,12 @@
 {% endcall %}
 
 {#- ------------------------------------------------------------ the statement's numbers -#}
+{%- if cycle.is_estimate_open %}
+{% set edit_subtitle %}Its statement isn't issued yet.{% endset %}
+{% call ui.card("Your statement", subtitle=edit_subtitle, id="edit", class="no-print") %}
+<p class="stmt-later">You can type this statement's numbers once it closes, around {{ cycle.closing_date|date_long }} (the date is an estimate). If Amex closes it on another day, add the statement by the date printed on it on the <a href="/statements?account={{ account.id }}#add-statement">Statements page</a>.</p>
+{% endcall %}
+{%- else %}
 {% set edit_subtitle %}Type the numbers from the summary box of your Amex statement (PDF). Leave a box empty if you don't have that number.{% endset %}
 {% call ui.card("Your statement", subtitle=edit_subtitle, id="edit", class="no-print") %}
 <form class="form" method="post" action="{{ url }}">
@@ -146,7 +159,14 @@
 {%- endif %}
 </div>
 {%- endif %}
+{%- if cycle.removable %}
+<div class="stmt-remove">
+<p class="stmt-remove__text muted">You added this statement. If its date was a mistake, remove it (its typed numbers go with it).</p>
+<form method="post" action="{{ url }}/remove" data-confirm="Remove the statement closing {{ cycle.closing_date|date_long }}? Its typed numbers are removed too.">{{ ui.button("Remove statement", icon="trash", variant="danger", size="sm", type="submit") }}</form>
+</div>
+{%- endif %}
 {% endcall %}
+{%- endif %}
 </div>
 
 {#- ------------------------------------------------------------ boundary transactions -#}
