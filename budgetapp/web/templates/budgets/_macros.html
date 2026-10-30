@@ -1,0 +1,49 @@
+{#- Small helpers shared by the Budgets partials. -#}
+{%- import "components/ui.html" as ui -%}
+
+{#- carry_note(line, labels): what rolled in (BUD-4), e.g. "+$40.00 from Sep" or
+    "−$25.00 overspent in Sep". Nothing without rollover or when nothing carried. -#}
+{%- macro carry_note(line, labels) -%}
+{%- if line.rollover and line.carry_in > 0 -%}
+<span class="table__secondary budget-carry text-ok">{{ ui.icon('arrow-up', size='xs') }}{{ ui.money_text(line.carry_in, signed=true) }} from {{ labels.previous_short }}</span>
+{%- elif line.rollover and line.carry_in < 0 -%}
+<span class="table__secondary budget-carry text-over">{{ ui.icon('arrow-down', size='xs') }}{{ ui.money_text(line.carry_in) }} overspent in {{ labels.previous_short }}</span>
+{%- endif -%}
+{%- endmacro -%}
+
+{#- meter(percent, status, pace, name, remaining): the progress bar of a row; with nothing
+    available (a $0 budget, or a negative carry) there is no percentage, so it says so in words. -#}
+{%- macro meter(percent, status, pace, name, remaining) -%}
+{%- if percent is not none -%}
+{{ ui.progress(percent, pace_pct=pace, status=status, size='sm', name=name) }}
+{%- elif status == 'over' -%}
+<span class="budget-meter-note text-over">{{ ui.icon('alert', size='sm') }}Over by {{ ui.money_text(-remaining) }}</span>
+{%- else -%}
+<span class="budget-meter-note muted">Nothing to spend</span>
+{%- endif -%}
+{%- endmacro -%}
+
+{#- field_error(id, error): an inline error under a table-cell control. -#}
+{%- macro field_error(id, error) -%}
+{%- if error -%}
+<p class="field__error budget-error" id="{{ id }}" role="alert">{{ ui.icon('alert') }}<span>{{ error.message }}</span></p>
+{%- endif -%}
+{%- endmacro -%}
+
+{#- suggest_button(amount, target, name, basis): fills the input #target (budgets.js); it
+    never saves. Nothing without a suggestion (no complete period of history yet). -#}
+{%- macro suggest_button(amount, target, name, basis) -%}
+{%- if amount is not none -%}
+{{ ui.button('Suggest', size='sm', variant='ghost', icon='wand', id='suggest-' ~ target, tooltip=ui.money_text(amount) ~ ': ' ~ basis ~ ', rounded up', data_suggest=ui.decimal_text(amount), data_suggest_target=target, aria_label='Suggest a ' ~ name ~ ': ' ~ ui.money_text(amount), class='budget-suggest') }}
+{%- endif -%}
+{%- endmacro -%}
+
+{#- phone_status(spent, percent, status, remaining): the row's state as one line under the
+    category name, shown only on phones, where the amount columns scroll out of view. -#}
+{%- macro phone_status(spent, percent, status, remaining) -%}
+<span class="table__secondary budget-phone{{ ' text-' ~ status if status in ['warn', 'over'] }}" aria-hidden="true">
+{%- if status in ['warn', 'over'] %}{{ ui.icon('alert', size='xs') }}{% endif -%}
+{%- if percent is not none %}{{ percent|pct }} · {% elif status == 'over' %}Over by {{ ui.money_text(-remaining) }} · {% endif -%}
+{{ ui.money_text(spent) }} spent
+</span>
+{%- endmacro -%}

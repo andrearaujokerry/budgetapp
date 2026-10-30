@@ -1,0 +1,36 @@
+{#- The form inside the "Add a budget" dialog; on errors it comes back alone (status 422). -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+{%- set dialog_id = 'add-' ~ kind -%}
+{%- set state = dialog if dialog and dialog.kind == kind else none -%}
+{%- set errs = state.errors if state else {} -%}
+{%- set ns = namespace(options=[]) -%}
+{%- for c in categories -%}
+{%- set current = ov.line_for(c.id) -%}
+{%- if current %}{% set note = ' (now ' ~ (current.budget|money) ~ ' a ' ~ labels.unit ~ ')' %}
+{%- elif c.id in ov.annual_category_ids %}{% set note = ' (now an annual budget)' %}
+{%- else %}{% set note = '' %}{% endif -%}
+{%- set s = sugg.for_category(c.id) if kind == 'monthly' else none -%}
+{%- set ns.options = ns.options + [{'value': c.id, 'label': c.name ~ note, 'attrs': {'data-suggest': ui.decimal_text(s) if s is not none else none}}] -%}
+{%- endfor -%}
+<form class="form" id="{{ dialog_id }}-form" method="post" action="/budgets/add" hx-post="/budgets/add" hx-target="this" hx-swap="outerHTML" hx-sync="this:drop">
+<input type="hidden" name="period" value="{{ labels.param }}">
+<input type="hidden" name="kind" value="{{ kind }}">
+{{ form.select_field('category_id', 'Category', ns.options, value=(state.category_id if state else none), placeholder='Choose a category', id=dialog_id ~ '-category', required=true, error=errs.get('category_id')) }}
+{%- if kind == 'annual' %}
+{{ form.money_field('amount', 'Budget for ' ~ annual.year, value=(state.amount if state else none), id=dialog_id ~ '-amount', required=true, error=errs.get('amount'), help='Counts the whole calendar year’s spending, from Jan 1. If the category has a monthly budget now, it ends from ' ~ labels.period ~ ' on.') }}
+{%- else %}
+{{ form.money_field('amount', 'Budget per ' ~ labels.unit, value=(state.amount if state else none), id=dialog_id ~ '-amount', required=true, error=errs.get('amount'), help='Applies from ' ~ labels.period ~ ' on; earlier periods keep their budgets. A category with an annual budget switches to this monthly one.') }}
+{%- endif %}
+<div class="dialog__footer dialog__footer--split">
+<div>
+{%- if kind == 'monthly' and sugg.periods %}
+{{ ui.button('Suggest', size='sm', variant='ghost', icon='wand', id=dialog_id ~ '-suggest', tooltip='Fill in the ' ~ labels.suggest_basis ~ ', rounded up', data_suggest_target=dialog_id ~ '-amount', data_suggest_select=dialog_id ~ '-category') }}
+{%- endif %}
+</div>
+<div class="cluster">
+{{ ui.button('Cancel', variant='ghost', data_dialog_close=true) }}
+{{ ui.button('Add budget', type='submit', variant='primary', id=dialog_id ~ '-save') }}
+</div>
+</div>
+</form>

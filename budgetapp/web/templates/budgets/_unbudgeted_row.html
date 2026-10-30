@@ -1,0 +1,23 @@
+{#- A category with spending but no budget: "Add budget" sets a monthly budget from this period
+    on and reloads the page (the category moves up into Monthly budgets). -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+{%- import "budgets/_macros.html" as bud -%}
+{%- set cid = category.id -%}
+{%- set err = errors.get(cid) -%}
+{%- set spent = spent if spent is defined else ov.spending.amount_for(cid) -%}
+{%- set suggestion = sugg.for_category(cid) -%}
+<tr id="unbudgeted-{{ cid }}">
+<td class="col-grow"><span class="table__primary">{{ ui.category_badge(category) }}</span></td>
+<td class="num"><a class="budget-spent" id="unbudgeted-spent-{{ cid }}" href="{{ spent_href(cid) }}" aria-label="{{ ui.money_text(spent) }} spent on {{ category.name }}: see the transactions">{{ ui.money(spent) }}</a></td>
+<td class="num budget-table__amount">
+<form class="budget-add" method="post" action="/budgets/category/{{ cid }}" hx-post="/budgets/category/{{ cid }}" hx-target="closest tr" hx-swap="outerHTML" hx-sync="this:drop">
+<input type="hidden" name="period" value="{{ labels.param }}">
+<input type="hidden" name="row" value="unbudgeted">
+{{ form.inline_money('amount', err.raw if err else none, label='Monthly budget for ' ~ category.name, id='add-' ~ cid, aria_invalid='true' if err else none, aria_describedby=('add-' ~ cid ~ '-error') if err else none) }}
+{{ bud.suggest_button(suggestion, 'add-' ~ cid, category.name ~ ' monthly budget', labels.suggest_basis) }}
+{{ ui.button('Add budget', type='submit', size='sm', icon='plus', id='add-' ~ cid ~ '-save', aria_label='Add a monthly budget for ' ~ category.name) }}
+</form>
+{{- bud.field_error('add-' ~ cid ~ '-error', err) }}
+</td>
+</tr>
