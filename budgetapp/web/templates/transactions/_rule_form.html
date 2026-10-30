@@ -1,0 +1,37 @@
+{#- "Always categorize like this" (CAT-3 one-click rule). Context: t, draft (RuleDraft), values
+    {merchant_pattern, category_id, apply_past}, preview, preview_category, categories, errors,
+    next, in_dialog. The pattern and category refresh the preview as you type. On success the
+    list reloads, since many rows may have moved. -#}
+{% import "components/ui.html" as ui %}
+{% import "components/forms.html" as form %}
+{%- set preview_url = "/transactions/" ~ t.id ~ "/rule/preview" -%}
+<form id="txn-rule-form" class="form" method="post" action="/transactions/{{ t.id }}/rule"
+{%- if in_dialog %} hx-post="/transactions/{{ t.id }}/rule"{% endif %}>
+<input type="hidden" name="next" value="{{ next }}">
+<p class="txn-form__context">
+{%- if in_dialog %}{{ t.title }} · {{ t.spend_date|date_long }} · {{ ui.money_text(t.amount) }}. {% endif -%}
+Charges whose merchant contains this text go to the category you choose, now and when new charges arrive. Capital letters don't matter; a charge without a merchant name is matched on its description.</p>
+{%- if draft.is_payment %}
+{{ ui.banner('info', "Card payments always go to Card Payments; rules never change them. This rule would only affect other charges that match.", title="This is a card payment.") }}
+{%- endif %}
+{{ form.field("merchant_pattern", "Merchant contains", value=values.merchant_pattern, required=true, error=errors.get('merchant_pattern') or errors.get('conditions'), id="rule-pattern", autocomplete="off", spellcheck="false", maxlength="300", hx_get=preview_url, hx_trigger="input changed delay:400ms", hx_target="#rule-preview", hx_include="#txn-rule-form", data_quiet=true) }}
+{{ form.category_select("category_id", categories, value=values.category_id, label="Category", required=true, placeholder="Choose a category", error=errors.get('category_id'), id="rule-category", hx_get=preview_url, hx_trigger="change", hx_target="#rule-preview", hx_include="#txn-rule-form", data_quiet=true) }}
+{{ form.checkbox_field("apply_past", "Also apply to past transactions", checked=values.apply_past, help="Transactions you categorized by hand are never changed.", id="rule-apply") }}
+<div id="rule-preview" class="txn-rule-preview" aria-live="polite">
+{% include "transactions/_rule_preview.html" %}
+</div>
+{%- if draft.runs_before %}
+<p class="field__help">It goes before your rule “{{ draft.runs_before }}”, which matches this charge now, so the new rule wins.</p>
+{%- endif %}
+{%- if in_dialog %}
+<div class="dialog__footer">
+{{ ui.button("Cancel", variant="ghost", data_dialog_close=true) }}
+{{ ui.button("Create rule", variant="primary", type="submit", icon="wand") }}
+</div>
+{%- else %}
+<div class="form-actions">
+{{ ui.button("Create rule", variant="primary", type="submit", icon="wand") }}
+<a class="btn btn--ghost" href="{{ next }}">Cancel</a>
+</div>
+{%- endif %}
+</form>

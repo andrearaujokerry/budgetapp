@@ -1,10 +1,25 @@
-{#- Placeholder from the web shell; the TXN package replaces this file. -#}
+{#- Transactions (TXN-1..5). Context: filt, sort, page (TransactionPage), categories,
+    category_names, show_members, attention, any_transactions, today, urls, options,
+    uncategorized_id. The filter bar swaps #results; dialogs load into #txn-dialog. -#}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
 {% block title %}Transactions{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/transactions.css">{% endblock %}
+
 {% block content %}
-{{ ui.page_header("Transactions", "Every charge, refund and payment on your Amex.") }}
-<div class="card">
-{{ ui.empty_state("Coming soon", "This page is being built.", icon="list") }}
+{{ ui.page_header("Transactions", "Every charge, refund and payment on your Amex. Click a category to change it.") }}
+
+{% include "transactions/_filters.html" %}
+
+{#- Announced after a filter, sort or page change (transactions.js copies #results' data-status
+    here); it stays outside #results so screen readers keep watching it. -#}
+<p id="txn-results-status" class="sr-only" role="status"></p>
+
+<div id="results" class="txn-results">
+{% include "transactions/_results.html" %}
 </div>
+
+<div id="txn-dialog"></div>
 {% endblock %}
+
+{% block scripts %}<script src="/static/js/transactions.js" defer></script>{% endblock %}

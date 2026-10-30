@@ -1,0 +1,21 @@
+{#- What the one-click rule matches. Context: preview (RulePreview or None), preview_category. -#}
+{% import "components/ui.html" as ui %}
+{%- if preview is none %}
+<p class="txn-rule-preview__text muted">Type part of a merchant name and choose a category to see which transactions it matches.</p>
+{%- elif not preview.matches %}
+<p class="txn-rule-preview__text">{{ ui.icon('info', size='sm') }}<span>No transactions match yet. It will apply to new charges whose merchant contains this text.</span></p>
+{%- else %}
+<p class="txn-rule-preview__text">{{ ui.icon('wand', size='sm') }}<span>Matches <strong>{{ preview.matches|pluralize("transaction") }}</strong>.
+{%- if preview.will_change %} Applied to past transactions, <strong>{{ '{:,}'.format(preview.will_change) }}</strong> {{ 'moves' if preview.will_change == 1 else 'move' }} to {{ preview_category }}.
+{%- else %} None of them would change category.
+{%- endif %}
+{%- if preview.user_edited %} {{ '{:,}'.format(preview.user_edited) }} you categorized by hand {{ 'stays as it is' if preview.user_edited == 1 else 'stay as they are' }}.{% endif %}
+{%- if preview.payments %} {{ '{:,}'.format(preview.payments) }} card {{ 'payment stays' if preview.payments == 1 else 'payments stay' }} in Card Payments.{% endif %}
+</span></p>
+{%- if preview.csv_only %}
+<p class="txn-rule-preview__text txn-rule-preview__hint">{{ ui.icon('alert', size='sm') }}<span>It matches only rows imported from Amex CSV files.
+{%- if preview.plaid_merchant %} Plaid names new charges from this merchant “{{ preview.plaid_merchant }}”, which this text misses: change it to match that name.
+{%- else %} New charges come from Plaid and may name this merchant differently: shorten the text to the merchant's name (without the city or a store number) so it matches them too.
+{%- endif %}</span></p>
+{%- endif %}
+{%- endif %}

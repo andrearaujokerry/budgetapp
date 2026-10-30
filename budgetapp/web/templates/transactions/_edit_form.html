@@ -1,0 +1,24 @@
+{#- Notes and tags (TXN-2). Context: t, values {notes, tags}, suggestions, errors, next,
+    in_dialog. -#}
+{% import "components/ui.html" as ui %}
+{% import "components/forms.html" as form %}
+<form id="txn-edit-form" class="form" method="post" action="/transactions/{{ t.id }}/edit"
+{%- if in_dialog %} hx-post="/transactions/{{ t.id }}/edit" hx-target="#txn-{{ t.id }}" hx-swap="outerHTML"{% endif %}>
+<input type="hidden" name="next" value="{{ next }}">
+{%- if in_dialog %}
+<p class="txn-form__context">{{ t.title }} · {{ t.spend_date|date_long }} · {{ ui.money_text(t.amount) }}</p>
+{%- endif %}
+{{ form.textarea_field("notes", "Notes", value=values.notes, rows=3, optional=true, placeholder="What was this for?", error=errors.get('notes'), id="txn-notes") }}
+{{ form.tags_field("tags", "Tags", tags=values.tags, suggestions=suggestions, optional=true, error=errors.get('tags'), id="txn-tags") }}
+{%- if in_dialog %}
+<div class="dialog__footer">
+{{ ui.button("Cancel", variant="ghost", data_dialog_close=true) }}
+{{ ui.button("Save", variant="primary", type="submit") }}
+</div>
+{%- else %}
+<div class="form-actions">
+{{ ui.button("Save", variant="primary", type="submit") }}
+<a class="btn btn--ghost" href="{{ next }}">Cancel</a>
+</div>
+{%- endif %}
+</form>

@@ -1,0 +1,27 @@
+{#- Change a row's category (the menu item phones use; wider screens have the inline select).
+    Context: t, categories, values {category_id}, errors, next, in_dialog. -#}
+{% import "components/ui.html" as ui %}
+{% import "components/forms.html" as form %}
+<form id="txn-category-form" class="form" method="post" action="/transactions/{{ t.id }}/category"
+{%- if in_dialog %} hx-post="/transactions/{{ t.id }}/category" hx-target="#txn-{{ t.id }}" hx-swap="outerHTML"{% endif %}>
+<input type="hidden" name="next" value="{{ next }}">
+{%- if in_dialog %}
+<input type="hidden" name="dialog" value="1">
+<p class="txn-form__context">{{ t.title }} · {{ t.spend_date|date_long }} · {{ ui.money_text(t.amount) }}</p>
+{%- endif %}
+{%- if t.is_split %}
+{{ ui.banner('info', "This charge is split, so its parts decide where the money goes. This category is used only if you remove the split.", title="Split charge.") }}
+{%- endif %}
+{{ form.category_select("category_id", categories, value=values.category_id, required=true, error=errors.get('category_id'), id="txn-category", help="Your choice is kept when the charge posts or changes, and rules never override it.") }}
+{%- if in_dialog %}
+<div class="dialog__footer">
+{{ ui.button("Cancel", variant="ghost", data_dialog_close=true) }}
+{{ ui.button("Save", variant="primary", type="submit") }}
+</div>
+{%- else %}
+<div class="form-actions">
+{{ ui.button("Save", variant="primary", type="submit") }}
+<a class="btn btn--ghost" href="{{ next }}">Cancel</a>
+</div>
+{%- endif %}
+</form>

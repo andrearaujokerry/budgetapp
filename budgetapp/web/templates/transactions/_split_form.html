@@ -1,0 +1,72 @@
+{#- Split a charge across categories (TXN-4). Context: t, parts [{category_id, amount, note}],
+    categories, max_parts, auto_first, errors, next, in_dialog. Amounts are typed without a
+    minus sign (a credit's parts are credits). transactions.js shows what is left to assign,
+    adds and removes parts and, for a new split, keeps the first part at what the others leave;
+    the server checks everything again. -#}
+{% import "components/ui.html" as ui %}
+{% import "components/forms.html" as form %}
+{%- set kind = 'credit' if t.amount < 0 else 'charge' -%}
+{%- macro part_fields(i, part, n) -%}
+<li class="txn-split__part" data-split-part>
+{{ form.category_select("part_category", categories, value=part.category_id or none, label="Part " ~ n ~ " category", hide_label=true, placeholder="Choose…", error=errors.get('part-' ~ i ~ '-category'), id="split-cat-" ~ i, compact=true, wrapper_class="txn-split__cat") }}
+{{ form.money_field("part_amount", "Part " ~ n ~ " amount", value=part.amount, hide_label=true, error=errors.get('part-' ~ i ~ '-amount'), id="split-amt-" ~ i, compact=true, wrapper_class="txn-split__amount", data_split_amount=true) }}
+{{ form.field("part_note", "Part " ~ n ~ " note", value=part.note, hide_label=true, placeholder="Note (optional)", error=errors.get('part-' ~ i ~ '-note'), id="split-note-" ~ i, compact=true, wrapper_class="txn-split__note", maxlength="200") }}
+<button type="button" class="btn btn--ghost btn--icon btn--sm txn-split__remove" data-split-remove aria-label="Remove part {{ n }}">{{ ui.icon('x') }}</button>
+</li>
+{%- endmacro -%}
+<form id="txn-split-form" class="form txn-split" method="post" action="/transactions/{{ t.id }}/split"
+{%- if in_dialog %} hx-post="/transactions/{{ t.id }}/split" hx-target="#txn-{{ t.id }}" hx-swap="outerHTML"{% endif %}
+ data-split-form data-total="{{ ui.decimal_text(t.amount|abs) }}" data-kind="{{ kind }}" data-max-parts="{{ max_parts }}"{% if auto_first %} data-auto-first{% endif %}>
+<input type="hidden" name="next" value="{{ next }}">
+<p class="txn-form__context">
+{%- if in_dialog %}{{ t.title }} · {{ t.spend_date|date_long }} · {% endif -%}
+Split {{ ui.money_text(t.amount|abs) }} across categories. Type each part without a minus sign{% if kind == 'credit' %}: this is a credit, so every part is a credit too{% endif %}. The parts must add up to the cent.</p>
+{%- if not t.can_split %}
+{%- if t.pending %}
+{{ ui.banner('warn', "A pending charge can't be split yet. Split it once it posts.", title="Can't split this one.") }}
+{%- elif t.is_payment %}
+{{ ui.banner('warn', "A card payment isn't spending, so it can't be split. If this isn't a card payment, change its category first.", title="Can't split this one.") }}
+{%- else %}
+{{ ui.banner('warn', "A $0.00 transaction can't be split.", title="Can't split this one.") }}
+{%- endif %}
+{%- else %}
+{%- if errors.get('parts') %}
+<p class="field__error txn-split__error" id="txn-split-error" role="alert">{{ ui.icon('alert') }}<span>{{ errors.get('parts') }}</span></p>
+{%- endif %}
+<div class="txn-split__head" aria-hidden="true"><span>Category</span><span>Amount</span><span>Note</span></div>
+<ol class="txn-split__parts" data-split-parts>
+{%- for part in parts %}
+{{ part_fields(loop.index0, part, loop.index) }}
+{%- endfor %}
+</ol>
+<template data-split-template>{{ part_fields('__i__', {'category_id': '', 'amount': '', 'note': ''}, '__n__') }}</template>
+<div class="txn-split__tools">
+{{ ui.button("Add a part", icon="plus", size="sm", variant="ghost", data_split_add=true) }}
+<p class="txn-split__remaining" data-split-remaining aria-live="polite"></p>
+</div>
+{%- endif %}
+{%- if in_dialog %}
+<div class="dialog__footer{{ ' dialog__footer--split' if t.splits }}">
+{%- if t.splits %}
+{{ ui.button("Remove split", variant="danger", hx_post="/transactions/" ~ t.id ~ "/split/clear", hx_target="#txn-" ~ t.id, hx_swap="outerHTML", data_confirm="Remove the split? The whole " ~ ui.money_text(t.amount|abs) ~ " goes back to " ~ t.category.name ~ ".") }}
+{%- endif %}
+<div class="cluster">
+{{ ui.button("Cancel", variant="ghost", data_dialog_close=true) }}
+{%- if t.can_split %}
+{{ ui.button("Save split", variant="primary", type="submit", data_split_save=true) }}
+{%- endif %}
+</div>
+</div>
+{%- elif t.can_split %}
+<div class="form-actions">
+{{ ui.button("Save split", variant="primary", type="submit", data_split_save=true) }}
+<a class="btn btn--ghost" href="{{ next }}">Cancel</a>
+</div>
+{%- endif %}
+</form>
+{%- if not in_dialog and t.splits %}
+<form class="txn-split__clear" method="post" action="/transactions/{{ t.id }}/split/clear" data-confirm="Remove the split? The whole {{ ui.money_text(t.amount|abs) }} goes back to {{ t.category.name }}.">
+<input type="hidden" name="next" value="{{ next }}">
+{{ ui.button("Remove split", variant="danger", type="submit") }}
+</form>
+{%- endif %}
