@@ -7,6 +7,7 @@ headless Chrome against a demo.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from budgetapp import web
@@ -108,3 +109,28 @@ def test_the_mobile_menu_never_hides_keyboard_focus():
         if js.startswith('addEventListener("focusout"', i)
     ]
     assert any("details.mobile-nav[open]" in body and "relatedTarget" in body for body in leave)
+
+
+# --------------------------------------------------------------------------- app.css
+
+
+def css_rules(css: str) -> list[tuple[str, str]]:
+    """``(selector, declarations)`` of every rule, media blocks flattened (no nesting)."""
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    return [
+        (sel.split("{")[-1].strip(), body) for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css)
+    ]
+
+
+def test_keyboard_focus_never_lands_under_a_sticky_bar_or_table_header():
+    """Scrolling a focused control into view leaves room for the top bar (and the Sandbox or
+    demo bar above it), and for a table header that sticks under it."""
+    rules = css_rules(source("css/app.css"))
+    envbar = [body for sel, body in rules if sel.startswith("html:has(.shell.has-envbar)")]
+    assert any("scroll-padding-top" in body and "--envbar-h" in body for body in envbar)
+    sticky_rows = [
+        body
+        for sel, body in rules
+        if ".table-wrap.is-fit" in sel and "tbody" in sel and "scroll-margin-top" in body
+    ]
+    assert sticky_rows

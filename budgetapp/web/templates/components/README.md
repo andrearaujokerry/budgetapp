@@ -487,7 +487,10 @@ Every table goes in a `.table-wrap` (inside a `card(flush=true)` for full-bleed 
   wrap becomes a plain box so the sticky header follows the page under the top bar) or
   `.is-scrollable` (header sticks inside the wrap; the edge that has more columns fades:
   `.is-scrolled` / `.is-scrolled-end`). `.table-wrap--scroll` is a fixed-height scroller
-  (`--table-max-h`, default 420px) with its own sticky header.
+  (`--table-max-h`, default 420px) with its own sticky header. A control in the rows of an
+  `.is-fit` table is never scrolled into view under that header (`scroll-margin-top`), and the
+  page's `scroll-padding-top` leaves room for the top bar and, in Sandbox, test and demo, the
+  environment bar above it.
 - **`.col-grow`** (on the `<th>` and every `<td>` of ONE text column: description, merchant, rule):
   the column takes the width the other columns leave and its `.table__primary` /
   `.table__secondary` lines truncate to fit, so the table fits its card at desktop widths. It

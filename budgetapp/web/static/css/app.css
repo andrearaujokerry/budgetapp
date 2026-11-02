@@ -281,6 +281,11 @@ html {
   scroll-padding-top: calc(var(--sticky-top) + 16px);
 }
 
+/* The Sandbox, test and demo bar sticks above the top bar (.shell.has-envbar). */
+html:has(.shell.has-envbar) {
+  scroll-padding-top: calc(var(--topbar-h) + var(--envbar-h) + 16px);
+}
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -1239,6 +1244,11 @@ a.cat:hover .cat__name {
   font-weight: var(--fw-semibold);
   letter-spacing: 0.02em;
   white-space: nowrap;
+}
+
+/* A control scrolled into view (e.g. by Shift+Tab) clears the header sticking above it. */
+.table-wrap.is-fit tbody :is(a[href], button, input, select, textarea, summary, [tabindex]) {
+  scroll-margin-top: 2.75rem;
 }
 
 .table tbody tr:hover > * {
@@ -3013,6 +3023,11 @@ a.pill:hover {
   .shell.has-envbar {
     grid-template-columns: minmax(0, 1fr);
     --sticky-top: var(--mobilebar-h);
+  }
+
+  /* Only the mobile bar sticks here; the environment bar scrolls away. */
+  html:has(.shell.has-envbar) {
+    scroll-padding-top: calc(var(--mobilebar-h) + 16px);
   }
 
   .sidebar {
