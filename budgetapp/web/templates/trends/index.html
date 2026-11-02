@@ -32,6 +32,8 @@
 <a class="btn btn--ghost btn--sm" href="/trends" id="trends-reset">Reset</a>
 </div>
 {% endcall %}
+{#- Announced after a filter change (app.js copies the results' data-status here). -#}
+<p id="trends-results-status" class="sr-only" role="status" data-status-for="trends-results"></p>
 <div id="trends-results" class="trends-results">
 {% include "trends/_results.html" %}
 </div>

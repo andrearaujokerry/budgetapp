@@ -397,6 +397,21 @@ def test_the_filter_bar_swaps_the_results(client, cat, history):
     assert csp_problems(response.text, rendered=True) == []
 
 
+def test_new_results_are_announced(client, cat, history):
+    """Screen readers hear what the filters now show: app.js copies the results' data-status
+    into the live region kept outside them."""
+    page = client.get("/trends").text
+    live = re.search(r'<p [^>]*data-status-for="trends-results"[^>]*>', page).group(0)
+    assert 'role="status"' in live and 'class="sr-only"' in live
+    assert page.index(live) < page.index('id="trends-results"')
+    response = client.get(f"/trends?months=24&category={cat('Travel').id}", headers=HTMX)
+    status = re.search(r' data-status="([^"]*)"', response.text).group(1)
+    assert html.unescape(status) == "Trends for Nov 2025 – Nov 2026, Travel."  # from the history
+    response = client.get("/trends?through=2026-10", headers=HTMX)
+    status = re.search(r' data-status="([^"]*)"', response.text).group(1)
+    assert html.unescape(status) == "Trends for Nov 2025 – Oct 2026, all categories."
+
+
 def test_the_through_picker_lists_the_history(client, history):
     page = client.get("/trends").text
     picker = re.search(r'<select[^>]*name="through".*?</select>', page, re.S).group(0)

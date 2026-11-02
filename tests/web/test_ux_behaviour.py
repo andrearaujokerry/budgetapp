@@ -163,3 +163,13 @@ def test_field_borders_and_off_switches_stand_out_in_both_themes():
                 ratio = contrast(theme[token], theme[behind])
                 assert ratio >= 3.0, f"{name} {token} on {behind}: {ratio:.2f}:1"
         assert contrast("#ffffff", theme["--switch-off"]) >= 3.0, f"{name} switch knob"
+
+
+def test_swapped_results_are_announced_through_their_live_region():
+    """A filter or the period arrows change results silently for screen readers; app.js copies
+    the new [data-status] text into the region's <p role="status" data-status-for="<id>">."""
+    js = source("js/app.js")
+    assert "announceStatus(" in listener(js, "htmx:afterSettle")
+    body = function_body(js, "announceStatus")
+    assert "data-status-for" in body and "[data-status]" in body and "textContent" in body
+    assert "announceResults" not in source("js/transactions.js")  # one mechanism for every page

@@ -146,7 +146,10 @@ the credit colour); see the design-system README §3.2.
   so both paths render identical markup:
   `<div id="results">{% include "transactions/_results.html" %}</div>`.
 - Filters: `form.filter_bar(..., target="#results")` (GET; the address bar follows with
-  `hx-replace-url`). Pagination, sort headers and tabs push history.
+  `hx-replace-url`). Pagination, sort headers and tabs push history. So screen readers hear what
+  changed, put `<p class="sr-only" role="status" data-status-for="results"></p>` before
+  `#results` and `data-status="12 transactions, Oct 2026."` on an element of the partial (the
+  first one that has it counts): app.js announces it after each swap.
 - What app.js does with the status of an HTMX response: 2xx is swapped; **204** swaps nothing;
   **422** is swapped (return the form with its errors; focus then moves to its first field marked
   `aria-invalid="true"`, which the form macros' `error=` sets); other 4xx/5xx are not swapped and

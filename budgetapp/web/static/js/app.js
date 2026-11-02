@@ -14,6 +14,7 @@
  *   data-toast / data-dismiss  flash messages: ok/info/warn auto-dismiss after 6 s, errors stay; close button
  *   data-flash                 swapped-in element glows briefly (swapped <tr> rows always do)
  *   .table-wrap                gets .is-fit (table fits: header sticks to the page) or .is-scrollable
+ *   data-status-for="<id>"     live region: after #<id> is swapped, its [data-status] text is announced
  *
  * Page scripts can use window.App: toast(level, text), renderCharts(force),
  * formatMoney(number).
@@ -1151,6 +1152,22 @@
     }, 0);
   }
 
+  // Results that a filter or the period arrows replace change silently for screen readers,
+  // so they are announced (WCAG 4.1.3): the new [data-status] text of a swapped region goes to
+  // its live region, <p role="status" data-status-for="<region id>">, kept outside it. The
+  // region is emptied first, so the same text (e.g. after re-sorting) is announced again.
+  var statusTimers = {};
+  function announceStatus(el) {
+    if (!el || !el.id || !el.querySelector) return;
+    var live = doc.querySelector('[data-status-for="' + CSS.escape(el.id) + '"]');
+    var from = el.matches("[data-status]") ? el : el.querySelector("[data-status]");
+    if (!live || !from) return;
+    var text = from.getAttribute("data-status") || "";
+    live.textContent = "";
+    window.clearTimeout(statusTimers[el.id]);
+    statusTimers[el.id] = window.setTimeout(function () { live.textContent = text; }, 150);
+  }
+
   // htmx fires afterSettle once per settled element; coalesce the page-wide work
   // into one pass. (setTimeout rather than requestAnimationFrame, which never
   // fires in hidden tabs.)
@@ -1162,6 +1179,7 @@
       xhr._errorShown = focusFormError(el);
     }
     restoreFocus(xhr);
+    announceStatus(el);
     if (el && el.nodeType === 1 && el.id !== "flash") flashSwapped(el);
     if (settleQueued) return;
     settleQueued = true;

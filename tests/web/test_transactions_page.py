@@ -371,12 +371,15 @@ class TestListPage:
 
     def test_the_result_count_is_announced_to_screen_readers(self, client, db, card):
         # WCAG 2.2 SC 4.1.3: after a filter, sort or page swap, a status message says how many
-        # transactions match. The live region sits outside #results; transactions.js fills it
-        # from #results' data-status.
+        # transactions match. The live region sits outside #results; app.js fills it from
+        # #results' data-status.
         for i in range(51):
             make_transaction(db, card, name=f"T{i}", date="2026-10-01")
         html = client.get("/transactions").text
-        live = '<p id="txn-results-status" class="sr-only" role="status"></p>'
+        live = (
+            '<p id="txn-results-status" class="sr-only" role="status"'
+            ' data-status-for="results"></p>'
+        )
         assert live in html and html.index(live) < html.index('<div id="results"')
         partial = client.get("/transactions?sort=amount&page=2", headers=HTMX).text
         assert live not in partial

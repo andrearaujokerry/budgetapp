@@ -387,6 +387,17 @@ class TestPeriods:
         assert 'hx-target="#budgets-page"' in response.text
         assert csp_problems(response.text, rendered=True) == []
 
+    def test_another_period_is_announced(self, client, groceries):
+        """Screen readers hear which period the arrows brought up (app.js copies the page's
+        data-status into the live region kept outside #budgets-page)."""
+        page = client.get("/budgets").text
+        live = re.search(r'<p [^>]*data-status-for="budgets-page"[^>]*>', page).group(0)
+        assert 'role="status"' in live
+        assert page.index(live) < page.index('id="budgets-page"')
+        response = client.get("/budgets?period=2026-09-10", headers=HTMX)
+        status = re.search(r' data-status="([^"]*)"', response.text).group(1)
+        assert html.unescape(status) == "Budgets for Sep 2026, ended Sep 30, 2026."
+
     def test_the_current_period_has_no_note(self, client):
         response = client.get("/budgets")
         assert 'id="edit-note"' not in response.text and 'id="period-today"' not in response.text

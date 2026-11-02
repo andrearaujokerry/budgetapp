@@ -11,7 +11,7 @@
 {%- endif -%}
 {%- set subtitle = labels.kind ~ (' · closes ' ~ (ov.period.end|date_short) if ov.period.kind == 'statement' and not ov.is_past else '') ~ ' · ' ~ when -%}
 {% call ui.page_header("Budgets", subtitle) %}
-<nav class="period-nav" aria-label="Budget period">
+<nav class="period-nav" aria-label="Budget period" data-status="Budgets for {{ labels.period }}{{ ' (statement cycle)' if ov.period.kind == 'statement' }}, {{ when }}.">
 {{ ui.button('Previous: ' ~ labels.previous, href='/budgets?period=' ~ ov.previous_period.start.isoformat(), icon='chevron-left', icon_only=true, size='sm', tooltip=labels.previous, id='period-prev', hx_get='/budgets?period=' ~ ov.previous_period.start.isoformat(), hx_target='#budgets-page', hx_push_url='true') }}
 <span class="period-nav__label" id="period-label">{% if ov.period.kind == 'statement' %}<span class="period-nav__kind">Statement</span>{% endif %}{{ labels.period }}</span>
 {{ ui.button('Next: ' ~ labels.next, href='/budgets?period=' ~ ov.next_period.start.isoformat(), icon='chevron-right', icon_only=true, size='sm', tooltip=labels.next, id='period-next', hx_get='/budgets?period=' ~ ov.next_period.start.isoformat(), hx_target='#budgets-page', hx_push_url='true') }}
