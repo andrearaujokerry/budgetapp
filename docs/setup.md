@@ -195,8 +195,9 @@ The same things from Terminal:
 ```
 
 `./run sandbox-link` uses the test user `user_transactions_dynamic` unless you pass `--user`
-(`custom`, `user_transactions_dynamic` or `user_good`); that user's pending charges post after a
-`./run sandbox-refresh`. Sandbox connections are free and never count toward your 10 real ones.
+(`custom`, `user_transactions_dynamic` or `user_good`); that user's pending charges post on the
+first `./run sandbox-refresh` on or after their posting date, so not on the day you link. Sandbox
+connections are free and never count toward your 10 real ones.
 These commands refuse to run in production.
 
 ## Demo data

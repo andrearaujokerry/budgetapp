@@ -900,8 +900,10 @@ that called it.
   churn, `NOT_READY`, mutation-during-pagination, transport errors and item errors.
 - Optional live tests (`./run test --sandbox`) use the real Plaid Sandbox with keys from Keychain:
   a custom Sandbox user with an Amex-like card and known totals, and `user_transactions_dynamic`
-  with `/transactions/refresh` for pending → posted. They produce the Gate A evidence. Tests never
-  drive the Link UI.
+  with `/transactions/refresh` for pending → posted. They produce the Gate A evidence. Plaid posts
+  a pending charge only on a refresh on or after its posting date, which is still ahead for an
+  Item created that day, so the pending → posted test then skips and says why; the fake-Plaid
+  tests cover the carry-over. Tests never drive the Link UI.
 
 ## 13. Toward a mobile app
 
