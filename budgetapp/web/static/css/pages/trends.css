@@ -125,8 +125,7 @@
 }
 
 .trends-grid__sum {
-  border-left: 1px solid var(--border);
-  font-weight: var(--fw-semibold);
+  border-right: 1px solid var(--border);
 }
 
 .trends-zero {

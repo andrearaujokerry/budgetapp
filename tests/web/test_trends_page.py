@@ -114,6 +114,17 @@ def test_an_empty_database(client):
     assert csp_problems(page, rendered=True) == []
 
 
+def test_linked_but_nothing_has_arrived(client, db):
+    from tests.factories import make_item
+
+    make_item(db)
+    page = client.get("/trends").text
+    assert "Your card is linked, but no transactions have arrived yet." in page
+    assert 'href="/import"' not in re.search(
+        r'id="trends-empty".*?</div>\n</div>', page, re.S
+    ).group(0)
+
+
 def test_the_first_month_of_history(client, cat, spend):
     spend(cat("Home"), "40.00", "2026-11-02")
     page = client.get("/trends").text
@@ -160,8 +171,9 @@ class TestAllCategories:
         grid = row(page, f"grid-{cat('Travel').id}")
         cells = re.findall(r'<td class="num[^"]*">(.*?)</td>', grid, re.S)
         # The range starts with the history (Nov 2025): no Travel until Aug 2026.
-        assert [text_of(c) for c in cells[:2]] == ["$0", "$0"]
-        assert text_of(cells[9]) == "$900"
+        assert [text_of(c) for c in cells[:2]] == ["$900", "$100"]  # total; Dec–Aug average
+        assert [text_of(c) for c in cells[2:4]] == ["$0", "$0"]
+        assert text_of(cells[11]) == "$900"
 
     def test_the_grid_lists_every_month(self, client, cat, history):
         page = client.get("/trends").text
@@ -171,10 +183,11 @@ class TestAllCategories:
             headers[0] == "Dec 2025" and headers[-1] == "Nov 2026 (so far)" and len(headers) == 12
         )
         groceries = row(page, f"grid-{cat('Groceries').id}")
-        assert text_of(groceries).startswith("Groceries $100 $100")
-        assert text_of(groceries).endswith("$160 $30 $1,190 $105")  # Oct, Nov, total, average
+        # Total and average first (in view on a phone), then Dec 2025 … Nov 2026.
+        assert text_of(groceries).startswith("Groceries $1,190 $105 $100 $100")
+        assert text_of(groceries).endswith("$160 $30")
         footer = text_of(re.search(r"<tfoot>.*?</tfoot>", grid, re.S).group(0))
-        assert footer.startswith("All spending $100") and footer.endswith("$2,140 $191")
+        assert footer.startswith("All spending $2,140 $191 $100") and footer.endswith("$205 $35")
 
     def test_hidden_categories_are_listed_and_marked(self, client, db, cat, spend):
         hidden = make_category(db, "Side business", is_hidden=True)

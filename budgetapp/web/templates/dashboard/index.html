@@ -6,7 +6,7 @@
 {% block charts %}{% if d.has_transactions %}yes{% endif %}{% endblock %}
 {% block head %}<link rel="stylesheet" href="/static/css/pages/dashboard.css">{% endblock %}
 {% block content %}
-{%- set subtitle = words.heading ~ ' · ' ~ (ov.days_left|pluralize('day')) ~ ' left' if d.has_transactions else 'Where your money goes, once your card is linked.' -%}
+{%- set subtitle = words.heading ~ ' · ' ~ (ov.days_left|pluralize('day')) ~ ' left' if d.has_transactions else 'Spending against your budgets, at a glance.' -%}
 {% call ui.page_header("Dashboard", subtitle) %}
 {%- if d.has_transactions %}
 {{ ui.button('Budgets', href='/budgets', icon='target', size='sm', id='dash-open-budgets') }}

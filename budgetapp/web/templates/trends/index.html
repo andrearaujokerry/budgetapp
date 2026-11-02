@@ -10,10 +10,16 @@
 {{ ui.page_header("Trends", "Spending per category by calendar month, and how it changed.") }}
 {%- if not t.has_data %}
 <div class="card" id="trends-empty">
+{%- if conn and conn.state != 'not_linked' %}
+{% call ui.empty_state('No spending to chart yet', 'Your card is linked, but no transactions have arrived yet. Once they do, this page shows your spending per category for each month, and how each month compares with the one before.', icon='trending') %}
+{{ ui.button('Open Connection', href='/connection', icon='link', variant='primary') }}
+{% endcall %}
+{%- else %}
 {% call ui.empty_state('No spending to chart yet', 'Once transactions arrive from your linked card or an imported CSV file, this page shows your spending per category for each month, and how each month compares with the one before.', icon='trending') %}
 {{ ui.button('Link account', href='/connection', icon='link', variant='primary') }}
 {{ ui.button('Import a CSV file', href='/import', icon='upload') }}
 {% endcall %}
+{%- endif %}
 </div>
 {%- else %}
 {% call form.filter_bar("/trends", target="#trends-results", label="Trends filters", id="trends-filters") %}

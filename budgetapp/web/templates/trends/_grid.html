@@ -1,5 +1,6 @@
 {#- Every month per category (INS-2): one row per category with spending in range (largest
-    total first), one column per month, then the total and the monthly average. A month
+    total first): its total and monthly average (in view on a phone), then one column per
+    month. A month
     before the history shows "—" (no data), a month without charges $0. -#}
 {%- import "components/ui.html" as ui -%}
 {%- import "trends/_macros.html" as tm -%}
@@ -9,31 +10,31 @@
 <table class="table table--compact trends-grid" id="trends-grid">
 <thead><tr>
 <th scope="col" class="trends-grid__name">Category</th>
+<th scope="col" class="num">Total</th>
+<th scope="col" class="num trends-grid__sum">Average</th>
 {%- for m in t.months %}
 <th scope="col" class="num{{ ' trends-grid__current' if m.status == 'current' }}">{{ tm.month_head(m, loop.first, short_month) }}</th>
 {%- endfor %}
-<th scope="col" class="num trends-grid__sum">Total</th>
-<th scope="col" class="num">Average</th>
 </tr></thead>
 <tbody>
 {%- for c in t.categories %}
 <tr id="grid-{{ c.category.id }}">
 <th scope="row" class="trends-grid__name"><a class="trends-link" href="{{ trends_href(c.category.id) }}">{{ ui.category_badge(c.category) }}</a></th>
+<td class="num strong">{{ ui.money(c.total, cents=false) }}</td>
+<td class="num trends-grid__sum">{{ ui.money(c.average, cents=false) }}</td>
 {%- for amount in c.amounts %}
 <td class="num{{ ' trends-grid__current' if t.months[loop.index0].status == 'current' }}">{% if amount is none %}<span class="muted">—</span>{% elif amount == 0 %}<span class="trends-zero">{{ ui.money_text(amount, cents=false) }}</span>{% else %}{{ ui.money(amount, cents=false) }}{% endif %}</td>
 {%- endfor %}
-<td class="num trends-grid__sum">{{ ui.money(c.total, cents=false) }}</td>
-<td class="num">{{ ui.money(c.average, cents=false) }}</td>
 </tr>
 {%- endfor %}
 </tbody>
 <tfoot><tr>
 <th scope="row" class="trends-grid__name">All spending</th>
+<td class="num">{{ ui.money(t.totals.total, cents=false) }}</td>
+<td class="num trends-grid__sum">{{ ui.money(t.totals.average, cents=false) }}</td>
 {%- for amount in t.totals.amounts %}
 <td class="num{{ ' trends-grid__current' if t.months[loop.index0].status == 'current' }}">{% if amount is none %}<span class="muted">—</span>{% else %}{{ ui.money(amount, cents=false) }}{% endif %}</td>
 {%- endfor %}
-<td class="num trends-grid__sum">{{ ui.money(t.totals.total, cents=false) }}</td>
-<td class="num">{{ ui.money(t.totals.average, cents=false) }}</td>
 </tr></tfoot>
 </table>
 </div>
