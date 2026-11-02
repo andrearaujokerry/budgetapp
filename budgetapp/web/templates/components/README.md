@@ -625,7 +625,7 @@ toasts, buttons, filters, pagination and tabs (the statements page prints as a c
 
 | Group | Tokens |
 | --- | --- |
-| Surfaces | `--bg` (page), `--surface` (cards), `--surface-raised` (dialogs, toasts), `--surface-sunken` (wells, table footers), `--surface-hover`, `--sidebar-bg`, `--border`, `--border-strong`, `--control-bg`, `--control-border`, `--control-border-hover`, `--track` (meter track), `--switch-off`, `--skeleton`, `--skeleton-hi` |
+| Surfaces | `--bg` (page), `--surface` (cards), `--surface-raised` (dialogs, toasts), `--surface-sunken` (wells, table footers), `--surface-hover`, `--sidebar-bg`, `--border`, `--border-strong`, `--control-bg`, `--control-border`, `--control-border-hover`, `--track` (meter track), `--switch-off`, `--skeleton`, `--skeleton-hi`; field borders and off switches (`--control-border`, `--switch-off`) reach 3:1 on `--surface`, `--bg` and `--control-bg` in both themes (WCAG 1.4.11) |
 | Text | `--text`, `--text-secondary`, `--text-muted`, `--text-faint` (placeholders); all ≥ 4.5:1 on every surface in both themes |
 | Accent | `--accent` (fills, primary buttons), `--accent-hover`, `--accent-text` (links, selected nav), `--accent-soft` (selected backgrounds), `--accent-contrast` (text on accent), `--focus` (focus outlines and focused control borders), `--focus-ring` (box-shadow, derived from `--focus`), `--danger`, `--danger-hover`, `--danger-contrast` |
 | Status | for each of `ok`, `warn`, `over`, `info`, `sandbox`, `demo`: `--<s>` (fill: bars, dots), `--<s>-text`, `--<s>-soft` (background), `--<s>-border`; plus `--over-deep` (overspend hatch) |

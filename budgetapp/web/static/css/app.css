@@ -20,10 +20,10 @@
   --border: #e3e6eb;
   --border-strong: #cfd5dd;
   --control-bg: #ffffff;
-  --control-border: #c4cbd4;
-  --control-border-hover: #a9b2be;
+  --control-border: #848d99; /* fields and off switches: 3:1 on cards and the page (WCAG 1.4.11) */
+  --control-border-hover: #6f7885;
   --track: #e8ebef;
-  --switch-off: #b3bcc7;
+  --switch-off: #848d99;
   --skeleton: #eceff3;
   --skeleton-hi: #f7f8fa;
   --scroll-fade: 40px;
@@ -184,10 +184,10 @@
     --border: #252c35;
     --border-strong: #343c47;
     --control-bg: #10141a;
-    --control-border: #3a434f;
-    --control-border-hover: #4c5664;
+    --control-border: #636e7d;
+    --control-border-hover: #75808f;
     --track: #262d37;
-    --switch-off: #48525f;
+    --switch-off: #636e7d;
     --skeleton: #1d232b;
     --skeleton-hi: #262d37;
 
@@ -3258,6 +3258,7 @@ a.pill:hover {
   :root {
     --border: #b9c0ca;
     --control-border: #7d8693;
+    --switch-off: #7d8693;
     --text-muted: #424a55;
     --text-faint: #4f5864;
   }
@@ -3267,6 +3268,7 @@ a.pill:hover {
   :root {
     --border: #4a5462;
     --control-border: #6b7686;
+    --switch-off: #6b7686;
     --text-muted: #c0c7d0;
     --text-faint: #b0b8c2;
   }

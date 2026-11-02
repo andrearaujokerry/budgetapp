@@ -134,3 +134,32 @@ def test_keyboard_focus_never_lands_under_a_sticky_bar_or_table_header():
         if ".table-wrap.is-fit" in sel and "tbody" in sel and "scroll-margin-top" in body
     ]
     assert sticky_rows
+
+
+def tokens(block: str) -> dict[str, str]:
+    return dict(re.findall(r"(--[\w-]+):\s*(#[0-9a-fA-F]{6})\s*;", block))
+
+
+def contrast(a: str, b: str) -> float:
+    def luminance(color: str) -> float:
+        channels = [int(color[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+        r, g, b = (c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    high, low = sorted((luminance(a), luminance(b)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_field_borders_and_off_switches_stand_out_in_both_themes():
+    """WCAG 1.4.11: a field's border and an off switch's track reach 3:1 against the card and
+    the page, and the white knob 3:1 against the track, in light and dark."""
+    css = re.sub(r"/\*.*?\*/", "", source("css/app.css"), flags=re.S)
+    light = tokens(re.search(r"^:root \{(.*?)^\}", css, re.M | re.S).group(1))
+    dark_block = r"@media screen and \(prefers-color-scheme: dark\) \{\s*:root \{(.*?)\}"
+    dark = {**light, **tokens(re.search(dark_block, css, re.S).group(1))}
+    for name, theme in (("light", light), ("dark", dark)):
+        for token in ("--control-border", "--switch-off"):
+            for behind in ("--surface", "--bg", "--control-bg"):
+                ratio = contrast(theme[token], theme[behind])
+                assert ratio >= 3.0, f"{name} {token} on {behind}: {ratio:.2f}:1"
+        assert contrast("#ffffff", theme["--switch-off"]) >= 3.0, f"{name} switch knob"
