@@ -403,6 +403,21 @@ def test_only_charges_dated_in_the_last_7_days(db, notifier, item, card, thresho
     assert notifier.titles == ["$900.00 at Week"]
 
 
+def test_a_catch_up_sync_counts_the_7_days_back_from_the_previous_sync(
+    db, notifier, item, card, threshold
+):
+    """Final review reqs-3: after a break of over a week, the charges of the break's first days
+    were never announced."""
+    previous = NOW - 12 * DAY
+    since = local_date(previous) - dt.timedelta(days=7)
+    rows = [
+        charge(db, card, "900.00", day=since, merchant_name="First"),
+        charge(db, card, "900.00", day=since - dt.timedelta(days=1), merchant_name="Before"),
+    ]
+    evaluate(db, notifier, new_charges(item, *rows, previous_success_at=previous))
+    assert notifier.titles == ["$900.00 at First"]
+
+
 @pytest.mark.parametrize(
     "outcome_kwargs",
     [
@@ -635,6 +650,17 @@ def test_the_engine_alerts_a_failure_once_a_day(linked, fake_plaid, notifier):
     assert notifier.titles == ["American Express sync failed"]
 
 
+def test_the_engine_says_how_to_fix_rejected_plaid_keys(linked, fake_plaid, notifier):
+    """Final review ops-4: the notification said only "Plaid reported an error"."""
+    linked.sync()
+    error = fake_plaid.plaid_error("INVALID_API_KEYS", error_type="INVALID_INPUT")
+    fake_plaid.queue_error("transactions_sync", error)
+    assert linked.sync().status == "error"
+    (sent,) = notifier.sent
+    assert "./run setup --keys-only" in sent.message
+    assert sent.message.endswith("Code: INVALID_API_KEYS.")
+
+
 def test_the_engine_alerts_a_large_charge_once_and_not_at_posting(db, linked, fake_plaid, notifier):
     set_app_settings(db, large_charge_threshold=Decimal("1000.00"))
     db.commit()
@@ -648,6 +674,47 @@ def test_the_engine_alerts_a_large_charge_once_and_not_at_posting(db, linked, fa
     fake_plaid.post_pending(linked.fake_item, pending["transaction_id"], amount="1850.00")
     assert linked.sync().added == 1
     assert notifier.titles == ["$1,800.00 at Delta"]
+
+
+@pytest.mark.parametrize("break_kind", ["mac off", "reconnect"])
+def test_the_engine_announces_a_large_charge_from_a_catch_up_sync(
+    db, linked, fake_plaid, notifier, break_kind
+):
+    """Final review reqs-3: the catch-up sync after a break of over a week (the Mac off, or a
+    reconnect fixed late) stored the break's large charges silently."""
+    set_app_settings(db, large_charge_threshold=Decimal("500.00"))
+    db.commit()
+    at(NOW - 12 * DAY)
+    assert linked.sync().initial_history_load
+    assert not linked.sync().initial_history_load
+    if break_kind == "reconnect":
+        at(NOW - 10 * DAY)
+        fake_plaid.set_item_error(linked.fake_item, "ITEM_LOGIN_REQUIRED")
+        assert linked.sync().needs_reconnect
+        fake_plaid.set_item_error(linked.fake_item, None)
+    at(NOW)
+    early = (NOW - 9 * DAY).date()
+    fake_plaid.add_transaction(linked.fake_item, amount="2400.00", date=early, merchant_name="Ikea")
+    recent = (NOW - 3 * DAY).date()
+    fake_plaid.add_transaction(linked.fake_item, amount="700.00", date=recent, merchant_name="Rei")
+    assert linked.sync().status == "success"
+    assert [t for t in notifier.titles if " at " in t] == ["$2,400.00 at Ikea", "$700.00 at Rei"]
+
+
+def test_a_charge_dated_over_a_week_ago_stays_silent_after_a_recent_sync(
+    db, linked, fake_plaid, notifier
+):
+    """The window still keeps a charge Plaid delivers late out of the alerts."""
+    set_app_settings(db, large_charge_threshold=Decimal("500.00"))
+    db.commit()
+    at(NOW - 2 * HOUR)
+    linked.sync()
+    linked.sync()
+    at(NOW)
+    late = (NOW - 9 * DAY).date()
+    fake_plaid.add_transaction(linked.fake_item, amount="2400.00", date=late, merchant_name="Ikea")
+    outcome = linked.sync()
+    assert (outcome.added, notifier.sent) == (1, [])
 
 
 def test_the_engine_alerts_a_budget_crossed_by_a_sync(db, linked, fake_plaid, notifier):

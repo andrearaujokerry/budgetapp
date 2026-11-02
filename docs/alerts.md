@@ -33,6 +33,7 @@ open, after **Sync now** or a change you make. Demo data never sends any.
 | **Consent renewal due** | "Renew your American Express connection" | the yearly Amex consent runs out within your reminder days (30 unless you change it) | once per due date; not while the connection needs reconnecting (reconnecting renews the consent too) |
 | **Large charge** | "$612.40 at Delta" | a new charge over the amount you set, or a pending charge that posts above it | once per charge; more than three in one sync arrive as one summary ("5 new charges over $500.00") |
 | **Keychain approval needed** | "Budget Tracker needs Keychain approval" | macOS asks before the background agents may read the app's Keychain items | once a day |
+| **Keychain item missing** | "Budget Tracker can't sync" | the sync agent can't find the database password or the Plaid keys in Keychain (setup isn't finished, or the login Keychain was reset); the message names the command that saves it: `./run setup` for the password, `./run setup --keys-only` for the keys | once a day |
 | **Backup failed or stale** | "Budget Tracker backup problem" | the nightly backup failed, or the newest backup is over 26 hours old | once a day |
 | **Upgrade needed** | "Budget Tracker needs an upgrade" | the sync agent finds the database needs an upgrade (for example after restoring an older backup); syncing waits until you run `./run live` | once a day |
 
@@ -52,11 +53,13 @@ Details:
   budget amount, new percentages or another budget period count from the next sync, within about
   six hours.
 - **Large charges** are checked for new charges from a sync that are strictly over your amount,
-  dated within the last 7 days, and not while Plaid sends your history right after linking. Each
-  charge is announced once: a pending charge that posts isn't announced a second time. A pending
-  charge at or under your amount that goes above it (a tip or hotel incidentals added when it
-  posts, or Plaid raising the pending amount) is announced once, when it goes above. CSV imports
-  never raise one.
+  dated at most 7 days before the previous successful sync (so the first sync after a break,
+  such as a trip with the Mac off or a reconnect fixed late, still announces the break's
+  charges), and not while Plaid sends your history right after linking. Each charge is announced
+  once: a pending charge that posts isn't announced a second time. A pending charge at or under
+  your amount that goes above it (a tip or hotel incidentals added when it posts, or Plaid
+  raising the pending amount) is announced once, when it goes above. CSV imports never raise
+  one.
 - **Keychain approval needed** asks you to run `./run doctor --env production` in Terminal and
   click **Always Allow** for each item (usually after a `brew upgrade` of Python). The sync and
   backup agents simply try again later.

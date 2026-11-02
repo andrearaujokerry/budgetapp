@@ -8,7 +8,9 @@
   needs the user's approval the command notifies once a day (a marker file: the database password
   may be the item that failed) and exits 75. A database that isn't up yet ends the run quietly
   (exit 75, no alert): the next scheduled run tries again. A production database that needs an
-  upgrade is announced once a day, also with exit 75.
+  upgrade is announced once a day, also with exit 75. A Keychain item that is missing (the
+  database password or a Plaid key) is announced once a day with the command that saves it
+  (exit 1): no sync runs, so no other alert could tell.
 * Exit status: 0 when every Item synced (or was skipped or not due), 1 when a sync failed (the
   failure is recorded on the Item and shown on the Connection page), 2 for a usage error, 75 for
   "try again later".
@@ -50,6 +52,7 @@ EXIT_LATER = 75
 
 KEYCHAIN_MARKER = "sync-keychain-approval"
 SCHEMA_MARKER = "sync-schema-upgrade"
+MISSING_SECRET_MARKER = "sync-missing-secret"
 
 
 def register(subparsers: Any) -> None:
@@ -223,9 +226,23 @@ def schema_mismatch(rt: Runtime, exc: db.SchemaMismatch, unattended: bool) -> in
     return EXIT_FAILED
 
 
-def missing_plaid_keys(rt: Runtime, exc: secrets.MissingSecretError) -> int:
+def missing_secret(rt: Runtime, exc: secrets.MissingSecretError, unattended: bool) -> int:
+    """A Keychain item is missing: say which command saves it (the database password and the
+    Plaid keys have different ones); notify once a day when unattended."""
+    fix = secrets.missing_secret_fix(exc.account)
     log.warning("Sync stopped: %s", exc)
-    rt.out("The Plaid keys aren't saved yet. Save them with: ./run setup --keys-only")
+    if unattended:
+        try:
+            first_today = secrets.claim_daily_marker(rt.settings.state_dir, MISSING_SECRET_MARKER)
+        except OSError:
+            first_today = True
+        if first_today:
+            rt.notifier.notify(
+                "Budget Tracker can't sync",
+                f"{fix.problem} {fix.action} in Terminal with {fix.command}.",
+            )
+    else:
+        rt.out(f"{fix.problem} {fix.action} with: {fix.command}")
     return EXIT_FAILED
 
 
@@ -271,7 +288,7 @@ def sync_command(args: argparse.Namespace, rt: Runtime) -> int:
     except db.SchemaMismatch as exc:
         return schema_mismatch(rt, exc, unattended)
     except secrets.MissingSecretError as exc:
-        return missing_plaid_keys(rt, exc)
+        return missing_secret(rt, exc, unattended)
     except Exception:
         # sync_item already recorded it (INTERNAL on the Item, the run, the alert hook).
         log.exception("The sync failed")

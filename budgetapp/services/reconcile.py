@@ -22,8 +22,10 @@ one, so every charge is stored once, and attaches a manual (CSV-only) account to
   - One global one-to-one assignment (:func:`match`), best first by date distance (CSV date vs
     ``COALESCE(authorized_date, date)``), then description similarity (CSV ``Appears On Your
     Statement As``/``Description`` vs Plaid ``original_description``/``name``/``merchant_name``),
-    then a pair on the same account before one across accounts. Two identical charges therefore
-    pair with two different rows.
+    then a pair on the same account before one across accounts; then augmenting paths, so every
+    row that can pair does (two identical charges posted on different days: best first alone can
+    give the row posted later the earlier Plaid row, which is the only one the other row fits).
+    Two identical charges therefore pair with two different rows.
   - A pair moves the CSV row's user state onto the Plaid row (the Plaid row's own category and
     splits win; notes and tags merge), copies ``csv_reference`` and ``csv_import_id`` onto it, and
     deletes the CSV row — in THIS order, because ``transactions.csv_reference`` is unique and not
@@ -253,7 +255,9 @@ def match(
     A candidate pair has equal amounts and a CSV row the Plaid row accepts
     (:meth:`PlaidSide.accepts`). Pairs are taken in order of date distance, then description
     similarity (higher first), then same account first; ties fall back to the dates and keys, so
-    the result is deterministic.
+    the result is deterministic. When that leaves a row unpaired that could still pair,
+    :func:`_augment` moves paired rows to other rows they fit, so every row that can pair does
+    (two identical charges posted on different days, say).
     """
     by_amount: dict[Decimal, list[PlaidSide]] = defaultdict(list)
     for plaid in plaid_rows:
@@ -294,7 +298,60 @@ def match(
         used_csv.add(row.key)
         used_plaid.add(plaid.id)
         pairs.append((row, plaid))
-    return pairs
+    options: dict[tuple[int, int], list[PlaidSide]] = defaultdict(list)
+    rows: dict[tuple[int, int], CsvSide] = {}
+    for _, row, plaid in candidates:
+        options[row.key].append(plaid)
+        rows.setdefault(row.key, row)
+    plaid_by_id = {plaid.id: plaid for _, _, plaid in candidates}
+    if len(used_csv) == len(rows) or len(used_plaid) == len(plaid_by_id):
+        return pairs  # nothing left that could pair: the usual case
+    owner = {plaid.id: row for row, plaid in pairs}
+    for key, row in rows.items():
+        if key not in used_csv:
+            _augment(row, options, owner)  # a row that can't pair now never will (Kuhn)
+    return sorted(
+        ((row, plaid_by_id[plaid_id]) for plaid_id, row in owner.items()),
+        key=lambda pair: (pair[0].key, pair[1].id),
+    )
+
+
+def _augment(
+    start: CsvSide,
+    options: dict[tuple[int, int], list[PlaidSide]],
+    owner: dict[int, CsvSide],
+) -> bool:
+    """Pair ``start``, an unpaired CSV row, by moving paired rows along (an augmenting path).
+
+    ``options`` lists each CSV row's acceptable Plaid rows, best first; ``owner`` maps a paired
+    Plaid row's id to its CSV row and is updated in place. Look for a chain: ``start`` takes a
+    Plaid row, whose CSV row takes another of its options, … until one is free. Depth first,
+    without recursion (a chain can be as long as a run of identical charges). Returns whether
+    ``start`` was paired.
+    """
+    seen: set[int] = set()
+    path: list[PlaidSide] = []  # path[i]: the Plaid row frames[i]'s CSV row is trying
+    frames = [(start, iter(options[start.key]))]
+    while frames:
+        row, remaining = frames[-1]
+        for plaid in remaining:
+            if plaid.id in seen:
+                continue
+            seen.add(plaid.id)
+            holder = owner.get(plaid.id)
+            if holder is None:  # free: every row on the path moves to the row it is trying
+                owner[plaid.id] = row
+                for (mover, _), taken in zip(frames, path, strict=False):
+                    owner[taken.id] = mover
+                return True
+            path.append(plaid)
+            frames.append((holder, iter(options[holder.key])))
+            break
+        else:
+            frames.pop()
+            if path:
+                path.pop()
+    return False
 
 
 # --------------------------------------------------------------------------- loading candidates

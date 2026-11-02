@@ -24,10 +24,10 @@ without a duplicate. :func:`clear_alert` deletes an event so it can fire again.
   - ALR-1: :func:`evaluate_budgets` after every successful run (so budget and setting edits are
     picked up by the next sync too).
   - ALR-3, when ``large_charge_threshold`` is set: Plaid rows in
-    ``outcome.inserted_transaction_ids`` (new charges only) for more than the threshold, dated in
-    the last 7 days, never on an initial history load; once per charge
-    (``large-charge:<pending id the row names, else its own Plaid id>``), so a posting never alerts
-    again. A pending charge at or under the threshold that this sync stored above it
+    ``outcome.inserted_transaction_ids`` (new charges only) for more than the threshold, dated at
+    most 7 days before the previous successful sync, never on an initial history load; once per
+    charge (``large-charge:<pending id the row names, else its own Plaid id>``), so a posting never
+    alerts again. A pending charge at or under the threshold that this sync stored above it
     (``outcome.pending_raises``: a tip or hotel incidentals added at posting) alerts once under
     the pending row's key. More than :data:`MAX_CHARGE_NOTIFICATIONS` new ones in a run are
     recorded silently and announced by one summary (``large-charges:<item>:<sync run>``).
@@ -85,7 +85,8 @@ KIND_STALE = "stale"
 KIND_CONSENT = "consent"
 KIND_LARGE_CHARGE = "large_charge"
 
-#: ALR-3 looks at charges dated this many days back (ARCHITECTURE §11).
+#: ALR-3 looks at charges dated at most this many days before the previous successful sync
+#: (before today on a first sync), so a catch-up after a break still announces them (§11).
 LARGE_CHARGE_DAYS = 7
 #: More new large charges than this in one sync are announced by a single summary notification.
 MAX_CHARGE_NOTIFICATIONS = 3
@@ -494,8 +495,9 @@ def _large_charges(
 
     New charges (``outcome.inserted_transaction_ids``), plus pending charges the app had at or
     under the threshold that this sync stored above it (``outcome.pending_raises``: a tip or
-    hotel incidentals added at posting). Both are keyed by the pending row's Plaid id when there
-    is one, so a charge that already alerted while pending stays silent when it posts.
+    hotel incidentals added at posting), dated at most :data:`LARGE_CHARGE_DAYS` days before the
+    previous successful sync. Both are keyed by the pending row's Plaid id when there is one, so
+    a charge that already alerted while pending stays silent when it posts.
     """
     threshold = settings.large_charge_threshold
     if threshold is None or outcome.initial_history_load:
@@ -504,7 +506,10 @@ def _large_charges(
     ids = [*outcome.inserted_transaction_ids, *raised]
     if not ids:
         return []
-    since = today - dt.timedelta(days=LARGE_CHARGE_DAYS)
+    base = today  # a catch-up sync after a break also looks at the break's charges
+    if outcome.previous_success_at is not None:
+        base = min(today, outcome.previous_success_at.astimezone().date())
+    since = base - dt.timedelta(days=LARGE_CHARGE_DAYS)
     rows = list(
         session.scalars(
             select(Transaction)

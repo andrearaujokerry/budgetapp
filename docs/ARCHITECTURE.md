@@ -130,6 +130,11 @@ Rules:
   a page with the same instruction. Run interactively, `doctor` reads every item of both
   environments so the user can click *Always Allow* (needed after each `brew upgrade` of
   Python).
+- A missing item (`MissingSecretError`) names the command that saves it
+  (`secrets.missing_secret_fix`): `./run setup --keys-only` for the Plaid keys, `./run setup` for
+  a database password (it creates the roles and their passwords), `./run doctor` otherwise. The
+  web app shows it on a "Setup isn't finished" page; the sync agent notifies once a day (marker
+  file: no sync runs, so no other alert can) and exits 1.
 - The production access token is written once and read back to verify; it is never
   rewritten. If the Keychain write fails after a successful exchange, the token goes to a
   0600 recovery file under `state/` and the app stops with instructions. `./run setup --env
@@ -513,8 +518,12 @@ applies.
    nothing: same account, amount within `max($1, 20%)`, `COALESCE(authorized_date, date)` within
    7 days, similar description; best score first; posted candidates preferred for a pending
    source. The match inherits the state and the tombstone records `consumed_by_transaction_id`.
-   Then unconsumed tombstones without user state are matched to the rows still unmatched by the
-   same rules, only to record `consumed_by_transaction_id`: the row is the same charge (a posting
+   A pending row with user state that this batch removed and no inserted row took is then
+   matched the same way to posted rows stored by an earlier sync in the last 30 days that name no
+   pending row, have no user state and replace nothing (Plaid can list a posting that doesn't
+   name its pending row one sync before it removes the pending row). Then unconsumed tombstones
+   without user state are matched to the rows inserted in this batch still unmatched by the same
+   rules, only to record `consumed_by_transaction_id`: the row is the same charge (a posting
    Plaid didn't link, a re-delivery after account churn), not a new one (section 11, ALR-3).
 6. **Reconciliation** with CSV rows (below), then the cursor update.
 
@@ -528,7 +537,9 @@ rows or completed Plaid's history, after every CSV import and after attaching a 
   with a Plaid row posted on that date or up to 3 days before it (never with a later charge of
   the same amount).
 - One global one-to-one assignment, best first by date distance, then description similarity
-  (CSV `Appears On Your Statement As`/`Description` vs Plaid `original_description`/`name`).
+  (CSV `Appears On Your Statement As`/`Description` vs Plaid `original_description`/`name`),
+  then augmenting paths so every row that can pair does (two identical charges posted on
+  different days both pair, whatever their order).
 - A pair moves the CSV row's user state onto the Plaid row (unless the Plaid row has its own),
   copies `csv_reference` and `csv_import_id` onto it, and deletes the CSV row. The globally
   unique `csv_reference` then makes every re-import of that row a duplicate. Order matters
@@ -834,17 +845,19 @@ that called it.
 - **Sync problems (ALR-2):** failures (Plaid or internal) once per Item, error code and day;
   reconnect needed once per occurrence (`reconnect:<item>:open` until a sync sees the Item
   healthy, then renamed, so the next occurrence alerts); stale data after 36 h once a day (folded
-  into a failure or reconnect alert sent in the same run); Keychain approval needed (marker file).
+  into a failure or reconnect alert sent in the same run); Keychain approval needed and a
+  Keychain item missing (marker files).
 - **Consent (SYNC-6):** renewal due within `consent_reminder_days`, once per due date; not while
   the Item needs reconnecting (update mode renews the consent too).
 - **Large charges (ALR-3):** only Plaid rows inserted by a sync for more than
-  `large_charge_threshold`, dated within the last 7 days, after the initial history load; once
-  per charge and not again when it posts. The sync outcome lists only new charges: a row that
-  replaces one the app already had (a posting, linked or matched, or a re-delivery after account
-  churn) is left out. A charge that first goes over the amount when it posts (a pending charge
-  at or under it, posted higher with a tip or hotel incidentals, or raised in place by Plaid;
-  the sync outcome's `pending_raises`) alerts once, under the pending row's key. More than 3
-  new ones in a run send one summary notification.
+  `large_charge_threshold`, dated at most 7 days before the previous successful sync (so a
+  catch-up sync after a break of over a week still announces the break's charges), after the
+  initial history load; once per charge and not again when it posts. The sync outcome lists only
+  new charges: a row that replaces one the app already had (a posting, linked or matched, or a
+  re-delivery after account churn) is left out. A charge that first goes over the amount when it
+  posts (a pending charge at or under it, posted higher with a tip or hotel incidentals, or
+  raised in place by Plaid; the sync outcome's `pending_raises`) alerts once, under the pending
+  row's key. More than 3 new ones in a run send one summary notification.
 - **Backups:** failed or stale, once a day.
 
 ## 12. Testing (MNT-2)

@@ -4,6 +4,7 @@ attaching a manual account. Every value is synthetic."""
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from decimal import Decimal
 
 import pytest
@@ -207,6 +208,52 @@ class TestMatcher:
         assert sorted(pairs_of(match(csv, plaid))) == sorted(
             pairs_of(match(list(reversed(csv)), list(reversed(plaid))))
         )
+
+    @pytest.mark.parametrize("authorized", ["2026-09-30", None])
+    @pytest.mark.parametrize("later_first", [True, False])
+    def test_twins_posted_on_different_days_both_pair(self, authorized, later_first):
+        """Final review money-1: two identical charges on 09-30, posted 10-02 and 10-01. Taken
+        best first alone, the row posted 10-02 could take Plaid's 10-01 row (a tie broken by
+        the row order) and leave the other one, which fits only that row, unpaired."""
+        late = csv_side(1 if later_first else 2, "2026-09-30", "12.50", "CAFE", posted="2026-10-02")
+        early = csv_side(
+            2 if later_first else 1, "2026-09-30", "12.50", "CAFE", posted="2026-10-01"
+        )
+        plaid = [
+            plaid_side(11, "2026-10-02", "12.50", "Cafe", authorized=authorized),
+            plaid_side(12, "2026-10-01", "12.50", "Cafe", authorized=authorized),
+        ]
+        assert sorted(pairs_of(match([late, early], plaid))) == sorted(
+            [(late.key[1], 11), (early.key[1], 12)]
+        )
+
+    def test_rows_pair_when_plaids_date_is_the_charge_date(self):
+        # Putting the Reference's posting date first would give CSV 1 Plaid 22 (same day) and
+        # strand CSV 2; the closest charge date first pairs both.
+        csv = [
+            csv_side(1, "2026-10-01", "9.00", "CAFE", posted="2026-10-03"),
+            csv_side(2, "2026-10-03", "9.00", "CAFE", posted="2026-10-05"),
+        ]
+        plaid = [
+            plaid_side(21, "2026-10-01", "9.00", "Cafe", authorized="2026-10-01"),
+            plaid_side(22, "2026-10-03", "9.00", "Cafe", authorized="2026-10-03"),
+        ]
+        assert sorted(pairs_of(match(csv, plaid))) == [(1, 21), (2, 22)]
+
+    def test_a_long_chain_of_identical_charges_pairs_every_row(self):
+        # CSV i (i ≥ 1) fits Plaid i − 1 best and Plaid i too; CSV 0 fits only Plaid 0. Best
+        # first gives Plaid 0 to CSV 1, Plaid 1 to CSV 2, …; pairing CSV 0 then moves every one
+        # of them: a path longer than Python's recursion limit.
+        count = sys.getrecursionlimit() + 200
+        start = dt.date(2000, 1, 1)
+
+        def day(n: int) -> str:
+            return (start + dt.timedelta(days=n)).isoformat()
+
+        plaid = [plaid_side(k, day(4 * k + 4), "7.00", authorized=day(4 * k)) for k in range(count)]
+        csv = [csv_side(0, day(-3), "7.00")]
+        csv += [csv_side(i, day(4 * i - 3), "7.00") for i in range(1, count)]
+        assert sorted(pairs_of(match(csv, plaid))) == [(i, i) for i in range(count)]
 
     def test_description_similarity(self):
         assert reconcile.description_similarity(["WHOLEFDS MKT 10255"], ["Whole Foods"]) > 0.2

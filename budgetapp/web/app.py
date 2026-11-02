@@ -195,19 +195,8 @@ def _keychain_approval(request: Request, exc: KeychainApprovalNeeded) -> Respons
 
 def _missing_secret(request: Request, exc: MissingSecretError) -> Response:
     log.warning("Keychain has no value for %r.", exc.account)
-    account = exc.account
-    if account == secrets.PLAID_CLIENT_ID or account.startswith("plaid.secret."):
-        message = (
-            "Your Plaid keys aren't saved yet, so the app can't reach Plaid. Save them in "
-            "Terminal (typing is hidden), then reload:"
-        )
-        command = "./run setup --keys-only"
-    elif account.startswith("db.password."):
-        message = "The database password isn't in your Keychain. Run setup in Terminal:"
-        command = "./run setup"
-    else:
-        message = "A key the app needs is missing from your Keychain. Check with:"
-        command = "./run doctor"
+    problem, action, command = secrets.missing_secret_fix(exc.account)
+    message = f"{problem} {action} in Terminal, then reload:"
     return error_page(
         request, 503, "Setup isn't finished", message, command=command, icon="lock", refresh=True
     )

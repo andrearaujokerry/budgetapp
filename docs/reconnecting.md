@@ -85,6 +85,7 @@ Other codes:
 | --- | --- | --- |
 | `INTERNAL` | "Something went wrong in the app during the sync. The details are in the sync log." | The next sync tries again. If it keeps happening, read `sync-production.log` (or `web-production.log` after **Sync now**) in `~/Library/Logs/budgetapp` |
 | `TRIAL_CONNECTION_LIMIT` | "Your Plaid Trial plan has used all 10 connections; Plaid refuses new ones." | Keep repairing the connection you have in place; a new link isn't possible |
+| `INVALID_API_KEYS` | "Plaid didn't accept the app's Plaid keys." | Run `./run setup --keys-only` and type the client ID and the secret again, both from the same Plaid team (Developers → Keys in Plaid's Dashboard; after you rotated the secret, the new one), then click **Sync now** |
 | `INVALID_ACCESS_TOKEN`, `ITEM_NOT_FOUND`, `ACCESS_TOKEN_MISSING`, `KEYCHAIN_APPROVAL_NEEDED` | a problem with the connection or its token | See [the next section](#when-the-connection-or-its-token-is-missing) |
 | anything else | Plaid's explanation is shown | The next sync tries again; if the same code keeps coming back, run `./run doctor --env production` |
 

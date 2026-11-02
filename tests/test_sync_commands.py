@@ -267,6 +267,92 @@ def test_missing_plaid_keys_are_explained(
     assert fake_plaid.calls == []
 
 
+class MissingSecret(Runtime):
+    """Keychain has no value for ``self.account``: the database password (read first, when the
+    engine is built) or a Plaid key (read when the gateway is built)."""
+
+    account = app_secrets.PLAID_CLIENT_ID
+
+    def ensure_database(self) -> None:
+        if self.account.startswith("db.password."):
+            raise app_secrets.MissingSecretError(
+                self.account, "Run ./run setup to create the database roles."
+            )
+        super().ensure_database()
+
+    @property
+    def gateway(self):
+        raise app_secrets.MissingSecretError(self.account)
+
+
+def test_a_missing_database_password_says_to_run_setup(
+    session_factory, secrets, notifier, settings, out
+):
+    """Final review ops-3: it said to save the Plaid keys, which can't create the password."""
+    rt = MissingSecret(
+        settings, session_factory=session_factory, store=secrets, notifier=notifier, out=out
+    )
+    rt.account = app_secrets.db_password_key("budgetapp_dev")
+    assert sync_cmd.sync_command(args(), rt) == 1
+    assert out == ["The database password isn't in your Keychain. Create it with: ./run setup"]
+
+
+def test_each_missing_secret_names_the_command_that_saves_it():
+    """One answer for ./run sync, the Sandbox helpers and the web app's "Setup isn't finished"."""
+    commands = {
+        account: app_secrets.missing_secret_fix(account).command
+        for account in (
+            app_secrets.PLAID_CLIENT_ID,
+            app_secrets.plaid_secret_key("sandbox"),
+            app_secrets.db_password_key("budgetapp_dev"),
+            app_secrets.PRODUCTION_ACCESS_TOKEN,
+        )
+    }
+    assert list(commands.values()) == [
+        "./run setup --keys-only",
+        "./run setup --keys-only",
+        "./run setup",
+        "./run doctor",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("account", "command"),
+    [
+        (app_secrets.db_password_key("budgetapp_live"), "./run setup"),
+        (app_secrets.PLAID_CLIENT_ID, "./run setup --keys-only"),
+        (app_secrets.plaid_secret_key("production"), "./run setup --keys-only"),
+    ],
+)
+def test_an_unattended_sync_with_a_missing_secret_notifies_once_a_day(
+    db,
+    session_factory,
+    fake_plaid,
+    secrets,
+    notifier,
+    state_settings,
+    out,
+    unattended_calls,
+    freeze_today,
+    account,
+    command,
+):
+    """Final review ops-3: launchd runs exited 1 and told nobody; no sync run was recorded, so
+    not even the stale-data alert went out."""
+    link(db, fake_plaid, secrets, state_settings)
+    deps = {"session_factory": session_factory, "store": secrets, "notifier": notifier}
+    rt = MissingSecret(state_settings, out=out, **deps)
+    rt.account = account
+    for _ in range(2):
+        assert sync_cmd.sync_command(args(unattended=True), rt) == 1
+    assert notifier.titles == ["Budget Tracker can't sync"]
+    assert notifier.sent[0].message.endswith(f" in Terminal with {command}.")
+    assert out == []  # launchd: the notification is the message
+    freeze_today(now=NOW + dt.timedelta(days=1))
+    assert sync_cmd.sync_command(args(unattended=True), rt) == 1
+    assert len(notifier.sent) == 2
+
+
 def test_the_cli_runs_the_sync_command(
     db, monkeypatch, make_rt, fake_plaid, secrets, settings, capsys
 ):

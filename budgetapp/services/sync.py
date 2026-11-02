@@ -44,7 +44,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from budgetapp import clock, db, secrets
 from budgetapp.config import Settings
@@ -222,6 +222,11 @@ def describe_error(error_code: str | None, error_type: str | None = None) -> str
         )
     if error_code == "INVALID_ACCESS_TOKEN":
         return "Plaid didn't accept the saved access token. Run ./run doctor to check the keys."
+    if error_code == "INVALID_API_KEYS":
+        return (
+            "Plaid didn't accept the app's Plaid keys. Enter the client ID and the secret (from "
+            "the same Plaid team) again with ./run setup --keys-only, then click Sync now."
+        )
     if error_code == "TRIAL_CONNECTION_LIMIT":
         return "Your Plaid Trial plan has used all 10 connections; Plaid refuses new ones."
     if error_code == TRANSPORT_ERROR:
@@ -436,6 +441,8 @@ class _Applied:
     new_charge_ids: tuple[int, ...]
     #: pending charges stored for a higher amount (posted with a tip, or changed in place)
     pending_raises: tuple[PendingRaise, ...]
+    #: the Item's ``last_sync_success_at`` before this batch
+    previous_success_at: dt.datetime | None
     update_status: str | None
     history_completed_now: bool
 
@@ -766,9 +773,12 @@ class _Applier:
         this batch inserted that replace nothing yet, matched one-to-one. Tombstones with edits go
         first and hand their edits over; then those without edits are matched only to record the
         replacement (``consumed_by_transaction_id``) — so the row is known as the same charge.
+        A pending row with edits that this batch removed and no row of it replaces is also
+        offered the postings stored earlier (:meth:`stored_postings`): Plaid can list a posting
+        that doesn't name its pending row one sync before it removes the pending row.
         Returns how many rows inherited edits."""
         candidates = [t for t in self.inserted if id(t) not in self.continued]
-        if not candidates:
+        if not candidates and not self.deleted:
             return 0
         edited: list[TransactionTombstone] = []
         plain: list[TransactionTombstone] = []
@@ -788,6 +798,18 @@ class _Applier:
             self.continued.add(id(txn))
             self._note_raise(txn, tomb.plaid_transaction_id, tomb.pending, tomb.amount)
             carried += 1
+        late = [
+            t
+            for t in edited
+            if t.pending
+            and t.consumed_by_transaction_id is None
+            and t.plaid_transaction_id in self.deleted
+        ]
+        for tomb, txn in match_replacements(late, self.stored_postings(late)) if late else ():
+            # no _note_raise: the posting was a new charge (ALR-3) when its own sync stored it
+            apply_carried_state(self.categorizer, txn, userstate.from_json(tomb.user_state))
+            tomb.consumed_by_transaction_id = txn.id
+            carried += 1
         rest = [t for t in candidates if id(t) not in self.continued]
         for tomb, txn in match_replacements(plain, rest) if rest else ():
             tomb.consumed_by_transaction_id = txn.id
@@ -795,6 +817,33 @@ class _Applier:
             self._note_raise(txn, tomb.plaid_transaction_id, tomb.pending, tomb.amount)
         self.s.flush()
         return carried
+
+    def stored_postings(self, tombs: Sequence[TransactionTombstone]) -> list[Transaction]:
+        """Posted Plaid rows an earlier sync stored in the last 30 days that could still be the
+        posting of one of ``tombs`` (pending rows removed now): on their accounts, spend dates
+        within 7 days, naming no pending row, no edits of their own and replacing nothing."""
+        days = [t.authorized_date or t.date for t in tombs]
+        reach = dt.timedelta(days=REPLACEMENT_MAX_DAYS)
+        replaced = select(TransactionTombstone.plaid_transaction_id).where(
+            TransactionTombstone.consumed_by_transaction_id == Transaction.id
+        )
+        rows = self.s.scalars(
+            select(Transaction)
+            .where(
+                Transaction.source == "plaid",
+                Transaction.account_id.in_({t.account_id for t in tombs}),
+                Transaction.pending.is_(False),
+                Transaction.pending_transaction_id.is_(None),
+                Transaction.created_at >= self.now - REPLACEMENT_WINDOW,
+                func.coalesce(Transaction.authorized_date, Transaction.date).between(
+                    min(days) - reach, max(days) + reach
+                ),
+                ~replaced.exists(),
+            )
+            .options(selectinload(Transaction.splits))
+        )
+        inserted = {id(t) for t in self.inserted}
+        return [t for t in rows if id(t) not in inserted and userstate.capture(t) is None]
 
     # ---------------------------------------------------------------- history (CSV cutover)
 
@@ -1270,6 +1319,7 @@ def _apply_batch(
         item.error_message = None
         item.error_display_message = None
         item.transactions_update_status = batch.update_status
+        previous_success_at = item.last_sync_success_at
         item.last_sync_success_at = now
         s.flush()
         moved = s.execute(
@@ -1289,6 +1339,7 @@ def _apply_batch(
             removed=applier.removed,
             new_charge_ids=tuple(t.id for t in applier.inserted if id(t) not in applier.continued),
             pending_raises=tuple(PendingRaise(t.id, pid, old) for t, pid, old in applier.raises),
+            previous_success_at=previous_success_at,
             update_status=batch.update_status,
             history_completed_now=completed_now,
         )
@@ -1461,6 +1512,7 @@ def _sync_locked(
         removed=applied.removed if applied else 0,
         inserted_transaction_ids=applied.new_charge_ids if applied else (),
         pending_raises=applied.pending_raises if applied else (),
+        previous_success_at=applied.previous_success_at if applied else None,
         initial_history_load=not history_was_complete,
         history_completed_now=applied.history_completed_now if applied else False,
         update_status=update_status,
