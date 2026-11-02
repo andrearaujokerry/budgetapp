@@ -526,7 +526,9 @@ rows or completed Plaid's history, after every CSV import and after attaching a 
   with a Plaid row posted on that date or up to 3 days before it (never with a later charge of
   the same amount).
 - One global one-to-one assignment, best first by date distance, then description similarity
-  (CSV `Appears On Your Statement As`/`Description` vs Plaid `original_description`/`name`).
+  (CSV `Appears On Your Statement As`/`Description` vs Plaid `original_description`/`name`),
+  then augmenting paths so every row that can pair does (two identical charges posted on
+  different days both pair, whatever their order).
 - A pair moves the CSV row's user state onto the Plaid row (unless the Plaid row has its own),
   copies `csv_reference` and `csv_import_id` onto it, and deletes the CSV row. The globally
   unique `csv_reference` then makes every re-import of that row a duplicate. Order matters

@@ -920,6 +920,26 @@ class TestLinkedAccounts:
         assert first.csv_reference == ref_of(data, "9/30/2025")
         assert counted_total(db, account) == Decimal("26.25")  # five coffees, 09-27 to 10-01
 
+    @pytest.mark.parametrize("later_first", [True, False])
+    def test_identical_charges_posted_on_different_days_both_match(self, db, later_first):
+        """Final review money-1: with the row posted later first in the file, one twin was
+        held as matching no Plaid charge (and "Keep" would have counted it twice)."""
+        item = make_item(db, history_complete_at=clock.now())
+        account = make_account(db, item)
+        make_transaction(db, account, amount="3.00", date="2025-09-01")
+        for posted in ("2025-10-02", "2025-10-01"):
+            make_transaction(
+                db, account, amount="12.50", date=posted, authorized_date="2025-09-30", name="Cafe"
+            )
+        late = amex_row("2025-09-30", "CAFE", "12.50", lag=2)
+        early = amex_row("2025-09-30", "CAFE", "12.50", lag=1)
+        data = amex_csv(*((late, early) if later_first else (early, late)))
+        preview, outcome = run_import(db, data, account)
+        assert (preview.new, preview.matched, preview.suspects) == (0, 2, 0)
+        assert outcome.matched_plaid_count == 2
+        assert csv_rows(db) == []
+        assert counted_total(db, account) == Decimal("28.00")
+
     def test_a_row_whose_charge_is_pending_in_plaid_is_held_and_says_so(self, db):
         """Review finding: such a row was described as matching no Plaid charge, so "Keep"
         counted the charge twice until it posted."""

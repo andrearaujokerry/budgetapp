@@ -1292,6 +1292,43 @@ def test_the_sync_that_completes_the_history_holds_the_unpaired_csv_rows(linked,
     assert [(s.id, s.pending) for s in csv_import.list_suspects(db)] == [(ids["missing"], False)]
 
 
+@pytest.mark.parametrize("later_first", [True, False])
+@pytest.mark.parametrize(
+    ("status", "first_day", "september"),
+    [
+        ("HISTORICAL_UPDATE_COMPLETE", "2026-09-01", "28.00"),  # the twins inside the history
+        ("HISTORICAL_UPDATE_COMPLETE", "2026-10-01", "25.00"),  # at the history's first day
+        ("INITIAL_UPDATE_COMPLETE", "2026-09-01", "28.00"),  # before the history completes
+    ],
+)
+def test_identical_csv_charges_posted_on_different_days_both_pair(
+    linked, fake_plaid, db, later_first, status, first_day, september
+):
+    """Final review money-1: one of two identical charges stayed unpaired (held for review, or
+    counted twice) when the one posted later came first."""
+    account = make_account_for(linked)
+    late = {"amount": "12.50", "date": "2026-09-30", "posted": "2026-10-02", "name": "CAFE"}
+    early = {"amount": "12.50", "date": "2026-09-30", "posted": "2026-10-01", "name": "CAFE"}
+    for n, values in enumerate((late, early) if later_first else (early, late), start=1):
+        csv_row(db, account, n, **values)
+    fake_plaid.add_transaction(
+        linked.fake_item, amount="3.00", date=first_day, authorized_date=first_day
+    )
+    for posted in ("2026-10-02", "2026-10-01"):
+        fake_plaid.add_transaction(
+            linked.fake_item,
+            amount="12.50",
+            date=posted,
+            authorized_date="2026-09-30",
+            name="CAFE",
+            merchant_name="Cafe",
+        )
+    fake_plaid.set_update_status(linked.fake_item, status)
+    linked.sync()
+    assert [t.source for t in linked.rows()] == ["plaid"] * 3
+    assert spending.period_spending(db, periods.month_period(2026, 9)).total == Decimal(september)
+
+
 def test_completing_the_history_without_new_rows_still_holds_them(linked, fake_plaid, db):
     account = make_account_for(linked)
     fake_plaid.set_update_status(linked.fake_item, "INITIAL_UPDATE_COMPLETE")
