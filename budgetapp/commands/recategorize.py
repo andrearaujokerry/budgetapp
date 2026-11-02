@@ -27,7 +27,8 @@ from budgetapp.db import (
     transaction,
     wait_for_db,
 )
-from budgetapp.services import rules
+from budgetapp.services import alerts, rules
+from budgetapp.services.notify import Notifier, get_notifier
 
 NOT_RUNNING = "The database is not running. Start it with: ./run db start"
 
@@ -80,6 +81,7 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
             since=args.since,
             only_uncategorized=args.only_uncategorized,
             dry_run=args.dry_run,
+            notifier=get_notifier(settings),
         )
     finally:
         close()
@@ -92,11 +94,18 @@ def recategorize(
     only_uncategorized: bool = False,
     dry_run: bool = False,
     out: Callable[[str], Any] = print,
+    notifier: Notifier | None = None,
 ) -> int:
-    """Re-apply categories in one transaction and print what happened; returns the exit code."""
+    """Re-apply categories in one transaction and print what happened; returns the exit code.
+
+    Budget thresholds (ALR-1) are evaluated before the commit when categories changed, so a
+    crossing notifies (through ``notifier``) once the transaction commits.
+    """
     scope = rules.ReapplyScope(since=since, only_uncategorized=only_uncategorized)
     with transaction(factory) as session:
         result = rules.reapply(session, scope, dry_run=dry_run, limit=0)
+        if not dry_run and notifier is not None:
+            alerts.evaluate_budgets(session, notifier)
     for line in report_lines(result):
         out(line)
     return 0

@@ -1,3 +1,5 @@
+"""``alerts.record_and_notify`` / ``clear_alert``: recorded once, sent after the caller commits."""
+
 from sqlalchemy import select
 
 from budgetapp.models import AlertEvent
@@ -120,14 +122,35 @@ def test_deleting_the_transaction_keeps_the_alert(db, notifier):
     assert db.get(AlertEvent, result.alert_id).transaction_id is None
 
 
-def test_evaluation_stubs_return_nothing(db, notifier):
-    outcome = SyncOutcome(item_id=1, trigger="manual", status="success")
+def test_a_released_savepoint_sends_nothing_before_the_callers_commit(db, notifier):
+    """SQLAlchemy fires ``after_commit`` when a savepoint is released too. Delivery waits for the
+    caller's own commit: before it, a separate connection can't even see the new row."""
+    _record(db, notifier)
+    with db.begin_nested():  # e.g. the next evaluation, in a savepoint of its own
+        _record(db, notifier, key="second")
+    assert notifier.sent == []
+    db.commit()
+    assert notifier.titles == ["Dining at 80%", "Dining at 80%"]
+
+
+def test_a_rollback_after_a_released_savepoint_sends_nothing(session_factory, notifier):
+    session = session_factory()
+    _record(session, notifier)
+    with session.begin_nested():
+        _record(session, notifier, key="second")
+    session.rollback()
+    session.close()
+    assert notifier.sent == []
+
+
+def test_nothing_to_evaluate_on_an_empty_database(db, notifier):
+    outcome = SyncOutcome(item_id=999_999, trigger="manual", status="success")
     assert alerts.evaluate_after_sync(db, notifier, outcome) == []
-    assert (
-        alerts.evaluate_after_import(db, notifier, ImportOutcome(account_id=1, filename="a.csv"))
-        == []
-    )
+    changed = ImportOutcome(account_id=1, filename="a.csv", inserted_count=1)
+    assert alerts.evaluate_after_import(db, notifier, changed) == []
     assert alerts.evaluate_budgets(db, notifier) == []
+    db.commit()
+    assert notifier.sent == []
 
 
 def test_outcome_helpers():
