@@ -240,50 +240,61 @@ def documented_commands(paths: tuple[Path, ...]) -> list[tuple[str, str]]:
     ]
 
 
-@pytest.mark.parametrize(("doc", "rest"), documented_commands(ALL_DOCS))
-def test_every_documented_command_line_parses(doc: str, rest: str, capsys) -> None:
-    """``./run <rest>`` as shown in a doc is a real command with real options and values."""
+def command_problem(rest: str, capsys: pytest.CaptureFixture[str]) -> str | None:
+    """Why ``./run <rest>`` isn't a valid command line, or ``None`` when it is.
+
+    Options must be spelled out in full: argparse would accept ``--keys`` for ``--keys-only``,
+    but the docs show the real names.
+    """
     for argv in to_argv(rest) or []:
         try:
             args, extra = PARSER.parse_known_args(argv)
         except SystemExit:
-            message = capsys.readouterr().err.strip().splitlines()[-1:]
-            if len(argv) == 1 and "arguments are required" in "".join(message):
+            message = "".join(capsys.readouterr().err.strip().splitlines()[-1:])
+            if len(argv) == 1 and "arguments are required" in message:
                 continue  # names the command (e.g. "the `./run db` commands"), not a command line
-            pytest.fail(f"{doc}: `./run {rest}` does not parse ({argv}): {message}")
+            return f"does not parse ({argv}): {message}"
+        if getattr(args, "accepts_extra", False):
+            continue  # the rest goes to pytest or psql
         if extra:
-            assert getattr(args, "accepts_extra", False), (
-                f"{doc}: `./run {rest}` has options {args.command!r} doesn't know: {extra}"
-            )
+            return f"has options {args.command!r} doesn't know: {extra}"
+        known = {opt for a in COMMANDS[args.command]._actions for opt in a.option_strings}
+        known |= {opt for a in PARSER._actions for opt in a.option_strings}
+        for token in argv:
+            if token.startswith("-") and token.split("=", 1)[0] not in known:
+                return f"abbreviates or misspells an option: {token}"
+    return None
+
+
+@pytest.mark.parametrize(("doc", "rest"), documented_commands(ALL_DOCS))
+def test_every_documented_command_line_parses(doc: str, rest: str, capsys) -> None:
+    """``./run <rest>`` as shown in a doc is a real command with real options and values."""
+    problem = command_problem(rest, capsys)
+    assert problem is None, f"{doc}: `./run {rest}` {problem}"
 
 
 def test_the_command_line_checker_catches_mistakes(capsys) -> None:
     """Edge cases of the checker itself: a wrong option, a wrong value, a missing command."""
 
     def parses(rest: str) -> bool:
-        for argv in to_argv(rest) or []:
-            try:
-                args, extra = PARSER.parse_known_args(argv)
-            except SystemExit:
-                capsys.readouterr()
-                return False
-            if extra and not getattr(args, "accepts_extra", False):
-                return False
-        return True
+        return command_problem(rest, capsys) is None
 
     assert parses("setup --keys-only")
     assert parses("")  # ./run = start
     assert parses("live")
+    assert parses("db")  # "the ./run db commands": a name, not a command line
     assert parses("demo create try --seed 4 --today 2026-10-15")
     assert parses("serve --demo <id> --port <port>")
     assert parses("db start|stop|status|psql|url")
     assert parses('restore "$HOME/Library/Application Support/x.dump" --env production')
     assert parses("test -k budgets -x")  # extra arguments go to pytest
     assert not parses("setup --key-only")
+    assert not parses("setup --keys")  # an abbreviation argparse would accept
     assert not parses("backup --env staging")
     assert not parses("sandbox-link --user nobody")
     assert not parses("synchronise")
     assert not parses("import-csv FILE --dryrun")
+    assert not parses("recategorize --since yesterday")
     assert to_argv("<command> --help") is None
 
 
