@@ -8,6 +8,8 @@ Every figure comes from :func:`budgetapp.services.insights.dashboard`, whose bud
 ``/transactions`` are built by the Budgets page's own :func:`~budgetapp.web.routes.budgets.
 transactions_url` (category, the period's dates, ``basis=posted_date`` in statement mode and
 ``status=posted`` when pending charges don't count), so a list holds what its figure counts.
+A top merchant's link adds ``merchant=`` and the spending categories its figure is in, so the
+merchant's card payments and credits (which no figure counts) stay out of the list.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from budgetapp.money import ZERO
 from budgetapp.periods import MONTH, STATEMENT
 from budgetapp.services import insights
 from budgetapp.services.insights import Dashboard
+from budgetapp.services.spending import MerchantSpending
 from budgetapp.web.deps import SessionDep
 from budgetapp.web.routes.budgets import period_label, transactions_url
 from budgetapp.web.templating import date_short, render
@@ -92,8 +95,9 @@ def _context(d: Dashboard) -> dict[str, Any]:
     ) -> str:
         return transactions_url(category_id, start, end, basis=basis, include_pending=pending)
 
-    def merchant_href(merchant: str) -> str:
-        return spent_href(None) + "&" + urlencode({"merchant": merchant})
+    def merchant_href(m: MerchantSpending) -> str:
+        params = [("category", str(cid)) for cid in m.category_ids]
+        return spent_href(None) + "&" + urlencode([*params, ("merchant", m.merchant)])
 
     words = labels(d)
     return {

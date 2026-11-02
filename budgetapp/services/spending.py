@@ -111,6 +111,9 @@ class MerchantSpending:
     merchant: str
     amount: Decimal
     transaction_count: int
+    #: The spending categories the amount is in (where the Transactions page's ``category=``
+    #: filter finds its rows), ascending.
+    category_ids: tuple[int, ...] = ()
 
 
 def _filters(start: dt.date, end: dt.date, basis: str, include_pending: bool, kinds: Iterable[str]):
@@ -254,26 +257,43 @@ def top_merchants(
     limit: int = 10,
     kinds: Iterable[str] = ("expense",),
 ) -> list[MerchantSpending]:
-    """Merchants with the most net spending (``merchant_name``, else the description)."""
-    merchant = func.coalesce(Transaction.merchant_name, Transaction.name)
+    """Merchants with the most net spending (``merchant_name``, else the description).
+
+    A merchant is matched the way the Transactions page's ``merchant=`` filter matches it
+    (``transactions.merchant_key_expr``: case and runs of spaces ignored), so "Whole Foods" and
+    "WHOLE  FOODS" are one merchant, shown by its most frequent merchant name (else its most
+    frequent description). ``category_ids`` are the categories its spending is in.
+    """
+    # The list filter's own key, so a merchant's link lists exactly the rows it adds up
+    # (imported here: services.transactions imports this module).
+    from budgetapp.services.transactions import merchant_key_expr
+
+    key = merchant_key_expr()
+    shown = func.coalesce(
+        func.mode().within_group(Transaction.merchant_name),
+        func.mode().within_group(Transaction.name),
+    )
     amount = func.sum(v_allocations.c.amount)
     query = (
         select(
-            merchant.label("merchant"),
+            shown.label("merchant"),
             amount.label("amount"),
             func.count(v_allocations.c.transaction_id.distinct()).label("transaction_count"),
+            func.array_agg(v_allocations.c.category_id.distinct()).label("category_ids"),
         )
         .select_from(v_allocations)
         .join(Transaction, Transaction.id == v_allocations.c.transaction_id)
         .join(Category, Category.id == v_allocations.c.category_id)
         .where(*_filters(start, end, basis, include_pending, kinds))
-        .group_by(merchant)
+        .group_by(key)
         .having(amount > 0)
-        .order_by(amount.desc(), merchant)
+        .order_by(amount.desc(), key)
         .limit(limit)
     )
     return [
-        MerchantSpending(r.merchant, to_money(r.amount), r.transaction_count)
+        MerchantSpending(
+            r.merchant, to_money(r.amount), r.transaction_count, tuple(sorted(r.category_ids))
+        )
         for r in session.execute(query)
     ]
 

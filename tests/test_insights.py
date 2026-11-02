@@ -144,6 +144,33 @@ class TestDashboard:
         assert (line.carry_in, line.available, line.spent) == (D("50.00"), D("550.00"), D("120.00"))
         assert d.overview.days_left == 12
         assert d.annual == budgets.annual_overviews(db, OCT, today=day("2026-10-20"))[-1]
+        assert d.annual_other == ()
+
+    def test_a_cycle_across_the_year_end_shows_the_year_we_are_in(self, db, account, cat, spend):
+        """Review finding 1: a statement cycle Dec 28 – Jan 27 touches two years. On Dec 30 the
+        annual budgets are 2026's to date (the Budgets page's 2026 tally for this cycle), not
+        2027's, which hasn't started; on Jan 5 they are 2027's, with 2026's final tally beside."""
+        for closing in ("2026-10-27", "2026-11-27", "2026-12-27"):
+            make_statement(db, account, closing)
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id)
+        travel = cat("Travel")
+        make_budget(db, travel, "6000.00", effective_from=day("2026-01-01"), period="annual")
+        spend(travel, "2500.00", "2026-06-10")
+        spend(travel, "300.00", "2026-12-29")
+        spend(travel, "40.00", "2027-01-03")
+
+        december = insights.dashboard(db, today=day("2026-12-30"))
+        cycle = december.period
+        assert (cycle.start, cycle.end) == (day("2026-12-28"), day("2027-01-27"))
+        old, new = budgets.annual_overviews(db, cycle, today=day("2026-12-30"))
+        assert december.annual == old and december.annual_other == (new,)
+        assert (old.year, old.as_of, old.spent_total) == (2026, day("2026-12-31"), D("2800.00"))
+
+        january = insights.dashboard(db, today=day("2027-01-05"))
+        assert january.period == cycle
+        assert (january.annual.year, january.annual.spent_total) == (2027, D("40.00"))
+        (closed,) = january.annual_other
+        assert (closed.year, closed.spent_total) == (2026, D("2800.00"))
 
     def test_top_categories_add_up_to_the_total(self, db, cat, spend):
         names = ["Groceries", "Dining & Drinks", "Home", "Shopping", "Travel", "Education", "Gifts"]
@@ -185,6 +212,33 @@ class TestDashboard:
         assert d.held_rows == 0
         assert d.pace.previous_spent is None and d.pace.change is None
         assert d.upcoming.charges == () and d.upcoming.total == 0
+
+    def test_top_merchants_are_matched_as_the_transactions_list_matches_them(self, db, cat, spend):
+        """Review finding 3: one merchant whatever its case and spacing (the list's
+        ``merchant=`` key), named by its most frequent merchant name, with the spending
+        categories its figure is in (a credit in Credits & Rewards isn't one)."""
+        groceries, dining = cat("Groceries"), cat("Dining & Drinks")
+        spend(groceries, "40.00", "2026-10-02", merchant_name="Whole Foods")
+        spend(groceries, "25.00", "2026-10-09", merchant_name="Whole Foods")
+        spend(dining, "15.00", "2026-10-03", merchant_name=None, name="WHOLE  FOODS ")
+        spend(cat("Credits & Rewards"), "-10.00", "2026-10-05", merchant_name="whole foods")
+        spend(groceries, "5.00", "2026-10-06", merchant_name="Whole Foods Market")
+        rows = insights.dashboard(db, today=day("2026-10-15")).top_merchants
+        assert [(m.merchant, m.amount, m.transaction_count) for m in rows] == [
+            ("Whole Foods", D("80.00"), 3),
+            ("Whole Foods Market", D("5.00"), 1),
+        ]
+        assert rows[0].category_ids == tuple(sorted((groceries.id, dining.id)))
+        assert rows[1].category_ids == (groceries.id,)
+
+    def test_a_merchant_known_only_by_its_description(self, db, cat, spend):
+        spend(cat("Home"), "12.00", "2026-10-02", merchant_name=None, name="HARDWARE  STORE")
+        spend(cat("Home"), "8.00", "2026-10-03", merchant_name=None, name="Hardware Store")
+        spend(cat("Home"), "9.00", "2026-10-04", merchant_name=None, name="Hardware Store")
+        (m,) = spending.top_merchants(
+            db, OCT.start, OCT.end, basis=spending.BASIS_SPEND_DATE, include_pending=True
+        )
+        assert (m.merchant, m.amount, m.transaction_count) == ("Hardware Store", D("29.00"), 3)
 
     def test_top_merchants_follow_the_budget_basis(self, db, cat, spend):
         spend(cat("Dining & Drinks"), "12.00", "2026-10-03", merchant_name="Blue Bottle")
@@ -319,6 +373,7 @@ class TestTrends:
         assert t.months[-1].status == insights.CURRENT and t.current == t.months[-1]
         assert {m.status for m in t.months[:-1]} == {insights.COMPLETE}
         assert t.compare == OCT and t.previous == month_period(2026, 9)
+        assert t.ended == t.months[-2] and t.ended.period == t.compare
         assert t.months[-2].total == D("205.00") and t.months[-2].change.amount == D("105.00")
         assert not t.trimmed and t.range_has_data
 
@@ -387,11 +442,45 @@ class TestTrends:
         assert t.compare == month_period(2026, 7) and t.months[1].change.amount == D("10.00")
         assert t.average == D("50.00") and t.complete_months == 1  # June is partial
 
+    def test_the_historys_first_month_has_no_month_to_compare_with(self, db, cat, spend):
+        """Review finding 2: history from Oct 15, today Nov 10. October has ended but September
+        has no data, so there is no change from last month (not "no spending in either"), and
+        November so far isn't set against Oct 1–10, which are before the history."""
+        groceries = cat("Groceries")
+        spend(groceries, "120.00", "2026-10-15")
+        spend(groceries, "30.00", "2026-11-02")
+        t = insights.trends(db, today=day("2026-11-10"))
+        assert [m.status for m in t.months] == [insights.FIRST, insights.CURRENT]
+        assert t.ended == t.months[0] and t.amount_in(t.totals, t.ended) == D("120.00")
+        assert t.compare is None and t.previous is None
+        assert t.totals.change is None and t.changed == () and t.biggest_increase is None
+        assert t.current_through is None
+        assert t.totals.so_far == D("30.00") and t.totals.so_far_change is None
+        # From Oct 15 on, the same days of October are history: they are compared.
+        later = insights.trends(db, today=day("2026-11-20"))
+        assert later.current_through == day("2026-10-20")
+        assert later.totals.so_far_change.previous == D("120.00")
+        # The category view says the same.
+        one = insights.trends(db, category_id=groceries.id, today=day("2026-11-10"))
+        assert one.amount_in(one.selected, one.ended) == D("120.00")
+        assert one.selected.change is None and one.selected.so_far_change is None
+
+    def test_a_history_starting_on_the_first_has_no_month_before_it(self, db, cat, spend):
+        spend(cat("Home"), "40.00", "2026-10-01")
+        spend(cat("Home"), "10.00", "2026-11-03")
+        t = insights.trends(db, today=day("2026-11-10"))
+        assert [m.status for m in t.months] == [insights.COMPLETE, insights.CURRENT]
+        assert t.ended.period == OCT and t.compare is None and t.totals.change is None
+        assert t.complete_months == 1 and t.average == D("40.00")
+        assert t.current_through == day("2026-10-10")  # Oct 1–10 are history
+        assert t.totals.so_far_change.previous == D("40.00")
+
     def test_the_first_month_of_history_has_nothing_to_compare(self, db, cat, spend):
         spend(cat("Home"), "40.00", "2026-11-02")
         t = insights.trends(db, today=day("2026-11-05"))
         assert [m.status for m in t.months] == ["current"]
         assert t.compare is None and t.previous is None and t.changed == ()
+        assert t.ended is None
         assert t.average is None and t.totals.so_far_change is None
 
     def test_a_range_wholly_before_the_history(self, db, cat, spend):

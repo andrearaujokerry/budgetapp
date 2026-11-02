@@ -13,15 +13,19 @@ overall target, annual budgets, the pending setting), plus:
 * the day-by-day pace (``spending.daily_spending``) of this period and the previous one, and
   how much had been spent by the same day of the previous period;
 * recurring charges expected before the period ends (``recurring.detect``);
+* the annual budgets of the year we are in (``budgets.annual_overviews``: a statement cycle
+  across Dec 31 touches two years, and the Budgets page shows both);
 * how many imported rows are held for review (``csv_import.list_suspects``).
 
 **Trends** (:func:`trends`): spending per expense category per CALENDAR month by ``spend_date``
 (``spending.monthly_spending``; the same pending setting as budgets, whatever the budget period
 mode), for 12, 24 or 36 months ending with a chosen month. "The change from last month"
-compares the latest month that has ended with the month before it: a month in progress is
+compares the latest month that has ended with the month before it, when that month has data
+(the history's first month has nothing before it to compare with): a month in progress is
 shown "so far" and compared with the same days of the previous month instead, so a few days are
-never set against a whole month. Months before the first transaction have no data (``None``,
-not zero); the month the history starts in is partial. Averages count only complete months.
+never set against a whole month (and only days the history covers: never days before it).
+Months before the first transaction have no data (``None``, not zero); the month the history
+starts in is partial. Averages count only complete months.
 Hidden categories are listed (marked) because their spending counts in every total.
 
 Services never commit.
@@ -210,8 +214,10 @@ class Upcoming:
 @dataclass(frozen=True, slots=True)
 class Dashboard:
     """Everything the Dashboard shows (INS-1). ``overview`` is the Budgets page's overview of the
-    current period, so every budget figure matches that page; ``annual`` is the Budgets page's
-    annual section for that period (the year of its end)."""
+    current period, so every budget figure matches that page. ``annual`` is the annual budgets
+    of the year that contains ``today``, as the Budgets page tallies that year for this period
+    (as of the period's end, or Dec 31 when the year ends inside it); ``annual_other`` holds the
+    other year a statement cycle across Dec 31 touches (usually empty)."""
 
     today: dt.date
     overview: BudgetOverview
@@ -222,6 +228,7 @@ class Dashboard:
     upcoming: Upcoming
     held_rows: int
     has_transactions: bool
+    annual_other: tuple[AnnualOverview, ...] = ()
 
     @property
     def period(self) -> Period:
@@ -330,12 +337,16 @@ def dashboard(session: Session, *, today: dt.date | None = None) -> Dashboard:
     today = today or clock.today()
     period = budgets.current_period(session, today=today)
     ov = budgets.overview(session, period, today=today)
-    *_, annual = budgets.annual_overviews(session, period, today=today)
+    # A cycle across Dec 31 touches two years: show the one we are in (Dec 30: the old year's
+    # tally to date, not the new year's empty one).
+    years = budgets.annual_overviews(session, period, today=today)
+    annual = next((a for a in years if a.year == today.year), years[-1])
     first_day = history_start(session, ov.spending.basis)
     return Dashboard(
         today=today,
         overview=ov,
         annual=annual,
+        annual_other=tuple(a for a in years if a is not annual),
         top_categories=top_categories(
             ov.spending.categories, ov.spending.total, limit=TOP_CATEGORIES
         ),
@@ -409,10 +420,12 @@ class Trends:
     """Spending per category per calendar month (INS-2); see the module docstring.
 
     ``months`` oldest first (``span`` of them, ending with ``through``, less any before the
-    history: ``trimmed``). ``compare`` is the
-    latest month in range that has ended and has data, ``previous`` the month before it (each
-    ``None`` when there is no such month). ``current`` is the month in progress when it is in
-    range, ``current_through`` the previous month's day it is compared to. ``categories`` holds
+    history: ``trimmed``). ``ended`` is the latest month in range that has ended and has data.
+    ``compare`` is that month when the month before it has data too, ``previous`` the month
+    before it (each ``None`` otherwise: the history's first month has nothing to compare
+    with). ``current`` is the month in progress when it is in range, ``current_through`` the
+    previous month's day it is compared to (``None`` without a comparison: no previous month,
+    or that day is before the history). ``categories`` holds
     every category with spending in range (largest total first); ``totals`` is the same for all
     categories together (``category`` is ``None``). ``selected`` is the requested category
     (``None``: all categories).
@@ -424,6 +437,7 @@ class Trends:
     months: tuple[TrendMonth, ...]
     compare: Period | None
     previous: Period | None
+    ended: TrendMonth | None
     current: TrendMonth | None
     current_through: dt.date | None
     categories: tuple[CategoryTrend, ...]
@@ -474,6 +488,10 @@ class Trends:
     def biggest_decrease(self) -> CategoryTrend | None:
         downs = [c for c in self.changed if c.change.amount < 0]
         return min(downs, key=lambda c: (c.change.amount, c.category.name)) if downs else None
+
+    def amount_in(self, trend: CategoryTrend, month: TrendMonth) -> Decimal | None:
+        """``trend``'s amount in ``month`` (one of :attr:`months`)."""
+        return trend.amounts[self.months.index(month)]
 
     def chart_series(self, limit: int = CHART_SERIES) -> tuple[ChartSeries, ...]:
         """The stacked chart's series: the ``limit`` categories with the largest total, each in
@@ -578,22 +596,31 @@ def trends(
         )
         for i in shown
     )
-    compare_index = next((i for i in reversed(shown) if statuses[i] in (COMPLETE, FIRST)), None)
+    ended_index = next((i for i in reversed(shown) if statuses[i] in (COMPLETE, FIRST)), None)
+    # Only a month whose previous month has data has a change: the history's first month (or a
+    # month starting on the history's first day) has nothing before it, not $0.
+    compare_index = (
+        ended_index if ended_index is not None and statuses[ended_index - 1] != BEFORE else None
+    )
     current_index = next((i for i in shown if statuses[i] == CURRENT), None)
     complete = [i for i in shown if statuses[i] == COMPLETE]
 
-    # The month in progress is compared with the same days of the month before.
+    # The month in progress is compared with the same days of the month before, when the
+    # history covers them (days before it have no data, not $0 of spending).
     current_through = None
     previous_to_date: dict[int, Decimal] | None = None
     previous_to_date_total: Decimal | None = None
     if current_index is not None and statuses[current_index - 1] != BEFORE:
         previous_month = data[current_index - 1].month
-        current_through = periods.clamp_day(
+        same_day = periods.clamp_day(
             previous_month.start.year, previous_month.start.month, today.day
         )
+        if first_day is not None and first_day <= same_day:
+            current_through = same_day
+    if current_through is not None:
         rows = spending.spending_by_category(
             session,
-            previous_month.start,
+            current_through.replace(day=1),
             current_through,
             basis=BASIS_SPEND_DATE,
             include_pending=include_pending,
@@ -662,6 +689,7 @@ def trends(
         months=months,
         compare=data[compare_index].month if compare_index is not None else None,
         previous=data[compare_index - 1].month if compare_index is not None else None,
+        ended=months[ended_index - start] if ended_index is not None else None,
         current=months[current_index - start] if current_index is not None else None,
         current_through=current_through,
         categories=categories,

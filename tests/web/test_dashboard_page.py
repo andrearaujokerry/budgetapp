@@ -248,7 +248,12 @@ class TestFigures:
         assert "Whole Foods" in merchants and "$250.00" in merchants
         href = next(h for h in links(merchants) if "Tartine" in h)
         query = parse_qs(urlsplit(href).query)
-        assert query == {"from": ["2026-10-01"], "to": ["2026-10-31"], "merchant": ["Tartine & Co"]}
+        assert query == {
+            "from": ["2026-10-01"],
+            "to": ["2026-10-31"],
+            "category": [str(cat("Dining & Drinks").id)],
+            "merchant": ["Tartine & Co"],
+        }
         listed = client.get(href).context["page"]
         assert listed.total_count == 1 and listed.sums.net == D("18.00")
 
@@ -287,12 +292,77 @@ class TestLinks:
         assert "closes Oct 27" in text_of(block(dash, "kpi-days"))
         assert "Compared with the last cycle" in dash
 
+    def test_merchant_links_list_what_the_figure_counts(self, client, cat, spend):
+        """Review finding 3: an Amex Offer credit (Credits & Rewards) under the merchant's
+        name isn't in its figure, so it isn't in its list; "Whole Foods" and "WHOLE  FOODS"
+        are one merchant on both."""
+        spend(cat("Dining & Drinks"), "60.00", "2026-10-03", merchant_name="Uber Eats")
+        spend(cat("Credits & Rewards"), "-10.00", "2026-10-05", merchant_name="Uber Eats",
+              name="AMEX OFFER CREDIT UBER EATS")  # fmt: skip
+        spend(cat("Groceries"), "40.00", "2026-10-02", merchant_name="Whole Foods")
+        spend(cat("Groceries"), "15.00", "2026-10-03", merchant_name=None, name="WHOLE  FOODS")
+        spend(cat("Shopping"), "7.00", "2026-10-04", merchant_name=None, name="whole foods")
+        response = client.get("/")
+        d = response.context["d"]
+        assert [(m.merchant, m.amount) for m in d.top_merchants] == [
+            ("Whole Foods", D("62.00")),
+            ("Uber Eats", D("60.00")),
+        ]
+        hrefs = [h for h in links(card(response.text, "dash-merchants")) if "merchant=" in h]
+        assert len(hrefs) == 2
+        for href, m in zip(hrefs, d.top_merchants, strict=True):
+            listed = client.get(href).context["page"]
+            assert listed.sums.net == m.amount, href
+            assert listed.total_count == m.transaction_count, href
+
     def test_annual_links_cover_the_year_to_date(self, client, db, cat, spend):
         travel = cat("Travel")
         make_budget(db, travel, "3000.00", effective_from=day("2026-01-01"), period="annual")
         spend(travel, "400.00", "2026-03-08")
         line = block(client.get("/").text, f"dash-annual-{travel.id}")
         assert f"/transactions?category={travel.id}&amp;from=2026-01-01&amp;to=2026-10-31" in line
+
+    def test_a_cycle_across_the_year_end_shows_this_years_annual_budgets(
+        self, client, db, account, cat, spend, freeze_today
+    ):
+        """Review finding 1: on Dec 30 in a Dec 28 – Jan 27 cycle the card is 2026's year to
+        date (the Budgets page's 2026 tally), not 2027's empty one; on Jan 5 it is 2027's, with
+        a note pointing to 2026's final tally."""
+        account.statement_closing_day = 27
+        for closing in ("2026-10-27", "2026-11-27", "2026-12-27"):
+            make_statement(db, account, closing)
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id)
+        travel = cat("Travel")
+        make_budget(db, travel, "6000.00", effective_from=day("2026-01-01"), period="annual")
+        spend(travel, "2500.00", "2026-06-10")
+        spend(travel, "300.00", "2026-12-29")
+        spend(travel, "40.00", "2027-01-03")
+
+        freeze_today("2026-12-30")
+        response = client.get("/")
+        annual = card(response.text, "dash-annual")
+        text = text_of(annual)
+        assert text.startswith("Annual budgets · 2026 Spending so far this year")
+        assert "$2,800.00 of $6,000.00" in text and "$3,200.00 left" in text
+        assert "This cycle runs into 2027: its annual budgets count from Jan 1." in text
+        assert "/budgets#annual-closed-2026" in links(annual)
+        year = f"/transactions?category={travel.id}&from=2026-01-01&to=2026-12-31"
+        assert f"{year}&basis=posted_date" in links(annual)
+        budgets_page = client.get("/budgets")
+        (closed,) = budgets_page.context["annual_closed"]
+        assert response.context["d"].annual == closed  # the Budgets page's own 2026 figures
+        assert 'id="annual-closed-2026"' in budgets_page.text
+
+        freeze_today("2027-01-05")
+        annual = card(client.get("/").text, "dash-annual")
+        text = text_of(annual)
+        assert text.startswith("Annual budgets · 2027 Spending so far this year")
+        assert "$40.00 of $6,000.00" in text
+        assert "2026 ended on Dec 31, during this cycle: $2,800.00 of $6,000.00 for the year." in (
+            text
+        )
+        assert "/budgets#annual-closed-2026" in links(annual)
+        assert "/budgets#annual-section" in links(annual)  # "All budgets": the 2027 section
 
 
 # --------------------------------------------------------------------------- notices

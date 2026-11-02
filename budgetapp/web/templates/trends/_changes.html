@@ -1,13 +1,15 @@
 {#- The change from last month per category: the latest month that has ended (t.compare)
     against the month before (t.previous), plus the month in progress so far. Every category
-    with spending in either month, largest first. -#}
+    with spending in either month, largest first. Without a month before it to compare with (the
+    history's first month), the "No month to compare" state. -#}
 {%- import "components/ui.html" as ui -%}
 {%- import "trends/_macros.html" as tm -%}
-{%- if t.compare %}
+{%- if t.compare and t.totals.change %}
 {%- set rows = t.changed %}
 {%- set cmp = short_month(t.compare) %}
 {%- set prev = short_month(t.previous) %}
-{% call ui.card('Change from last month', subtitle=(t.compare.start|month_label) ~ ' compared with ' ~ (t.previous.start|month_label), flush=true, id='trends-changes') %}
+{%- set compared = (t.compare.start|month_label) ~ ' compared with ' ~ (t.previous.start|month_label) ~ ((' (from ' ~ (t.history_start|date_short) ~ ', when your history starts)') if t.history_start > t.previous.start else '') %}
+{% call ui.card('Change from last month', subtitle=compared, flush=true, id='trends-changes') %}
 {%- if rows %}
 <div class="table-wrap">
 <table class="table table--compact trends-table" id="trends-change-table">
@@ -47,6 +49,11 @@
 {% endcall %}
 {%- else %}
 <div class="card" id="trends-changes">
+{%- if t.ended %}
+{%- set next_step = ('When ' ~ (t.current.period.start|month_label) ~ ' ends, this page compares the two.') if t.current else 'Choose a later month under “Through” to see a change.' %}
+{{ ui.empty_state('No month to compare yet', 'Your history starts on ' ~ (t.history_start|date_long) ~ ', so ' ~ (t.ended.period.start|month_label) ~ ' has no month before it to compare with. ' ~ next_step, icon='calendar', compact=true) }}
+{%- else %}
 {{ ui.empty_state('No month to compare yet', 'Your history starts on ' ~ (t.history_start|date_long) ~ '. Once a month has ended, this page compares it with the month before.', icon='calendar', compact=true) }}
+{%- endif %}
 </div>
 {%- endif %}

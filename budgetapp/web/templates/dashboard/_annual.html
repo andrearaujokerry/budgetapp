@@ -1,10 +1,24 @@
-{#- Annual budgets (BUD-5) as the Budgets page shows them for this period: the year of its end,
-    spending from Jan 1, with the even-pace marker. -#}
+{#- Annual budgets (BUD-5) of the year we are in, as the Budgets page tallies that year for this
+    period: spending from Jan 1, with the even-pace marker. A statement cycle across Dec 31 also
+    touches the other year (d.annual_other), which the Budgets page shows in full: a note
+    points there. -#}
 {%- import "components/ui.html" as ui -%}
 {%- import "budgets/_macros.html" as bud -%}
 {%- set a = d.annual -%}
-{%- set actions %}{{ ui.button('All budgets', href='/budgets#annual-section', size='sm', variant='ghost', icon='chevron-right', id='dash-annual-all') }}{% endset -%}
-{% call ui.card('Annual budgets · ' ~ a.year, subtitle=('Spending so far this year' if a.as_of >= d.today else 'Spending from Jan 1 through ' ~ (a.as_of|date_long)), actions=actions, id='dash-annual') %}
+{#- On the Budgets page the year a cycle across Dec 31 ends in has its own section above the
+    next year's (#annual-closed-<year>, listed when it has budgets). -#}
+{%- set later = d.annual_other|selectattr('year', 'gt', a.year)|list -%}
+{%- set anchor = ('annual-closed-' ~ a.year) if later and a.lines else 'annual-section' -%}
+{%- set actions %}{{ ui.button('All budgets', href='/budgets#' ~ anchor, size='sm', variant='ghost', icon='chevron-right', id='dash-annual-all') }}{% endset -%}
+{%- set footer -%}
+{%- for o in d.annual_other if o.lines %}
+<p class="dash-note text-sm muted" id="dash-annual-other-{{ o.year }}">
+{%- if o.year < a.year %}{{ o.year }} ended on Dec 31, during this {{ words.unit }}: {{ ui.money_text(o.spent_total) }} of {{ ui.money_text(o.budget_total) }} for the year. <a href="/budgets#annual-closed-{{ o.year }}">See its final tally</a>.
+{%- else %}This {{ words.unit }} runs into {{ o.year }}: its annual budgets count from Jan 1. <a href="/budgets#annual-section">See {{ o.year }}</a>.{% endif -%}
+</p>
+{%- endfor %}
+{%- endset -%}
+{% call ui.card('Annual budgets · ' ~ a.year, subtitle=('Spending so far this year' if a.year == d.today.year else 'Spending from Jan 1 through ' ~ (a.as_of|date_long)), actions=actions, footer=footer|trim or none, id='dash-annual') %}
 {%- if a.lines %}
 <ul class="dash-list" id="dash-annual-lines">
 {%- for entry in a.lines %}

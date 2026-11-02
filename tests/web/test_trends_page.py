@@ -80,6 +80,15 @@ def section(page: str, element_id: str) -> str:
     return match.group(0)
 
 
+def changes_card(page: str) -> str:
+    """The text of the "Change from last month" card (a card or its empty state)."""
+    match = re.search(
+        r'id="trends-changes".*?(?=<section class="card[^"]*" id="trends-grid)', page, re.S
+    )
+    assert match, "no #trends-changes"
+    return text_of(match.group(0).split(">", 1)[1])
+
+
 def row(page: str, row_id: str) -> str:
     match = re.search(rf'<tr id="{row_id}".*?</tr>', page, re.S)
     assert match, f"no row #{row_id}"
@@ -136,6 +145,68 @@ def test_the_first_month_of_history(client, cat, spend):
     assert "Monthly average — needs one complete month" in text
     assert chart_config(page)["data"]["labels"] == ["Nov 2026"]
     assert csp_problems(page, rendered=True) == []
+
+
+def test_the_historys_first_month_has_no_month_to_compare_with(client, freeze_today, cat, spend):
+    """Review finding 2: history from Oct 15, today Nov 10. The tile shows October's own $120
+    (not "—"), the change card says there is no month to compare with (not "No spending in Sep
+    2026 or Oct 2026"), and November so far isn't set against Oct 1–10, which are before the
+    history."""
+    freeze_today("2026-11-10")
+    groceries = cat("Groceries")
+    spend(groceries, "120.00", "2026-10-15")
+    spend(groceries, "30.00", "2026-11-02")
+    page = client.get("/trends").text
+    text = tiles(page)
+    assert "Spent in Oct 2026 $120 from Oct 15, when your history starts" in text
+    assert "Nov 2026 so far $30 your history starts on Oct 15" in text
+    assert "+$30" not in text and "by Oct 10" not in text
+    changes = changes_card(page)
+    assert changes == (
+        "No month to compare yet Your history starts on Oct 15, 2026, so Oct 2026 has no month "
+        "before it to compare with. When Nov 2026 ends, this page compares the two."
+    )
+    assert csp_problems(page, rendered=True) == []
+
+    one = client.get(f"/trends?category={groceries.id}").text
+    assert "Groceries in Oct 2026 $120 from Oct 15, when your history starts" in tiles(one)
+
+
+def test_a_history_starting_on_the_first(client, freeze_today, cat, spend):
+    freeze_today("2026-11-10")
+    spend(cat("Home"), "40.00", "2026-10-01")
+    spend(cat("Home"), "10.00", "2026-11-03")
+    page = client.get("/trends").text
+    text = tiles(page)
+    assert "Spent in Oct 2026 $40 the first month of your history" in text
+    assert "Nov 2026 so far $10 $40 by Oct 10 (−$30)" in text
+    assert changes_card(page).startswith("No month to compare yet")
+
+
+def test_the_historys_first_month_on_its_own(client, cat, spend):
+    """The earliest month the "Through" picker offers: one partial month, nothing before it."""
+    spend(cat("Shopping"), "512.00", "2025-11-28")
+    spend(cat("Groceries"), "48.00", "2025-11-29")
+    spend(cat("Groceries"), "60.00", "2025-12-05")
+    page = client.get("/trends?through=2025-11").text
+    text = tiles(page)
+    assert "Spent in Nov 2025 $560 from Nov 28, when your history starts" in text
+    assert "In Nov 2025 $560 all categories" in text and "In these 1 months" not in text
+    changes = changes_card(page)
+    assert changes.startswith("No month to compare yet")
+    assert changes.endswith("Choose a later month under “Through” to see a change.")
+    assert "Earlier months have no data, so 1 month is shown." in text_of(page)
+    assert chart_config(page)["data"]["labels"] == ["Nov 2025"]
+
+
+def test_a_partial_month_before_is_named_as_such(client, cat, spend):
+    spend(cat("Home"), "40.00", "2026-09-15")
+    spend(cat("Home"), "50.00", "2026-10-15")
+    changes = changes_card(client.get("/trends").text)
+    assert changes.startswith(
+        "Change from last month Oct 2026 compared with Sep 2026 (from Sep 15, when your history "
+        "starts)"
+    )
 
 
 # --------------------------------------------------------------------------- all categories
