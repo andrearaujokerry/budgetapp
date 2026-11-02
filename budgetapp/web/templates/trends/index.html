@@ -1,10 +1,33 @@
-{#- Placeholder from the web shell; the DASH package replaces this file. -#}
+{#- Trends (INS-2): spending per category per calendar month, with the change from last
+    month. The filter bar swaps #trends-results (trends/_results.html); see routes/trends.py. -#}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
+{% import "components/forms.html" as form %}
 {% block title %}Trends{% endblock %}
+{% block charts %}{% if t.has_data %}yes{% endif %}{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/trends.css">{% endblock %}
 {% block content %}
-{{ ui.page_header("Trends", "Spending by month and category over time.") }}
-<div class="card">
-{{ ui.empty_state("Coming soon", "This page is being built.", icon="trending") }}
+{{ ui.page_header("Trends", "Spending per category by calendar month, and how it changed.") }}
+{%- if not t.has_data %}
+<div class="card" id="trends-empty">
+{% call ui.empty_state('No spending to chart yet', 'Once transactions arrive from your linked card or an imported CSV file, this page shows your spending per category for each month, and how each month compares with the one before.', icon='trending') %}
+{{ ui.button('Link account', href='/connection', icon='link', variant='primary') }}
+{{ ui.button('Import a CSV file', href='/import', icon='upload') }}
+{% endcall %}
 </div>
+{%- else %}
+{% call form.filter_bar("/trends", target="#trends-results", label="Trends filters", id="trends-filters") %}
+{{ form.select_field('months', 'Show', [('12', '12 months'), ('24', '24 months'), ('36', '36 months')], value=filters.months, compact=true, id='trends-months') }}
+{%- set through_options = [] %}
+{%- for month in t.choices %}{% set _ = through_options.append((month.start.strftime('%Y-%m'), (month.start|month_label) ~ (' (this month)' if loop.first else ''))) %}{% endfor %}
+{{ form.select_field('through', 'Through', through_options, value=filters.through, compact=true, id='trends-through') }}
+{{ form.category_select('category', categories, value=filters.category, label='Category', include_hidden=true, placeholder='All categories', compact=true, id='trends-category') }}
+<div class="filter-bar__actions">
+<a class="btn btn--ghost btn--sm" href="/trends" id="trends-reset">Reset</a>
+</div>
+{% endcall %}
+<div id="trends-results" class="trends-results">
+{% include "trends/_results.html" %}
+</div>
+{%- endif %}
 {% endblock %}

@@ -1,0 +1,34 @@
+{#- Recurring charges expected from today to the end of the period (recurring.detect), with
+    their usual amount. -#}
+{%- import "components/ui.html" as ui -%}
+{%- set u = d.upcoming -%}
+{%- set actions %}{{ ui.button('Recurring', href='/recurring', size='sm', variant='ghost', icon='chevron-right', id='dash-recurring-all') }}{% endset -%}
+{%- set footer -%}
+{%- if u.charges or u.monthly_total -%}
+<p class="dash-note text-sm muted">
+{%- if u.charges %}About {{ ui.money_text(u.total) }} still to come before {{ ov.period.end|date_short }}. {% endif -%}
+{%- if u.monthly_total %}Recurring charges cost about {{ ui.money_text(u.monthly_total) }} a month.{% endif -%}
+</p>
+{%- endif -%}
+{%- endset -%}
+{% call ui.card('Coming up', subtitle='Recurring charges expected by ' ~ (ov.period.end|date_short), actions=actions, footer=footer|trim or none, flush=true, id='dash-upcoming') %}
+{%- if u.charges %}
+<div class="table-wrap">
+<table class="table table--compact dash-table" id="dash-upcoming-table">
+<thead><tr><th scope="col">Expected</th><th scope="col" class="col-grow">Charge</th><th scope="col" class="num">Usually</th></tr></thead>
+<tbody>
+{%- for s in u.charges[:6] %}
+<tr>
+<td class="table__date">{{ s.next_expected|date_short }}</td>
+<td class="col-grow"><span class="table__primary">{{ s.merchant }}</span><span class="table__secondary">{{ s.cadence_label }}{% if s.category %} · {{ s.category.name }}{% endif %}</span></td>
+<td class="num">{{ ui.money(s.typical_amount) }}</td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{%- if u.charges|length > 6 %}<p class="dash-more text-sm muted">and {{ (u.charges|length - 6)|pluralize('more charge') }}</p>{% endif %}
+{%- else %}
+{{ ui.empty_state('Nothing expected', 'No recurring charge is due before ' ~ (ov.period.end|date_long) ~ '.' if u.monthly_total else 'Subscriptions and bills show up here once they have charged a few times.', icon='repeat', compact=true) }}
+{%- endif %}
+{% endcall %}

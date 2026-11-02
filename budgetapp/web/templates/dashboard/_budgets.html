@@ -1,0 +1,45 @@
+{#- Monthly budgets this period (ov.lines: visible categories, most used first), as on the
+    Budgets page. Each name links to the transactions its Spent figure counts. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "budgets/_macros.html" as bud -%}
+{%- set shown = ov.lines[:6] -%}
+{%- set more = ov.lines|length - shown|length -%}
+{%- set t = ov.totals -%}
+{%- set actions %}{{ ui.button('All budgets', href='/budgets', size='sm', variant='ghost', icon='chevron-right', id='dash-budgets-all') }}{% endset -%}
+{%- set footer -%}
+{%- if t.unbudgeted_spent != 0 or more > 0 or t.annual_spent != 0 -%}
+<p class="dash-note text-sm muted">
+{%- if more > 0 %}{{ more|pluralize('more budget') }} on the Budgets page. {% endif -%}
+{%- if t.unbudgeted_spent != 0 %}{{ ui.money_text(t.unbudgeted_spent) }} spent without a budget{% if ov.overall.has_target %} (counted in the target){% endif %}. {% endif -%}
+{%- if t.annual_spent != 0 %}{{ ui.money_text(t.annual_spent) }} in categories with an annual budget.{% endif -%}
+</p>
+{%- endif -%}
+{%- endset -%}
+{% call ui.card('Budgets', subtitle=words.this ~ ' · most used first', actions=actions, footer=footer|trim or none, id='dash-budgets') %}
+{%- if shown %}
+<ul class="dash-list" id="dash-budget-lines">
+{%- for line in shown %}
+{%- set c = line.category %}
+<li class="dash-budget" id="dash-line-{{ c.id }}">
+<div class="dash-row">
+{{ ui.category_badge(c, href=spent_href(c.id), class='dash-row__name') }}
+<span class="dash-row__value">
+{%- if line.remaining < 0 %}<span class="text-over">{{ ui.money_text(-line.remaining) }} over</span>
+{%- else %}{{ ui.money_text(line.remaining) }} left{% endif -%}
+</span>
+</div>
+{%- if line.percent_used is not none %}
+{{ ui.progress(line.percent_used, label=ui.money_text(line.spent) ~ ' of ' ~ ui.money_text(line.available), pace_pct=line.pace_percent, status=line.status, size='sm', name=c.name ~ ' budget') }}
+{%- else %}
+<div class="dash-budget__none">{{ ui.money_text(line.spent) }} of {{ ui.money_text(line.available) }} · {{ bud.meter(line.percent_used, line.status, line.pace_percent, c.name ~ ' budget', line.remaining) }}</div>
+{%- endif %}
+{{ bud.carry_note(line, {'previous_short': words.previous}) }}
+</li>
+{%- endfor %}
+</ul>
+{%- else %}
+{% call ui.empty_state('No monthly budgets yet', 'Give your categories a monthly budget to see how much is left here.' if ov.overall.has_target else 'Give your categories a monthly budget, or set an overall target, to see spending against it here.', icon='target', compact=true) %}
+{{ ui.button('Set budgets', href='/budgets', icon='plus', variant='primary', size='sm') }}
+{% endcall %}
+{%- endif %}
+{% endcall %}

@@ -1,0 +1,78 @@
+{#- Trends results (#trends-results): tiles, the monthly chart, then either the change from
+    last month per category and every month per category (all categories), or one category
+    month by month. Rendered alone for the filter bar's HTMX requests. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "trends/_macros.html" as tm -%}
+{%- set ref = t.selected_ref -%}
+{%- set tr = t.selected if t.selected is not none else t.totals -%}
+{%- set first = t.months[0] -%}
+{%- set last = t.months[-1] -%}
+{%- set range_label = (first.period.start|month_label) ~ ' – ' ~ (last.period.start|month_label) -%}
+{%- if bad_category %}
+{{ ui.banner('warn', 'It isn’t a spending category, or it was merged into another one. Showing all categories.', title='That category can’t be shown.', id='trends-category-notice') }}
+{%- endif %}
+{%- if statement_mode %}
+{{ ui.banner('info', 'Your budgets follow statement cycles, but Trends always uses calendar months by purchase date, so a month here isn’t one of your budget periods.', title='Calendar months.', id='trends-basis-note') }}
+{%- endif %}
+{%- if not t.include_pending %}
+<p class="muted text-sm mt-0" id="trends-pending-note">Pending charges aren’t counted, as in your budgets (Settings).</p>
+{%- endif %}
+
+{%- if ref %}
+<div class="trends-heading" id="trends-category-heading">
+<h2 class="section__title">{{ ui.category_badge(ref) }}</h2>
+{{ ui.button('All categories', href=trends_href(), icon='chevron-left', size='sm', variant='ghost', id='trends-all') }}
+</div>
+{%- if ref.is_hidden %}
+<p class="muted text-sm mt-0">This category is hidden from pickers and budget lists, but its spending still counts in every total.</p>
+{%- endif %}
+{%- endif %}
+
+<div class="grid grid--4" id="trends-kpis">
+{%- if t.compare %}
+{%- set ch = tr.change %}
+{{ ui.stat((ref.name ~ ' in ' if ref else 'Spent in ') ~ (t.compare.start|month_label), ui.money(ch.current if ch else none, cents=false), sub=tm.change_text(ch, short_month(t.previous))|trim, icon='calendar', id='trend-compare') }}
+{%- else %}
+{{ ui.stat('Last month', ui.money(none), sub='no complete month in this range yet', icon='calendar', id='trend-compare') }}
+{%- endif %}
+{%- if t.current %}
+{%- set sc = tr.so_far_change %}
+{%- set so_far_sub = (ui.money_text(sc.previous, cents=false) ~ ' by ' ~ (t.current_through|date_short) ~ ' (' ~ ('+' if sc.amount > 0 else '') ~ ui.money_text(sc.amount, cents=false) ~ ')') if sc else 'the first month of your history' %}
+{{ ui.stat((t.current.period.start|month_label) ~ ' so far', ui.money(tr.so_far, cents=false), sub=so_far_sub, icon='clock', id='trend-so-far') }}
+{%- endif %}
+{{ ui.stat('Monthly average', ui.money(tr.average, cents=false), sub=('over ' ~ (t.complete_months|pluralize('complete month'))) if tr.average is not none else 'needs one complete month', icon='target', id='trend-average') }}
+{%- if ref %}
+{{ ui.stat('In these ' ~ t.months|length ~ ' months', ui.money(tr.total, cents=false), sub=(tr.counts|sum)|pluralize('charge'), icon='list', id='trend-total') }}
+{%- else %}
+{%- set up = t.biggest_increase %}
+{%- if up %}
+{{ ui.stat('Biggest increase', ui.money(up.change.amount, signed=true, cents=false, tone='neutral'), sub=up.category.name ~ ': ' ~ ui.money_text(up.change.previous, cents=false) ~ ' → ' ~ ui.money_text(up.change.current, cents=false), icon='arrow-up', id='trend-increase') }}
+{%- elif not t.current %}
+{{ ui.stat('In these ' ~ t.months|length ~ ' months', ui.money(tr.total, cents=false), sub='all categories', icon='list', id='trend-total') }}
+{%- endif %}
+{%- endif %}
+</div>
+
+{%- set chart_title = (ref.name ~ ' by month') if ref else 'Spending by month' %}
+{%- set chart_sub = range_label ~ ((' · ' ~ short_month(t.current.period) ~ ' so far') if t.current else '') %}
+{% call ui.card(chart_title, subtitle=chart_sub, id='trends-chart-card') %}
+{% call ui.chart('trends-chart', chart, height=300, label=('Bar chart of ' ~ (ref.name if ref else 'spending by category') ~ ' per month, ' ~ range_label)) %}
+<table><caption>{{ chart_title }}, {{ range_label }}</caption><tbody>
+{%- for m in t.months %}<tr><th scope="row">{{ m.period.start|month_label }}{{ ' (so far)' if m.status == 'current' }}</th><td>{{ ui.money_text(tr.amounts[loop.index0]) if m.has_data else 'no data' }}</td></tr>{% endfor -%}
+</tbody></table>
+{% endcall %}
+{%- if t.current or first.status == 'before' or t.months|selectattr('status', 'equalto', 'first')|list %}
+<p class="trends-footnote muted text-xs">
+{%- if t.current %}* {{ t.current.period.start|month_label }} is in progress.{% endif %}
+{%- for m in t.months if m.status == 'first' %} † Your history starts on {{ t.history_start|date_long }}, so {{ m.period.start|month_label }} is partial.{% endfor %}
+{%- if first.status == 'before' %} Months before {{ t.history_start|date_long }} have no data.{% endif -%}
+</p>
+{%- endif %}
+{% endcall %}
+
+{%- if ref %}
+{% include "trends/_category.html" %}
+{%- else %}
+{% include "trends/_changes.html" %}
+{% include "trends/_grid.html" %}
+{%- endif %}

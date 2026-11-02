@@ -290,3 +290,46 @@ def period_top_merchants(
         include_pending=settings.include_pending_in_budgets,
         limit=limit,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class DaySpending:
+    """Net spending on one day of :func:`daily_spending`."""
+
+    day: dt.date
+    amount: Decimal
+
+
+def daily_spending(session: Session, period: Period) -> list[DaySpending]:
+    """Net spending per day of a budget period, on the same date basis and pending setting as
+    :func:`period_spending` (the dashboard's day-by-day pace).
+
+    Every day of the period is listed, oldest first, days without spending as ``0.00``; the
+    amounts add up to ``period_spending(session, period).total``.
+    """
+    settings = get_app_settings(session)
+    basis = basis_for_mode(settings.budget_period_mode)
+    day = basis_date(basis)
+    query = (
+        select(day.label("day"), func.coalesce(func.sum(v_allocations.c.amount), 0).label("amount"))
+        .select_from(v_allocations)
+        .join(Category, Category.id == v_allocations.c.category_id)
+        .where(
+            *_filters(
+                period.start,
+                period.end,
+                basis,
+                settings.include_pending_in_budgets,
+                ("expense",),
+            )
+        )
+        .group_by(day)
+    )
+    amounts = {r.day: to_money(r.amount) for r in session.execute(query)}
+    return [
+        DaySpending(
+            period.start + dt.timedelta(days=i),
+            amounts.get(period.start + dt.timedelta(days=i), ZERO),
+        )
+        for i in range(period.days)
+    ]

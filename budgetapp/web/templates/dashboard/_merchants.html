@@ -1,0 +1,24 @@
+{#- Top merchants this period (spending.period_top_merchants: same basis and pending rule as the
+    budgets). A name links to the transactions it counts (`merchant=` matches the same
+    expression the totals group by). -#}
+{%- import "components/ui.html" as ui -%}
+{% call ui.card('Top merchants', subtitle=words.this, flush=true, id='dash-merchants') %}
+{%- if d.top_merchants %}
+<div class="table-wrap">
+<table class="table table--compact dash-table" id="dash-merchant-table">
+<thead><tr><th scope="col" class="col-grow">Merchant</th><th scope="col" class="num col-optional-sm">Charges</th><th scope="col" class="num">Spent</th></tr></thead>
+<tbody>
+{%- for m in d.top_merchants %}
+<tr>
+<td class="col-grow"><a class="table__primary dash-link" href="{{ merchant_href(m.merchant) }}">{{ m.merchant }}</a></td>
+<td class="num col-optional-sm">{{ m.transaction_count }}</td>
+<td class="num">{{ ui.money(m.amount) }}</td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{%- else %}
+{{ ui.empty_state('No merchants yet', 'The places you spend most at this ' ~ words.unit ~ ' show up here.', icon='credit-card', compact=true) }}
+{%- endif %}
+{% endcall %}

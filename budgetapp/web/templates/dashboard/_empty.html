@@ -1,0 +1,15 @@
+{#- Nothing to show yet: no transaction exists (nothing linked or imported, or the first sync
+    hasn't brought any). `conn` is the layout's connection status (None when unavailable). -#}
+{%- import "components/ui.html" as ui -%}
+<div class="card" id="dash-empty">
+{%- if conn and conn.state != 'not_linked' %}
+{% call ui.empty_state('Your transactions are on their way', 'Your card is linked, but no transactions have arrived yet. Plaid can take a few minutes to send the first ones; this page fills in after the next sync.', icon='clock') %}
+{{ ui.button('Open Connection', href='/connection', icon='link', variant='primary') }}
+{% endcall %}
+{%- else %}
+{% call ui.empty_state('Nothing to show yet', 'Link your American Express card through Plaid, or import a CSV file of your Amex activity, and this page shows your spending against your budgets, your top categories and merchants, and the days left in the month.', icon='home') %}
+{{ ui.button('Link account', href='/connection', icon='link', variant='primary') }}
+{{ ui.button('Import a CSV file', href='/import', icon='upload') }}
+{% endcall %}
+{%- endif %}
+</div>

@@ -1,0 +1,33 @@
+{#- Annual budgets (BUD-5) as the Budgets page shows them for this period: the year of its end,
+    spending from Jan 1, with the even-pace marker. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "budgets/_macros.html" as bud -%}
+{%- set a = d.annual -%}
+{%- set actions %}{{ ui.button('All budgets', href='/budgets#annual-section', size='sm', variant='ghost', icon='chevron-right', id='dash-annual-all') }}{% endset -%}
+{% call ui.card('Annual budgets · ' ~ a.year, subtitle=('Spending so far this year' if a.as_of >= d.today else 'Spending from Jan 1 through ' ~ (a.as_of|date_long)), actions=actions, id='dash-annual') %}
+{%- if a.lines %}
+<ul class="dash-list" id="dash-annual-lines">
+{%- for entry in a.lines %}
+{%- set c = entry.category %}
+<li class="dash-budget" id="dash-annual-{{ c.id }}">
+<div class="dash-row">
+{{ ui.category_badge(c, href=spent_href(c.id, a.period.start, a.as_of), class='dash-row__name') }}
+<span class="dash-row__value">
+{%- if entry.remaining < 0 %}<span class="text-over">{{ ui.money_text(-entry.remaining) }} over</span>
+{%- else %}{{ ui.money_text(entry.remaining) }} left{% endif -%}
+</span>
+</div>
+{%- if entry.percent_used is not none %}
+{{ ui.progress(entry.percent_used, label=ui.money_text(entry.spent) ~ ' of ' ~ ui.money_text(entry.budget), pace_pct=entry.pace_percent, status=entry.status, size='sm', name=c.name ~ ' annual budget') }}
+{%- else %}
+<div class="dash-budget__none">{{ ui.money_text(entry.spent) }} of {{ ui.money_text(entry.budget) }} · {{ bud.meter(entry.percent_used, entry.status, entry.pace_percent, c.name ~ ' annual budget', entry.remaining) }}</div>
+{%- endif %}
+</li>
+{%- endfor %}
+</ul>
+{%- else %}
+{% call ui.empty_state('No annual budgets', 'Plan yearly costs like the annual fee, travel and gifts with one budget for the whole year.', icon='calendar', compact=true) %}
+{{ ui.button('Add one', href='/budgets#annual-section', icon='plus', size='sm') }}
+{% endcall %}
+{%- endif %}
+{% endcall %}

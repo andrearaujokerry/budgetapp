@@ -1,0 +1,56 @@
+{#- The change from last month per category: the latest month that has ended (t.compare)
+    against the month before (t.previous), plus the month in progress so far. Every category
+    with spending in either month, largest first. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "trends/_macros.html" as tm -%}
+{%- if t.compare %}
+{%- set rows = t.changed %}
+{%- set cmp = short_month(t.compare) %}
+{%- set prev = short_month(t.previous) %}
+{% call ui.card('Change from last month', subtitle=(t.compare.start|month_label) ~ ' compared with ' ~ (t.previous.start|month_label), flush=true, id='trends-changes') %}
+{%- if rows %}
+<div class="table-wrap">
+<table class="table table--compact trends-table" id="trends-change-table">
+<thead><tr>
+<th scope="col" class="col-grow">Category</th>
+<th scope="col" class="num">{{ cmp }}</th>
+<th scope="col" class="num col-optional-sm">{{ prev }}</th>
+<th scope="col" class="num">Change</th>
+{%- if t.current %}<th scope="col" class="num col-optional-md">{{ short_month(t.current.period) }} so far</th>{% endif %}
+<th scope="col" class="num col-optional-lg">Average</th>
+</tr></thead>
+<tbody>
+{%- for c in rows %}
+<tr id="change-{{ c.category.id }}">
+<td class="col-grow"><a class="table__primary trends-link" href="{{ trends_href(c.category.id) }}" aria-label="{{ c.category.name }}{{ ' (hidden)' if c.category.is_hidden }}: month by month">{{ ui.category_badge(c.category) }}</a></td>
+<td class="num"><a class="trends-amount" href="{{ month_href(c.category.id, t.compare) }}" aria-label="{{ ui.money_text(c.change.current) }} on {{ c.category.name }} in {{ t.compare.start|month_label }}: see the transactions">{{ ui.money(c.change.current) }}</a></td>
+<td class="num col-optional-sm">{{ ui.money(c.change.previous) }}</td>
+<td class="num">{{ tm.change(c.change) }}</td>
+{%- if t.current %}<td class="num col-optional-md">{{ ui.money(c.so_far) }}</td>{% endif %}
+<td class="num col-optional-lg">{{ ui.money(c.average) }}</td>
+</tr>
+{%- endfor %}
+</tbody>
+<tfoot><tr>
+<th scope="row" class="col-grow">All spending</th>
+<td class="num">{{ ui.money(t.totals.change.current) }}</td>
+<td class="num col-optional-sm">{{ ui.money(t.totals.change.previous) }}</td>
+<td class="num">{{ tm.change(t.totals.change) }}</td>
+{%- if t.current %}<td class="num col-optional-md">{{ ui.money(t.totals.so_far) }}</td>{% endif %}
+<td class="num col-optional-lg">{{ ui.money(t.totals.average) }}</td>
+</tr></tfoot>
+</table>
+</div>
+{%- else %}
+{{ ui.empty_state('No spending in ' ~ (t.previous.start|month_label) ~ ' or ' ~ (t.compare.start|month_label), 'Months without charges show as $0 in the table below.', icon='trending', compact=true) }}
+{%- endif %}
+{% endcall %}
+{%- else %}
+<div class="card" id="trends-changes">
+{%- if t.history_start > t.through.end %}
+{{ ui.empty_state('Nothing to compare in these months', 'Your history starts on ' ~ (t.history_start|date_long) ~ '. Choose a later month under “Through”.', icon='calendar', compact=true) }}
+{%- else %}
+{{ ui.empty_state('No month to compare yet', 'Your history starts on ' ~ (t.history_start|date_long) ~ '. Once a month has ended, this page compares it with the month before.', icon='calendar', compact=true) }}
+{%- endif %}
+</div>
+{%- endif %}

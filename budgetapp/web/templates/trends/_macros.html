@@ -1,0 +1,40 @@
+{#- Helpers shared by the Trends partials. -#}
+{%- import "components/ui.html" as ui -%}
+
+{#- change(ch, cents=true): a month-over-month change as a signed amount (red up, green down,
+    with an arrow) over its percentage or what happened ("new", "none now"). `ch` is an
+    insights.Change, or none when a month has no data. -#}
+{%- macro change(ch, cents=true) -%}
+{%- if ch is none -%}
+<span class="muted" aria-label="No data to compare">—</span>
+{%- elif ch.kind == 'none' -%}
+<span class="muted">—</span>
+{%- else -%}
+<span class="trend-change trend-change--{{ ch.kind }}">
+{%- if ch.amount > 0 %}{{ ui.icon('arrow-up', size='xs') }}{% elif ch.amount < 0 %}{{ ui.icon('arrow-down', size='xs') }}{% endif -%}
+{{ ui.money(ch.amount, signed=true, cents=cents, tone=('over' if ch.amount > 0 else ('ok' if ch.amount < 0 else 'neutral'))) }}</span>
+<span class="table__secondary trend-change__note">
+{%- if ch.kind == 'new' %}new
+{%- elif ch.kind == 'gone' %}none now
+{%- elif ch.kind == 'same' %}no change
+{%- elif ch.percent is not none %}{{ ch.percent|pct if ch.percent <= 0 else '+' ~ (ch.percent|pct) }}
+{%- endif -%}
+</span>
+{%- endif -%}
+{%- endmacro -%}
+
+{#- change_text(ch, previous_label): the same in words for a tile ("+$571 (+20%) from Sep"). -#}
+{%- macro change_text(ch, previous_label) -%}
+{%- if ch is none -%}nothing to compare with in {{ previous_label }}
+{%- elif ch.kind == 'none' -%}no spending in {{ previous_label }} either
+{%- elif ch.kind == 'new' -%}nothing in {{ previous_label }}
+{%- elif ch.kind == 'same' -%}the same as {{ previous_label }}
+{%- else -%}{{ ui.money_text(ch.amount|abs, cents=false) }} {{ 'more' if ch.amount > 0 else 'less' }} than {{ previous_label }}{% if ch.percent is not none %} ({{ ch.percent|pct if ch.percent <= 0 else '+' ~ (ch.percent|pct) }}){% endif %}
+{%- endif -%}
+{%- endmacro -%}
+
+{#- month_head(m, first): a month column header: "Oct", with the year on January and the
+    first column; the month in progress is marked. -#}
+{%- macro month_head(m, first, short_month) -%}
+<abbr title="{{ m.period.start|month_label }}{{ ' (so far)' if m.status == 'current' }}">{{ short_month(m.period, year=(first or m.period.start.month == 1)) }}</abbr>{% if m.status == 'current' %}<span class="trend-mark" aria-hidden="true">*</span>{% elif m.status == 'first' %}<span class="trend-mark" aria-hidden="true">†</span>{% endif %}
+{%- endmacro -%}
