@@ -69,3 +69,26 @@ def test_focus_lost_in_a_swap_goes_to_the_nearest_container():
     restore = function_body(js, "restoreFocus")
     assert "getElementById(" in restore and ".focus(" in restore
     assert '"h1, h2, h3"' in js and "doc.body" in restore
+
+
+def test_a_failed_save_puts_the_stored_value_back():
+    """A save that fails (5xx, another 4xx, the app unreachable) changes nothing, so the select,
+    switch or amount that triggered it shows the stored value again instead of the new one."""
+    js = source("js/app.js")
+    for event in ("htmx:responseError", "htmx:sendError"):
+        handler = listener(js, event)
+        assert "restoreControls(" in handler, event
+        assert '!== "get"' in handler, event  # a failed search or filter changes no control
+    body = function_body(js, "restoreControls")
+    assert "defaultSelected" in body and "defaultChecked" in body and "defaultValue" in body
+    assert "change" in body  # only controls that save on change, never a whole typed-in form
+
+
+def test_a_failed_load_does_not_say_nothing_was_saved():
+    handler = listener(source("js/app.js"), "htmx:responseError")
+    server = [line for line in handler.splitlines() if "status >= 500" in line]
+    assert len(server) == 2
+    saving = next(line for line in server if '!== "get"' in line)
+    loading = next(line for line in server if '!== "get"' not in line)
+    assert "Nothing was saved" in saving
+    assert "saved" not in loading and "try again" in loading

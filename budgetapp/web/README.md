@@ -152,7 +152,9 @@ the credit colour); see the design-system README §3.2.
   `aria-invalid="true"`, which the form macros' `error=` sets); other 4xx/5xx are not swapped and
   show an error toast (403, 404, 409 and 5xx have their own wording; a 404 for a POST says "That
   action isn't available", for a GET "That item no longer exists"). Polling
-  (`hx-trigger="every …"`) and `data-quiet` requests never toast.
+  (`hx-trigger="every …"`) and `data-quiet` requests never toast. When a POST fails, a control
+  that saves on change (an `hx_post` select or switch, a form with `hx-trigger="change…"`) shows
+  its stored value again.
 - Row edits: `hx_post=…, hx_target="closest tr", hx_swap="outerHTML"`; answer with the new
   `<tr>` (it glows briefly) plus `oob=flash_oob("success", "Saved")`.
 - Keyboard focus: htmx puts it back after a swap only on an element with the same id, so give

@@ -84,25 +84,54 @@
     if (!inFlight) root.classList.remove("is-loading");
   });
 
+  function verbOf(detail) {
+    var config = detail && detail.requestConfig;
+    return String((config && config.verb) || "get").toLowerCase();
+  }
+
+  // A save that failed changed nothing, so a control that saves on change (a row's category,
+  // a switch, a budget amount) shows the stored value again rather than one that isn't saved.
+  // A form saved with a button keeps what was typed, to try again.
+  function restoreControls(elt) {
+    var controls;
+    if (!elt || !elt.tagName) return;
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(elt.tagName)) controls = [elt]; // htmx's default trigger: change
+    else if (elt.tagName === "FORM" && /\bchange\b/.test(elt.getAttribute("hx-trigger") || "")) controls = elt.elements;
+    else return;
+    forEach(controls, function (c) {
+      if (c.tagName === "SELECT") {
+        forEach(c.options, function (o) { o.selected = o.defaultSelected; });
+        updateCategoryDot(c);
+      } else if (c.type === "checkbox" || c.type === "radio") {
+        c.checked = c.defaultChecked;
+      } else if (c.tagName === "TEXTAREA" || (c.tagName === "INPUT" && c.type !== "hidden")) {
+        c.value = c.defaultValue;
+      }
+    });
+  }
+
   // Polling (hx-trigger="every …") and data-quiet requests never raise toasts: a
   // stopped app would otherwise add an alert every few seconds.
   doc.addEventListener("htmx:responseError", function (evt) {
-    if (isQuiet(evt.detail && evt.detail.elt)) return;
-    var xhr = evt.detail && evt.detail.xhr;
-    var status = xhr ? xhr.status : 0;
-    var config = evt.detail && evt.detail.requestConfig;
-    var verb = String((config && config.verb) || "get").toLowerCase();
+    var d = evt.detail || {};
+    var verb = verbOf(d);
+    if (verb !== "get") restoreControls(d.elt);
+    if (isQuiet(d.elt)) return;
+    var status = d.xhr ? d.xhr.status : 0;
     var text;
     if (status === 403) text = "That action was blocked by the app's security check. Reload the page and try again.";
     else if (status === 404 && verb !== "get") text = "That action isn't available. Reload the page and try again.";
     else if (status === 404) text = "That item no longer exists. Reload the page to see the latest data.";
     else if (status === 409) text = "Something changed in the meantime. Reload the page and try again.";
-    else if (status >= 500) text = "Something went wrong (" + status + "). Nothing was saved; the details are in the app's log.";
+    else if (status >= 500 && verb !== "get") text = "Something went wrong (" + status + "). Nothing was saved; the details are in the app's log.";
+    else if (status >= 500) text = "Something went wrong (" + status + ") and nothing was loaded; try again. The details are in the app's log.";
     else text = "The request failed (" + status + ").";
     toast("error", text);
   });
   doc.addEventListener("htmx:sendError", function (evt) {
-    if (isQuiet(evt.detail && evt.detail.elt)) return;
+    var d = evt.detail || {};
+    if (verbOf(d) !== "get") restoreControls(d.elt);
+    if (isQuiet(d.elt)) return;
     toast("error", "Can't reach the app. Is it still running?");
   });
 
