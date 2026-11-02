@@ -3,7 +3,9 @@
 * :func:`period_spending` is the ONLY definition of "spending in a budget period": the Budgets page,
   every "this period" dashboard widget and the budget alerts call it. It reads ``app_settings``:
   the date basis (posting date in statement mode, ``spend_date = COALESCE(authorized_date, date)``
-  in calendar mode) and ``include_pending_in_budgets``.
+  in calendar mode) and ``include_pending_in_budgets``. :func:`periods_spending` is the same for
+  several periods in one query (a rollover chain's earlier periods); ``period_spending`` is it
+  for one period.
 * Only categories of kind ``expense`` count. Charges add; refunds (negative amounts in an expense
   category) subtract (TXN-3). Card payments (``transfer``) and credits/rewards (``income``) never
   count. Hidden categories still count.
@@ -24,6 +26,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from sqlalchemy import Date, case, cast, func, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 
 from budgetapp.models import Category, Transaction, get_app_settings, v_allocations
@@ -124,24 +127,29 @@ def _filters(start: dt.date, end: dt.date, basis: str, include_pending: bool, ki
     return conditions
 
 
+def _category_spending(r) -> CategorySpending:
+    """A result row of :func:`_category_columns` as a :class:`CategorySpending`."""
+    return CategorySpending(
+        category_id=r.category_id,
+        name=r.name,
+        kind=r.kind,
+        color=r.color,
+        icon=r.icon,
+        is_hidden=r.is_hidden,
+        amount=to_money(r.amount),
+        charges=to_money(r.charges),
+        credits=to_money(r.credits),
+        transaction_count=r.transaction_count,
+    )
+
+
+def _largest_first(row: CategorySpending) -> tuple[Decimal, str]:
+    return (-row.amount, row.name.casefold())
+
+
 def _category_rows(session: Session, query) -> list[CategorySpending]:
-    rows = []
-    for r in session.execute(query):
-        rows.append(
-            CategorySpending(
-                category_id=r.category_id,
-                name=r.name,
-                kind=r.kind,
-                color=r.color,
-                icon=r.icon,
-                is_hidden=r.is_hidden,
-                amount=to_money(r.amount),
-                charges=to_money(r.charges),
-                credits=to_money(r.credits),
-                transaction_count=r.transaction_count,
-            )
-        )
-    rows.sort(key=lambda row: (-row.amount, row.name.casefold()))
+    rows = [_category_spending(r) for r in session.execute(query)]
+    rows.sort(key=_largest_first)
     return rows
 
 
@@ -186,14 +194,50 @@ def spending_by_category(
 
 def period_spending(session: Session, period: Period) -> PeriodSpending:
     """THE spending for a budget period (see module docstring). Reads ``app_settings``."""
+    return periods_spending(session, (period,))[(period.start, period.end)]
+
+
+def periods_spending(
+    session: Session, periods: Iterable[Period]
+) -> dict[tuple[dt.date, dt.date], PeriodSpending]:
+    """:func:`period_spending` of several budget periods, read in one query, keyed by
+    ``(start, end)``. The periods must not overlap (budget periods never do).
+
+    Each allocation goes to the last period starting on or before its date (PostgreSQL's
+    ``width_bucket`` over the sorted starts), and only when it isn't after that period's end.
+    """
     settings = get_app_settings(session)
     basis = basis_for_mode(settings.budget_period_mode)
     include_pending = settings.include_pending_in_budgets
-    rows = spending_by_category(
-        session, period.start, period.end, basis=basis, include_pending=include_pending
-    )
-    total = to_money(sum((row.amount for row in rows), Decimal("0")))
-    return PeriodSpending(period, basis, include_pending, tuple(rows), total)
+    ordered = sorted({(p.start, p.end): p for p in periods}.values(), key=lambda p: p.start)
+    for before, after in zip(ordered, ordered[1:], strict=False):
+        if after.start <= before.end:
+            raise ValueError(f"budget periods overlap: {before.label} and {after.label}")
+    found: dict[int, list[CategorySpending]] = {}
+    if ordered:
+        day = basis_date(basis)
+        number = func.width_bucket(day, postgresql.array([p.start for p in ordered]))
+        ends = postgresql.array([p.end for p in ordered])
+        conditions = _filters(
+            ordered[0].start, ordered[-1].end, basis, include_pending, ("expense",)
+        )
+        query = (
+            select(number.label("number"), *_category_columns())
+            .select_from(v_allocations)
+            .join(Category, Category.id == v_allocations.c.category_id)
+            .where(*conditions, day <= ends[number])
+            .group_by(number, Category.id)
+        )
+        for r in session.execute(query):
+            found.setdefault(r.number, []).append(_category_spending(r))
+    result = {}
+    for number, period in enumerate(ordered, start=1):
+        rows = sorted(found.get(number, ()), key=_largest_first)
+        total = to_money(sum((row.amount for row in rows), Decimal("0")))
+        result[(period.start, period.end)] = PeriodSpending(
+            period, basis, include_pending, tuple(rows), total
+        )
+    return result
 
 
 def monthly_spending(

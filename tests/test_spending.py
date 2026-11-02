@@ -167,6 +167,62 @@ class TestPeriodSpending:
         assert period_spending(db, OCT).amount_for(home.id) == D("9.99")
 
 
+class TestPeriodsSpending:
+    """Several periods in one query (a rollover chain): each is exactly its period_spending."""
+
+    def test_each_period_is_its_period_spending(self, db, cats, account):
+        home, dining = cats["Home"], cats["Dining & Drinks"]
+        for date, amount, category in (
+            ("2026-07-31", "1.00", home),
+            ("2026-08-01", "10.00", home),  # first day of August
+            ("2026-08-31", "20.00", dining),  # last day of August
+            ("2026-09-15", "40.00", home),  # in the gap: September isn't asked for
+            ("2026-10-01", "80.00", home),
+            ("2026-10-02", "-5.00", home),
+            ("2026-11-01", "160.00", home),
+        ):
+            make_transaction(db, account, amount=amount, category=category, date=date)
+        aug, oct_ = month_period(2026, 8), OCT
+        result = spending.periods_spending(db, [oct_, aug, month_period(2025, 1)])
+        assert result == {
+            (p.start, p.end): period_spending(db, p) for p in (aug, oct_, month_period(2025, 1))
+        }
+        assert (result[(aug.start, aug.end)].total, result[(oct_.start, oct_.end)].total) == (
+            D("30.00"),
+            D("75.00"),
+        )
+        assert result[(aug.start, aug.end)].categories[0].category_id == dining.id
+        assert spending.periods_spending(db, []) == {}
+
+    def test_statement_cycles_use_the_posting_date(self, db, cats, account):
+        set_app_settings(db, budget_period_mode="statement")
+        make_transaction(
+            db,
+            account,
+            amount="40.00",
+            category=cats["Home"],
+            authorized_date="2026-10-27",
+            date="2026-10-28",
+            posted_date="2026-10-28",
+        )
+        before = Period(dt.date(2026, 9, 28), dt.date(2026, 10, 27), "statement")
+        cycle = Period(dt.date(2026, 10, 28), dt.date(2026, 11, 27), "statement")
+        result = spending.periods_spending(db, [before, cycle])
+        assert (
+            result[(before.start, before.end)].total,
+            result[(cycle.start, cycle.end)].total,
+        ) == (
+            D("0.00"),
+            D("40.00"),
+        )
+
+    def test_overlapping_periods_are_refused(self, db):
+        with pytest.raises(ValueError, match="overlap"):
+            spending.periods_spending(
+                db, [OCT, Period(dt.date(2026, 10, 31), dt.date(2026, 11, 5))]
+            )
+
+
 def test_spending_by_category_kinds(db, cats, account):
     make_transaction(
         db, account, amount="-25.00", category=cats["Credits & Rewards"], date="2026-10-10"

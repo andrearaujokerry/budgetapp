@@ -2,8 +2,9 @@
 
 The one place that says how much budget there is and how much of it is used: the Budgets page,
 the dashboard (DASH) and the budget alerts (ALR) all call it. Spending comes only from
-:func:`budgetapp.services.spending.period_spending` (ARCHITECTURE §6), so the mode's date basis
-and the pending setting apply to every number here.
+:func:`budgetapp.services.spending.period_spending` (ARCHITECTURE §6; a rollover chain's periods
+are read together with ``periods_spending``), so the mode's date basis and the pending setting
+apply to every number here.
 
 **Periods (BUD-2).** :func:`current_period` / :func:`period_for` follow
 ``app_settings.budget_period_mode``: calendar months, or the statement cycles of the card named by
@@ -86,7 +87,12 @@ from budgetapp.models import (
 from budgetapp.money import CENT, MAX_AMOUNT, ZERO, is_cents, parse_money_input, to_money
 from budgetapp.periods import Period
 from budgetapp.services import statements
-from budgetapp.services.spending import PeriodSpending, basis_date, basis_for_mode, period_spending
+from budgetapp.services.spending import (
+    PeriodSpending,
+    basis_date,
+    basis_for_mode,
+    periods_spending,
+)
 
 MONTHLY = "monthly"
 ANNUAL = "annual"
@@ -642,14 +648,25 @@ class _Context:
         self.versions = _load_versions(session)
         self.categories = _expense_categories(session)
         self._spending: dict[tuple[dt.date, dt.date], PeriodSpending] = {}
+        self._previous: dict[Period, Period] = {}
         self._history: dt.date | None = None
         self._history_loaded = False
 
     def spending(self, period: Period) -> PeriodSpending:
-        key = (period.start, period.end)
-        if key not in self._spending:
-            self._spending[key] = period_spending(self.session, period)
-        return self._spending[key]
+        self.prefetch((period,))
+        return self._spending[(period.start, period.end)]
+
+    def prefetch(self, periods: Iterable[Period]) -> None:
+        """Read the spending of the (non-overlapping) periods not read yet, in one query."""
+        missing = [p for p in periods if (p.start, p.end) not in self._spending]
+        if missing:
+            self._spending.update(periods_spending(self.session, missing))
+
+    def previous(self, period: Period) -> Period:
+        """The period before ``period`` (cached: every rollover chain steps through the same)."""
+        if period not in self._previous:
+            self._previous[period] = self.settings.previous(period)
+        return self._previous[period]
 
     def history_start(self) -> dt.date | None:
         """The earliest date with any allocation, on the budget mode's date basis."""
@@ -661,24 +678,21 @@ class _Context:
             self._history_loaded = True
         return self._history
 
-    def spent(self, period: Period, category_id: int) -> Decimal:
-        history = self.history_start()
-        if history is None or period.end < history:
-            return ZERO
-        return self.spending(period).amount_for(category_id)
-
-    def carry_in(self, category_id: int, period: Period, row: BudgetRow) -> Decimal:
-        """BUD-4: what rolls into ``period`` (0 without rollover or in a chain's first period).
+    def rollover_chain(
+        self, category_id: int, period: Period, row: BudgetRow
+    ) -> list[tuple[Period, Decimal]]:
+        """The earlier periods whose leftovers roll into ``period``, newest first, with their
+        budget amounts (empty without rollover or in a chain's first period).
 
         A flagged cycle ends the chain: what is left of a 61-day cycle (a missing statement)
         compares one budget with two cycles of spending, so nothing carries out of it.
         """
-        if not row.rollover:
-            return ZERO
         chain: list[tuple[Period, Decimal]] = []
+        if not row.rollover:
+            return chain
         earlier = period
         for _ in range(MAX_ROLLOVER_PERIODS):
-            earlier = self.settings.previous(earlier)
+            earlier = self.previous(earlier)
             if earlier.flagged:
                 break
             previous = self.versions.active(category_id, earlier.end)
@@ -686,9 +700,15 @@ class _Context:
                 break
             assert previous.amount is not None  # active rows always have one
             chain.append((earlier, previous.amount))
+        return chain
+
+    def carry_in(self, category_id: int, period: Period, row: BudgetRow) -> Decimal:
+        """BUD-4: what rolls into ``period``: the chain's ``available − spent``, oldest first."""
+        chain = self.rollover_chain(category_id, period, row)
+        self.prefetch(earlier for earlier, _ in chain)
         carry = ZERO
         for earlier, amount in reversed(chain):
-            carry = amount + carry - self.spent(earlier, category_id)
+            carry = amount + carry - self.spending(earlier).amount_for(category_id)
         return carry
 
     def annual_ids(self, on: dt.date) -> frozenset[int]:
@@ -719,6 +739,13 @@ def overview(session: Session, period: Period, *, today: dt.date | None = None) 
     spending = ctx.spending(period)
     pace = pace_percent(period, today)
     on = period.end
+    # Every rollover chain's spending in one query (PERF-1), before the lines are folded.
+    ctx.prefetch(
+        earlier
+        for category in ctx.categories.values()
+        if (row := ctx.versions.active(category.id, on)) is not None and row.period == MONTHLY
+        for earlier, _ in ctx.rollover_chain(category.id, period, row)
+    )
 
     lines: list[BudgetLine] = []
     unbudgeted: list[UnbudgetedLine] = []
@@ -953,6 +980,7 @@ def suggestions(
             chosen.append(earlier)
     if not chosen:
         return Suggestions(())
+    ctx.prefetch(chosen)
     annual = ctx.annual_ids(anchor.end)
     totals: dict[int, Decimal] = {}
     overall = ZERO

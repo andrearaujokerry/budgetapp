@@ -8,7 +8,7 @@ import re
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from budgetapp.models import Budget
 from budgetapp.periods import month_period, year_period
@@ -813,6 +813,34 @@ class TestRollover:
         make_budget(db, cats["home"], "10.00", effective_from=day("2010-01-01"), rollover=True)
         carry = line(overview(db, OCT, today=TODAY), cats["home"]).carry_in
         assert carry == D("10.00") * budgets.MAX_ROLLOVER_PERIODS
+
+    def test_a_long_chain_reads_its_spending_in_one_query(self, db, cats, spend):
+        """Review finding (PERF-1): each earlier period of a rollover chain was its own two
+        queries, so the Dashboard and Budgets pages slowed down as the chains grew."""
+        start = day("2023-11-01")
+        for category in (cats["groceries"], cats["dining"], cats["home"]):
+            make_budget(db, category, "100.00", effective_from=start, rollover=True)
+        month = month_period(2023, 11)
+        while month.start < OCT.start:
+            spend(cats["groceries"], "90.00", month.start + dt.timedelta(days=9))
+            month = budgets.next_period(db, month)
+        statements: list[str] = []
+
+        def count(conn, cursor, statement, *args):
+            statements.append(statement)
+
+        connection = db.connection()
+        event.listen(connection, "before_cursor_execute", count)
+        try:
+            short = line(overview(db, month_period(2023, 12), today=TODAY), cats["groceries"])
+            short_count, statements[:] = len(statements), []
+            long = line(overview(db, OCT, today=TODAY), cats["groceries"])
+            long_count = len(statements)
+        finally:
+            event.remove(connection, "before_cursor_execute", count)
+        assert (short.carry_in, long.carry_in) == (D("10.00"), D("350.00"))  # 1 and 35 periods
+        assert line(overview(db, OCT, today=TODAY), cats["home"]).carry_in == D("3500.00")
+        assert long_count <= short_count, statements
 
     def test_rollover_in_statement_mode_steps_through_cycles(self, db, cats, account, spend):
         statement_mode(db, account, "2026-08-27", "2026-09-27", closing_day=27)

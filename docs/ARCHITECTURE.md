@@ -447,8 +447,10 @@ period". It reads `app_settings`: the date basis (posting date in statement mode
 `kind = 'expense'`, per category. Charges add; refunds (negative amounts in an expense
 category) subtract from it (TXN-3). Card payments (`kind = 'transfer'`) and credits/rewards
 (`kind = 'income'`) never count. The Budgets page, every "this period" widget on the dashboard,
-and the budget alerts all call it. Trends always use calendar months by `spend_date`, with the
-same pending setting.
+and the budget alerts all call it. `spending.periods_spending(session, periods)` is the same
+function for several periods read in one query (a rollover chain's earlier periods);
+`period_spending` is it for one period. Trends always use calendar months by `spend_date`, with
+the same pending setting.
 
 The Transactions list's sums (Charges, Credits & payments, Net) add whole amounts, except under a
 category filter: then each row adds what `v_allocations` puts in the chosen categories, so a split
