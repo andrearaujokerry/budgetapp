@@ -82,7 +82,7 @@ class TestChange:
 def test_month_param():
     assert month_param("2026-10") == day("2026-10-01")
     assert month_param(" 2026-10-17 ") == day("2026-10-01")
-    for bad in ("", None, "2026-13", "October", "0099-01", "9999-12", "2026-1"):
+    for bad in ("", None, "2026-13", "October", "0099-01", "1999-12", "9999-12", "2026-1"):
         assert month_param(bad) is None
 
 
@@ -452,6 +452,8 @@ class TestTrends:
         )
         choices = insights.trends(db, today=today).choices
         assert choices[0] == NOV and choices[-1] == month_period(2025, 11)
+        old = insights.trends(db, through=day("2024-02-01"), today=today)
+        assert old.choices[-1] == month_period(2024, 2)  # the month shown stays selectable
 
     def test_one_category(self, db, history):
         t = insights.trends(db, category_id=history["travel"].id, today=day("2026-11-05"))

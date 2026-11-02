@@ -509,7 +509,7 @@ def month_param(text: str | None) -> dt.date | None:
         day = dt.date.fromisoformat(f"{value}-01" if len(value) == 7 else value)
     except ValueError:
         return None
-    if not 1900 <= day.year < 3000:
+    if not 2000 <= day.year < 3000:  # (the app holds nothing older; keeps the picker short)
         return None
     return day.replace(day=1)
 
@@ -670,20 +670,21 @@ def trends(
         complete_months=len(complete),
         history_start=first_day,
         include_pending=include_pending,
-        choices=_choices(first_day, this_month),
+        choices=_choices(first_day, this_month, last),
         selected=selected,
         selected_ref=selected_ref,
         trimmed=start > 1,
     )
 
 
-def _choices(first_day: dt.date | None, this_month: Period) -> tuple[Period, ...]:
+def _choices(first_day: dt.date | None, this_month: Period, shown: Period) -> tuple[Period, ...]:
     """The months Trends can end with, newest first: this month back to the history's first
-    month (at least the last 12 months)."""
+    month (at least the last 12 months, and at least back to the month shown)."""
     floor_year, floor_month = periods.add_months(
         this_month.start.year, this_month.start.month, -(DEFAULT_SPAN - 1)
     )
     floor = dt.date(floor_year, floor_month, 1)
     if first_day is not None and first_day < floor:
         floor = first_day
+    floor = min(floor, shown.start)
     return tuple(reversed(periods.months_between(floor, this_month.start)))
