@@ -20,6 +20,7 @@ from budgetapp.services.categorize import (
     system_category_id,
 )
 from budgetapp.services.userstate import UserState
+from tests.bounded import run_bounded
 from tests.factories import (
     card_payments,
     get_category,
@@ -240,6 +241,56 @@ class TestRuleMatching:
 
     def test_a_rule_without_conditions_matches_nothing(self):
         assert not rule_matches(Rule(category_id=1, match_type="contains"), txn())
+
+
+class TestRegexTimeLimit:
+    """A regex rule can't freeze the app. Python's ``re`` has no time limit, and a pattern such as
+    ``(.+)+X`` backtracked for minutes holding the GIL, so every request waited."""
+
+    @pytest.mark.parametrize(
+        ("pattern", "text"),
+        [
+            (r"(.+)+X", "UBER *TRIP HELP.UBER.COM CA"),
+            (r"^(.*\s*)*Z$", "UBER *TRIP HELP.UBER.COM CA"),
+            (r"^(a|aa)+$", "a" * 60 + "!"),  # too slow even for the regex package
+        ],
+    )
+    def test_a_runaway_pattern_gives_up_and_then_matches_nothing(self, pattern, text):
+        out = run_bounded(
+            f"""
+            import time
+            from budgetapp.services.categorize import text_matches
+            start = time.monotonic()
+            first = text_matches({pattern!r}, {text!r}, "regex")
+            middle = time.monotonic()
+            again = text_matches({pattern!r}, {text!r}, "regex")
+            print(first, again, middle - start, time.monotonic() - middle)
+            """
+        )
+        assert out is not None, f"{pattern!r} ran for over 5 s"
+        first, again, took, took_again = out.split()
+        assert (first, again) == ("False", "False")
+        assert float(took) < 1 and float(took_again) < 0.01
+
+    @pytest.mark.parametrize("field", ["merchant_pattern", "description_pattern"])
+    def test_saving_refuses_a_pattern_that_runs_too_long(self, db, field):
+        with pytest.raises(RuleValidationError) as info:
+            categorize.validate_rule(
+                db,
+                category_id=get_category(db, "Home").id,
+                match_type="regex",
+                **{field: r"^(a|aa)+$"},
+            )
+        assert info.value.errors == {field: categorize.REGEX_TOO_SLOW}
+
+    def test_a_quick_pattern_is_still_fine(self, db):
+        values = categorize.validate_rule(
+            db,
+            category_id=get_category(db, "Home").id,
+            match_type="regex",
+            merchant_pattern=r"^(uber|lyft)\b.*(trip|ride)?",
+        )
+        assert values["merchant_pattern"] == r"^(uber|lyft)\b.*(trip|ride)?"
 
 
 class TestRefundRule:

@@ -32,7 +32,7 @@ from tests.factories import make_item
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 OLD_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
 NOW = dt.datetime(2026, 10, 29, 15, 0, tzinfo=dt.UTC)
-USER = "andre"
+USER = "testuser"
 ALL_ITEMS = (
     app_secrets.PLAID_CLIENT_ID,
     "plaid.secret.sandbox",

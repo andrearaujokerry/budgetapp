@@ -22,7 +22,8 @@ touch your money. This page lists what protects it, and the few things that are 
   names.
 - Anything that changes data must come from the app's own pages. Requests that another website
   starts are refused, except a plain link to a page, so a website can't submit forms to the app,
-  embed it, or load your pages in the background to learn about them.
+  embed it, or load your pages in the background to learn about them. A link from another
+  website to the new-rule form opens it blank.
 - Every page has a strict Content Security Policy: no scripts or styles from anywhere else (Plaid's
   window on the Connection page is the one exception), no embedding in other sites, and pages are
   never cached.

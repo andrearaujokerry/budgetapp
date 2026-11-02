@@ -237,7 +237,8 @@ Charges no rule matches go by Plaid's or Amex's category (above).
   regular expression; upper or lower case and extra spaces don't matter), an optional amount range
   (charges are positive, credits negative) and an optional card. Every condition you fill in must
   match. The form previews the past transactions the rule matches; tick **Also apply to past
-  transactions** to change them too.
+  transactions** to change them too. A regular expression that takes too long to check (a repeat
+  inside a repeat, like `(a|aa)+`) is refused: simplify it.
 - **Move up** and **Move down** change the order; the switch turns a rule off (it is kept but
   categorizes nothing); **Edit** and **Delete** do what they say.
 - Rules never touch two things: card payments always go to Card Payments, and a category you set

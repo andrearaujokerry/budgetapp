@@ -30,6 +30,11 @@ Existing rows: a user edit (``category_source='user'``) is never overridden by
 Carried user state: every path that gives a row the user state of the row it replaces
 (pending → posted, tombstones, unlinked replacements, CSV pairing) calls
 :func:`apply_carried_state`, so the precedence above never depends on call order.
+
+Regex rules run on the ``regex`` package, not ``re``, because a search can be given a time limit:
+a pattern such as ``^(a|aa)+$`` backtracks for ever, and while ``re`` runs it holds the GIL and
+freezes the whole app. One search may take :data:`REGEX_TIMEOUT`; a pattern that runs past it
+matches nothing from then on (logged once) and is refused when saved or previewed.
 """
 
 from __future__ import annotations
@@ -37,11 +42,13 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import functools
+import logging
 import re
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Protocol
 
+import regex
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -57,6 +64,9 @@ from budgetapp.models import (
 from budgetapp.money import to_money
 from budgetapp.services import userstate
 from budgetapp.services.userstate import UserState
+from budgetapp.textutil import strip_control_chars
+
+log = logging.getLogger(__name__)
 
 PAYMENT_PFC_DETAILED = frozenset(
     {"LOAN_PAYMENTS_CREDIT_CARD_PAYMENT", "LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT"}
@@ -71,6 +81,20 @@ FEE_CODES = frozenset(
     {"late fee", "membership fee", "returned item fee", "bank charge", "interest"}
 )
 MAX_PATTERN_LENGTH = 300
+#: Seconds one regex rule may search one text (real patterns take microseconds).
+REGEX_TIMEOUT = 0.1
+REGEX_TOO_SLOW = (
+    "This regular expression takes too long to check. Simplify it: avoid a repeat inside a"
+    " repeat, like (a|aa)+."
+)
+#: Texts a regex rule is tried on before it is saved or previewed, so a runaway pattern is refused
+#: even before any transaction shows it.
+_REGEX_PROBES = (
+    "a" * 40 + "!",
+    "1" * 40 + "!",
+    " ".join(["word"] * 20) + "!",
+    "UBER *TRIP HELP.UBER.COM CA " * 3,
+)
 CHANGE_SAMPLE_LIMIT = 200
 #: Suffix of mapping keys tried first for negative amounts, e.g. ``"Fees & Adjustments|credit"``.
 CREDIT_KEY_SUFFIX = "|credit"
@@ -118,24 +142,53 @@ def normalize_text(value: str | None) -> str:
     return " ".join(value.split()).casefold() if value else ""
 
 
+@dataclass(slots=True)
+class _Regex:
+    compiled: regex.Pattern[str]
+    #: Set when a search ran past ``REGEX_TIMEOUT``: the pattern then matches nothing at once.
+    too_slow: bool = False
+
+    def search(self, text: str) -> bool:
+        if self.too_slow:
+            return False
+        try:
+            return self.compiled.search(text, timeout=REGEX_TIMEOUT) is not None
+        except TimeoutError:
+            self.too_slow = True
+            log.warning(
+                "A regex rule pattern took over %s s on one transaction; it matches nothing"
+                " until the app restarts. Simplify it on the Rules page: %r",
+                REGEX_TIMEOUT,
+                self.compiled.pattern,
+            )
+            return False
+
+
 @functools.lru_cache(maxsize=512)
-def _compile(pattern: str) -> re.Pattern[str] | None:
+def _compile(pattern: str) -> _Regex | None:
     try:
-        return re.compile(pattern, re.IGNORECASE)
-    except re.error:
+        return _Regex(regex.compile(pattern, regex.IGNORECASE | regex.V0))
+    except regex.error:
         return None
+
+
+def regex_too_slow(pattern: str | None) -> bool:
+    """True when ``pattern`` (a valid regex) ran past :data:`REGEX_TIMEOUT` in this process."""
+    compiled = _compile(pattern) if pattern else None
+    return compiled is not None and compiled.too_slow
 
 
 def text_matches(pattern: str, value: str | None, match_type: str) -> bool:
     """Case-insensitive ``contains`` / ``equals`` / ``starts_with`` / ``regex`` match.
 
-    Whitespace runs are collapsed on both sides first (also for ``regex``, which uses ``search``).
+    Whitespace runs are collapsed on both sides first (also for ``regex``, which uses ``search``
+    with a time limit: see the module docstring).
     """
     if not pattern or value is None:
         return False
     if match_type == "regex":
         compiled = _compile(pattern)
-        return compiled is not None and compiled.search(" ".join(value.split())) is not None
+        return compiled is not None and compiled.search(" ".join(value.split()))
     p, v = normalize_text(pattern), normalize_text(value)
     if match_type == "contains":
         return p in v
@@ -535,7 +588,7 @@ def recategorize(
 def _clean_pattern(value: str | None) -> str | None:
     if value is None:
         return None
-    cleaned = value.strip()
+    cleaned = strip_control_chars(value).strip()
     return cleaned or None
 
 
@@ -583,9 +636,17 @@ def validate_rule(
             errors[field] = f"Keep the pattern under {MAX_PATTERN_LENGTH} characters."
         elif match_type == "regex":
             try:
-                re.compile(pattern)
-            except re.error as exc:
+                regex.compile(pattern, regex.IGNORECASE | regex.V0)
+            except regex.error as exc:
                 errors[field] = f"Not a valid regular expression: {exc}."
+            else:
+                # A runaway pattern times out on a probe (at most once: then it gives up at once),
+                # or already did on a transaction.
+                compiled = _compile(pattern)
+                for probe in _REGEX_PROBES:
+                    compiled.search(probe)
+                if compiled.too_slow:
+                    errors[field] = REGEX_TOO_SLOW
     low = _clean_amount(amount_min, "amount_min", errors)
     high = _clean_amount(amount_max, "amount_max", errors)
     if low is not None and high is not None and low > high:
@@ -659,7 +720,7 @@ def create_rule(
         account_id=account_id,
     )
     rule = Rule(
-        name=(name or "").strip() or None,
+        name=strip_control_chars(name).strip() or None,
         priority=priority,
         is_active=is_active,
         is_system=is_system,

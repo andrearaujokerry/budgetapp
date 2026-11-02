@@ -3,9 +3,10 @@
 * ``GET /rules``: the rules in run order (conditions, category, transactions, on/off, move up or
   down, edit, delete) and the re-apply panel.
 * ``GET /rules/new`` (fields can be prefilled from the query string, e.g.
-  ``?merchant_pattern=UBER&category_id=5``) · ``POST /rules``; ``GET /rules/{id}/edit`` ·
-  ``POST /rules/{id}``. The form previews matching past transactions as you type
-  (``GET /rules/preview``, HTMX, debounced).
+  ``?merchant_pattern=UBER&category_id=5``, but only from the app's own pages or a typed
+  address: a link from another website opens a blank form) · ``POST /rules``;
+  ``GET /rules/{id}/edit`` · ``POST /rules/{id}``. The form previews matching past transactions
+  as you type (``GET /rules/preview``, HTMX, debounced).
 * ``POST /rules/{id}/active`` · ``/move`` · ``/delete``: HTMX gets the row or the list plus a
   toast; plain posts are redirected.
 * ``POST /rules/reapply``: ``action=preview`` (a dry run: counts and examples) then
@@ -36,6 +37,7 @@ from budgetapp.services.rules import (
 )
 from budgetapp.web.deps import FormDep, NotifierDep, SessionDep
 from budgetapp.web.flash import flash_oob, redirect
+from budgetapp.web.security import SAFE_FETCH_SITES
 from budgetapp.web.templating import is_htmx, render
 
 router = APIRouter()
@@ -263,9 +265,18 @@ def _new_draft(session: Session, query: Any) -> RuleDraft:
     return RuleDraft.from_form({**defaults, **fields})
 
 
+def _from_another_site(request: Request) -> bool:
+    """The browser says another website sent this navigation (ARCHITECTURE §9)."""
+    sites = [s.strip().lower() for s in request.headers.getlist("sec-fetch-site")]
+    return any(site not in SAFE_FETCH_SITES for site in sites)
+
+
 @router.get("/rules/new")
 def new_rule(request: Request, session: SessionDep) -> Response:
-    draft = _new_draft(session, request.query_params)
+    # Any website can link here, so its query string fills nothing and previews nothing: the
+    # preview runs the pattern on every past transaction.
+    query = {} if _from_another_site(request) else request.query_params
+    draft = _new_draft(session, query)
     return _page(request, "rules/form.html", _form_context(session, draft))
 
 

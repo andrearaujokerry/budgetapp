@@ -48,6 +48,7 @@ from budgetapp.services import sync as sync_service
 from budgetapp.services.background import BackgroundJobs
 from budgetapp.services.notify import Notifier
 from budgetapp.services.status import connection_status
+from budgetapp.textutil import has_control_chars
 from budgetapp.web.deps import (
     FormDep,
     NotifierDep,
@@ -691,7 +692,10 @@ def attach(request: Request, session: SessionDep, form: FormDep) -> Response:
 @router.post("/connection/lost-edits/{plaid_transaction_id}/dismiss")
 def dismiss_lost_edit(request: Request, plaid_transaction_id: str, session: SessionDep) -> Response:
     """Forget edits that found no replacement charge ("edits we couldn't carry over")."""
-    if not linking.dismiss_lost_edit(session, plaid_transaction_id):
+    # No Plaid id has a control character (and PostgreSQL refuses NUL in a query).
+    if has_control_chars(plaid_transaction_id) or not linking.dismiss_lost_edit(
+        session, plaid_transaction_id
+    ):
         raise HTTPException(404)
     session.commit()
     text = "Dismissed. Those edits won't be offered again."
