@@ -163,9 +163,9 @@ Plaid window adds them to the same connection.
 The access token in Keychain is your connection. If it is ever lost, the only way back without
 using another connection is a copy. Once, after linking: open **Keychain Access**, search for
 `budgetapp`, open the item whose account is `plaid.access_token.production`, tick **Show
-password** and copy the value into your password manager. Don't change the item there. Never put it anywhere else. With that copy,
-`./run setup --env production --access-token` can restore it at any time; the app checks it with
-Plaid before saving.
+password** and copy the value into your password manager. Don't change the item there, and
+never put the token anywhere else. With that copy, `./run setup --env production --access-token`
+can restore it at any time; the app checks it with Plaid before saving.
 
 ## 5. Import older history
 

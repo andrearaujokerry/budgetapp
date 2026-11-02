@@ -56,8 +56,9 @@ command line.)
    cancels and changes nothing.
 3. It refuses a backup of the other environment, and one made by a newer version of the app.
 4. It never interrupts a running sync: if one is running, it changes nothing and asks you to try
-   again in a few minutes. A sync that starts during the restore is skipped until the next run. In production it also
-   stops the web, sync and backup agents for the duration and starts them again afterwards.
+   again in a few minutes. A sync that starts during the restore is skipped until the next run.
+   In production it also stops the web, sync and backup agents for the duration and starts them
+   again afterwards.
 5. It makes a **safety copy** of the data you are about to replace, named
    `…-pre-restore.dump` in the same folder. The newest 5 safety copies are kept, separately from
    the 30 backups.

@@ -92,7 +92,7 @@ Run them from this folder. `./run <command> --help` explains each one.
 | `./run setup --env production --access-token` | Re-enter a saved production access token (for example from your password manager) |
 | `./run serve` | Only the Sandbox web server, no migration and no browser (`--demo NAME [--port N]` for demo data) |
 | `./run demo create NAME` | Make a demo database with realistic made-up data (`demo list`, `demo drop NAME`) |
-| `./run sync` | Sync now from Terminal |
+| `./run sync` | Sync every connection now (what the agent does; the Sync now button also asks Plaid to refresh first) |
 | `./run import-csv FILE` | Import an Amex CSV download (`--dry-run` previews it, `--account ID` picks the account) |
 | `./run recategorize` | Re-apply rules and category mappings to past transactions (`--since`, `--only-uncategorized`, `--dry-run`) |
 | `./run backup` | Back up the database now (add `--env production` for your real data) |
