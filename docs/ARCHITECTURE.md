@@ -511,8 +511,12 @@ applies.
    nothing: same account, amount within `max($1, 20%)`, `COALESCE(authorized_date, date)` within
    7 days, similar description; best score first; posted candidates preferred for a pending
    source. The match inherits the state and the tombstone records `consumed_by_transaction_id`.
-   Then unconsumed tombstones without user state are matched to the rows still unmatched by the
-   same rules, only to record `consumed_by_transaction_id`: the row is the same charge (a posting
+   A pending row with user state that this batch removed and no inserted row took is then
+   matched the same way to posted rows stored by an earlier sync in the last 30 days that name no
+   pending row, have no user state and replace nothing (Plaid can list a posting that doesn't
+   name its pending row one sync before it removes the pending row). Then unconsumed tombstones
+   without user state are matched to the rows inserted in this batch still unmatched by the same
+   rules, only to record `consumed_by_transaction_id`: the row is the same charge (a posting
    Plaid didn't link, a re-delivery after account churn), not a new one (section 11, ALR-3).
 6. **Reconciliation** with CSV rows (below), then the cursor update.
 

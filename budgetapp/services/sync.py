@@ -44,7 +44,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from budgetapp import clock, db, secrets
 from budgetapp.config import Settings
@@ -766,9 +766,12 @@ class _Applier:
         this batch inserted that replace nothing yet, matched one-to-one. Tombstones with edits go
         first and hand their edits over; then those without edits are matched only to record the
         replacement (``consumed_by_transaction_id``) — so the row is known as the same charge.
+        A pending row with edits that this batch removed and no row of it replaces is also
+        offered the postings stored earlier (:meth:`stored_postings`): Plaid can list a posting
+        that doesn't name its pending row one sync before it removes the pending row.
         Returns how many rows inherited edits."""
         candidates = [t for t in self.inserted if id(t) not in self.continued]
-        if not candidates:
+        if not candidates and not self.deleted:
             return 0
         edited: list[TransactionTombstone] = []
         plain: list[TransactionTombstone] = []
@@ -788,6 +791,18 @@ class _Applier:
             self.continued.add(id(txn))
             self._note_raise(txn, tomb.plaid_transaction_id, tomb.pending, tomb.amount)
             carried += 1
+        late = [
+            t
+            for t in edited
+            if t.pending
+            and t.consumed_by_transaction_id is None
+            and t.plaid_transaction_id in self.deleted
+        ]
+        for tomb, txn in match_replacements(late, self.stored_postings(late)) if late else ():
+            # no _note_raise: the posting was a new charge (ALR-3) when its own sync stored it
+            apply_carried_state(self.categorizer, txn, userstate.from_json(tomb.user_state))
+            tomb.consumed_by_transaction_id = txn.id
+            carried += 1
         rest = [t for t in candidates if id(t) not in self.continued]
         for tomb, txn in match_replacements(plain, rest) if rest else ():
             tomb.consumed_by_transaction_id = txn.id
@@ -795,6 +810,33 @@ class _Applier:
             self._note_raise(txn, tomb.plaid_transaction_id, tomb.pending, tomb.amount)
         self.s.flush()
         return carried
+
+    def stored_postings(self, tombs: Sequence[TransactionTombstone]) -> list[Transaction]:
+        """Posted Plaid rows an earlier sync stored in the last 30 days that could still be the
+        posting of one of ``tombs`` (pending rows removed now): on their accounts, spend dates
+        within 7 days, naming no pending row, no edits of their own and replacing nothing."""
+        days = [t.authorized_date or t.date for t in tombs]
+        reach = dt.timedelta(days=REPLACEMENT_MAX_DAYS)
+        replaced = select(TransactionTombstone.plaid_transaction_id).where(
+            TransactionTombstone.consumed_by_transaction_id == Transaction.id
+        )
+        rows = self.s.scalars(
+            select(Transaction)
+            .where(
+                Transaction.source == "plaid",
+                Transaction.account_id.in_({t.account_id for t in tombs}),
+                Transaction.pending.is_(False),
+                Transaction.pending_transaction_id.is_(None),
+                Transaction.created_at >= self.now - REPLACEMENT_WINDOW,
+                func.coalesce(Transaction.authorized_date, Transaction.date).between(
+                    min(days) - reach, max(days) + reach
+                ),
+                ~replaced.exists(),
+            )
+            .options(selectinload(Transaction.splits))
+        )
+        inserted = {id(t) for t in self.inserted}
+        return [t for t in rows if id(t) not in inserted and userstate.capture(t) is None]
 
     # ---------------------------------------------------------------- history (CSV cutover)
 

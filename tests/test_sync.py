@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import func, select, text
+from sqlalchemy import update as sa_update
 
 from budgetapp import db as app_db
 from budgetapp import periods
@@ -30,6 +31,7 @@ from budgetapp.services import (
     alerts,
     backup,
     csv_import,
+    linking,
     reconcile,
     spending,
     statements,
@@ -1495,6 +1497,96 @@ def test_a_posted_row_replaces_a_pending_row_plaid_has_not_removed_yet(linked, f
     fake_plaid.remove_transaction(linked.fake_item, pending["transaction_id"])  # Plaid catches up
     late = linked.sync()
     assert (late.added, late.removed) == (0, 0) and len(linked.rows()) == 1
+
+
+def edited_pending_then_unlinked_posting(linked, fake_plaid, db, **posted_fields: Any):
+    """A pending $31.00 charge the user edited, then its posting without
+    ``pending_transaction_id`` one sync before Plaid removes the pending row."""
+    pending = fake_plaid.add_pending(linked.fake_item, amount="31.00", merchant_name="Shake Shack")
+    linked.sync()
+    groceries = get_category(db, "Groceries")
+    edit(db, linked.row(pending["transaction_id"]), category=groceries, notes="Burgers")
+    fields = {"amount": "31.00", "merchant_name": "Shake Shack", **posted_fields}
+    posted = fake_plaid.add_transaction(linked.fake_item, **fields)
+    linked.sync()
+    assert len(linked.rows()) == 2  # both listed for now
+    return pending, posted, groceries
+
+
+def test_an_unlinked_posting_listed_before_its_pending_row_is_removed_inherits_the_edits(
+    linked, fake_plaid, db
+):
+    """Final review reqs-4: only rows inserted in the removal's own sync were offered, so the
+    posting kept its own category and the edits went to "Edits we couldn't carry over"."""
+    pending, posted, groceries = edited_pending_then_unlinked_posting(linked, fake_plaid, db)
+    fake_plaid.remove_transaction(linked.fake_item, pending["transaction_id"])
+    out = linked.sync()
+    row = linked.row(posted["transaction_id"])
+    assert (row.notes, row.category_id, row.category_source) == ("Burgers", groceries.id, "user")
+    assert linked.tombstone(pending["transaction_id"]).consumed_by_transaction_id == row.id
+    assert linking.lost_edits(db) == []
+    # the posting was already announced as a new charge when it arrived: nothing new now
+    assert (out.inserted_transaction_ids, out.pending_raises) == ((), ())
+
+
+def test_a_stored_posting_with_edits_of_its_own_keeps_them_when_the_pending_row_goes(
+    linked, fake_plaid, db
+):
+    pending, posted, _ = edited_pending_then_unlinked_posting(linked, fake_plaid, db)
+    edit(db, linked.row(posted["transaction_id"]), notes="Mine")
+    fake_plaid.remove_transaction(linked.fake_item, pending["transaction_id"])
+    linked.sync()
+    assert linked.row(posted["transaction_id"]).notes == "Mine"
+    assert linked.tombstone(pending["transaction_id"]).consumed_by_transaction_id is None
+
+
+def test_a_stored_posting_older_than_the_replacement_window_is_not_matched(linked, fake_plaid, db):
+    pending, posted, _ = edited_pending_then_unlinked_posting(linked, fake_plaid, db)
+    db.execute(
+        sa_update(Transaction)
+        .where(Transaction.plaid_transaction_id == posted["transaction_id"])
+        .values(created_at=NOW - sync.REPLACEMENT_WINDOW - dt.timedelta(hours=1))
+    )
+    fake_plaid.remove_transaction(linked.fake_item, pending["transaction_id"])
+    linked.sync()
+    assert linked.row(posted["transaction_id"]).notes is None
+    assert linked.tombstone(pending["transaction_id"]).consumed_by_transaction_id is None
+
+
+def test_a_stored_posting_that_already_replaced_a_charge_is_not_offered_again(
+    linked, fake_plaid, db
+):
+    first = fake_plaid.add_pending(linked.fake_item, amount="20.00", merchant_name="Blue Bottle")
+    second = fake_plaid.add_pending(linked.fake_item, amount="20.00", merchant_name="Blue Bottle")
+    linked.sync()
+    edit(db, linked.row(second["transaction_id"]), notes="Second")
+    fake_plaid.remove_transaction(linked.fake_item, first["transaction_id"])
+    posted = fake_plaid.add_transaction(
+        linked.fake_item, amount="20.00", merchant_name="Blue Bottle"
+    )
+    linked.sync()
+    row = linked.row(posted["transaction_id"])
+    assert linked.tombstone(first["transaction_id"]).consumed_by_transaction_id == row.id
+    fake_plaid.remove_transaction(linked.fake_item, second["transaction_id"])
+    linked.sync()
+    assert linked.row(posted["transaction_id"]).notes is None
+    assert linked.tombstone(second["transaction_id"]).consumed_by_transaction_id is None
+
+
+def test_the_edits_of_a_removed_posted_charge_never_move_to_an_older_row(linked, fake_plaid, db):
+    older = fake_plaid.add_transaction(
+        linked.fake_item, amount="31.00", merchant_name="Shake Shack"
+    )
+    linked.sync()
+    charge = fake_plaid.add_transaction(
+        linked.fake_item, amount="31.00", merchant_name="Shake Shack"
+    )
+    linked.sync()
+    edit(db, linked.row(charge["transaction_id"]), notes="Burgers")
+    fake_plaid.remove_transaction(linked.fake_item, charge["transaction_id"])  # reversed
+    linked.sync()
+    assert linked.row(older["transaction_id"]).notes is None
+    assert linked.tombstone(charge["transaction_id"]).consumed_by_transaction_id is None
 
 
 def test_edits_never_jump_between_a_charge_and_a_credit(linked, fake_plaid, db):
