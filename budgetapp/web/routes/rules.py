@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from budgetapp.models import Account, Rule, system_category
-from budgetapp.services import categories, rules
+from budgetapp.services import alerts, categories, rules
 from budgetapp.services.categories import CategoryRef
 from budgetapp.services.categorize import RecategorizeResult, RuleValidationError
 from budgetapp.services.rules import (
@@ -34,7 +34,7 @@ from budgetapp.services.rules import (
     RuleDraft,
     RuleNotFound,
 )
-from budgetapp.web.deps import FormDep, SessionDep
+from budgetapp.web.deps import FormDep, NotifierDep, SessionDep
 from budgetapp.web.flash import flash_oob, redirect
 from budgetapp.web.templating import is_htmx, render
 
@@ -352,7 +352,9 @@ def update_rule(request: Request, rule_id: int, session: SessionDep, form: FormD
 
 
 @router.post("/rules/reapply")
-def reapply(request: Request, session: SessionDep, form: FormDep) -> Response:
+def reapply(
+    request: Request, session: SessionDep, form: FormDep, notifier: NotifierDep
+) -> Response:
     scope_key = str(form.get("scope", "all"))
     since = str(form.get("since", "")).strip()
     try:
@@ -367,6 +369,7 @@ def reapply(request: Request, session: SessionDep, form: FormDep) -> Response:
         )
     if form.get("action") == "apply":
         result = rules.reapply(session, scope, dry_run=False)
+        alerts.evaluate_budgets(session, notifier)  # ALR-1: categories changed
         session.commit()
         return redirect(request, "/rules", "success", _reapplied_message(result))
     result = rules.reapply(session, scope, dry_run=True)

@@ -39,6 +39,7 @@ from budgetapp.models import (
 from budgetapp.money import ZERO, format_money
 from budgetapp.periods import Period, month_of, previous_period, year_of
 from budgetapp.services import userstate
+from budgetapp.services.alerts import budget_key
 from budgetapp.services.categorize import Categorizer, apply_decision
 from budgetapp.services.spending import period_spending
 
@@ -398,7 +399,7 @@ def budget_alerts(
         for threshold in thresholds:
             if spent <= 0 or spent < available * threshold / 100:
                 continue
-            key = f"budget:{category_id or 'overall'}:{period.start.isoformat()}:{threshold}"
+            key = budget_key(category_id, period, threshold)
             label = "your overall budget" if category_id is None else name
             when = "this year" if period.kind == "year" else f"in {period.label}"
             if threshold >= 100:

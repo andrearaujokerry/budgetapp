@@ -21,7 +21,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from budgetapp.money import format_money
-from budgetapp.services import categories
+from budgetapp.services import alerts, categories
 from budgetapp.services.categories import (
     COLOR_NAMES,
     KIND_HELP,
@@ -33,7 +33,7 @@ from budgetapp.services.categories import (
     CategoryRef,
     MappingError,
 )
-from budgetapp.web.deps import FormDep, SessionDep
+from budgetapp.web.deps import FormDep, NotifierDep, SessionDep
 from budgetapp.web.flash import flash_oob, redirect
 from budgetapp.web.templating import is_htmx, render
 
@@ -408,7 +408,9 @@ def merge_preview(
 
 
 @router.post("/categories/{category_id:int}/merge")
-def merge(request: Request, category_id: int, session: SessionDep, form: FormDep) -> Response:
+def merge(
+    request: Request, category_id: int, session: SessionDep, form: FormDep, notifier: NotifierDep
+) -> Response:
     source = _get_category(session, category_id)
     target_id = _target_id(form.get("target_id"))
     try:
@@ -421,6 +423,7 @@ def merge(request: Request, category_id: int, session: SessionDep, form: FormDep
             return _page(request, "categories/_merge_form.html", {"m": m}, status_code=422)
         m = _merge_context(session, source, target_id, errors=err.errors, in_dialog=False)
         return _page(request, "categories/merge.html", {"m": m}, status_code=422)
+    alerts.evaluate_budgets(session, notifier)  # ALR-1: categories changed
     session.commit()
     moved = result.counts.transactions
     detail = f": {moved:,} transaction{'s' if moved != 1 else ''} moved" if moved else ""
