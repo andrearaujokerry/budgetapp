@@ -1,0 +1,9 @@
+# Build tools for the app itself (pyproject's build-system, frozen with Python 3.14). Production
+# installs them next to requirements.txt and builds with --no-build-isolation, so an upgrade
+# downloads nothing once these are in place (./run live works offline).
+hatchling==1.33.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.7.0
+tomlkit==0.15.2
+trove-classifiers==2026.9.21.13

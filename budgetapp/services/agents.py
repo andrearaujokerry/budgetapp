@@ -7,8 +7,10 @@ lives, so production always runs a NON-editable install in
 * :func:`upgrade_install` is the only way production code changes: refuse a dirty tree → export
   the commit (``git archive``) into a private temporary folder → stop the web, sync and backup
   agents that are loaded → back up the production database (a ``…-pre-upgrade.dump`` copy, kept
-  apart from the nightly backups) → ``pip install -r requirements.txt`` then
-  ``pip install --no-deps`` from that export into the install → run the migrations FROM THE
+  apart from the nightly backups) → ``pip install -r requirements.txt -r requirements-build.txt``
+  then ``pip install --no-deps --no-build-isolation`` from that export into the install (the
+  build tools are pinned and installed, so nothing is downloaded once the dependencies are in
+  place: upgrades work offline) → run the migrations FROM THE
   NEW INSTALL while holding the sync lock → write the install stamp (the git commit, which
   ``doctor`` compares with the repository) → start the agents again. The install is built from
   the commit itself, never from the working tree, so a file saved during the upgrade can't
@@ -16,7 +18,9 @@ lives, so production always runs a NON-editable install in
   again (best effort) before the error is raised.
 * :func:`launch_production` is ``./run live``: upgrade when the stamp differs from the
   repository's commit (or the production schema is behind), then open the web agent, or serve
-  from the install when no web agent is installed.
+  from the install when no web agent is installed. When the upgrade stops before it changed the
+  install (:class:`UpgradeNotStarted`: uncommitted changes, an unreadable database, a failed
+  backup), it says why and opens the installed copy as it is.
 * :func:`install_agents` / :func:`uninstall_agents` are ``./run install-agents`` /
   ``uninstall-agents``: they write the plists (``plistlib``, checked with ``plutil -lint``, mode
   644) and bootstrap them in the order postgres → sync → backup → web, or boot them out in the
@@ -77,7 +81,13 @@ PLUTIL = "/usr/bin/plutil"
 DB_WAIT = 120  # seconds: every agent entry point waits this long for the database
 WEB_WAIT = 30  # seconds to wait for the web app to answer before opening the browser
 #: Untracked files under these paths would end up in the install, so they make the tree dirty.
-INSTALLED_PATHS = ("budgetapp/", "pyproject.toml", "requirements.txt", "README.md")
+INSTALLED_PATHS = (
+    "budgetapp/",
+    "pyproject.toml",
+    "requirements.txt",
+    "requirements-build.txt",
+    "README.md",
+)
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
@@ -93,7 +103,11 @@ class AgentError(Exception):
     """An install, upgrade or agent operation could not be done; the message says what to do."""
 
 
-class DirtyTreeError(AgentError):
+class UpgradeNotStarted(AgentError):
+    """The upgrade stopped before it changed the install: the installed copy is as it was."""
+
+
+class DirtyTreeError(UpgradeNotStarted):
     """The repository has changes that are not committed."""
 
 
@@ -719,25 +733,29 @@ def export_commit(layout: Layout, runner: Runner, commit: str) -> Iterator[Path]
         archive = Path(tmp) / "source.tar"
         result = _git(layout, runner, "archive", "--format=tar", f"--output={archive}", commit)
         if result.returncode != 0:
-            raise AgentError(f"Could not export commit {commit[:12]}: {_detail(result)}")
+            raise UpgradeNotStarted(f"Could not export commit {commit[:12]}: {_detail(result)}")
         source = Path(tmp) / "source"
         try:
             with tarfile.open(archive) as tar:
                 tar.extractall(source, filter="data")
         except (tarfile.TarError, OSError) as exc:
-            raise AgentError(f"Could not unpack commit {commit[:12]}: {exc}") from exc
+            raise UpgradeNotStarted(f"Could not unpack commit {commit[:12]}: {exc}") from exc
         archive.unlink()
         yield source
 
 
 def pip_install(layout: Layout, runner: Runner, say: Callable[[str], None], source: Path) -> None:
-    """The pinned dependencies, then the app itself (never editable), both from ``source``: the
-    commit exported by :func:`export_commit`."""
+    """The pinned dependencies and build tools, then the app itself (never editable), all from
+    ``source``: the commit exported by :func:`export_commit`. The app is built with the pinned
+    hatchling already in the install (``--no-build-isolation``): an isolated build would download
+    it every time, so an upgrade could never run offline."""
     pip = [str(layout.venv_python), "-I", "-m", "pip", "install", "--disable-pip-version-check"]
     pip += ["--no-input", "--quiet"]
+    requirements = ["-r", str(source / "requirements.txt")]
+    requirements += ["-r", str(source / "requirements-build.txt")]
     steps = (
-        ("the pinned dependencies", [*pip, "-r", str(source / "requirements.txt")]),
-        ("the app", [*pip, "--no-deps", "--force-reinstall", str(source)]),
+        ("the pinned dependencies", [*pip, *requirements]),
+        ("the app", [*pip, "--no-deps", "--force-reinstall", "--no-build-isolation", str(source)]),
     )
     for what, argv in steps:
         result = _run(runner, argv, timeout=900, env=_install_env(layout), cwd=layout.data_dir)
@@ -822,14 +840,14 @@ def upgrade_install(
     except AgentError:
         raise
     except Exception as exc:
-        raise AgentError(
+        raise UpgradeNotStarted(
             f"The production database can't be read ({type(exc).__name__}). Start it with "
             "./run db start (or check ./run doctor --env production), then try again."
         ) from exc
     from budgetapp.services.backup import known_revisions
 
     if current is not None and current not in known_revisions():
-        raise AgentError(
+        raise UpgradeNotStarted(
             f"The production database is at schema {current}, which this code doesn't know (it "
             "is newer). Check out the newer code instead; nothing was changed."
         )
@@ -841,7 +859,10 @@ def upgrade_install(
         if stopped:
             say(f"Stopped the {', '.join(stopped)} agent(s) for the upgrade.")
         try:
-            backup_path = backup(settings)
+            try:
+                backup_path = backup(settings)
+            except AgentError as exc:  # the install is untouched: ./run live may still open it
+                raise UpgradeNotStarted(str(exc)) from exc
             say(f"Backed up the production database: {backup_path}")
             ensure_venv(layout, runner, say)
             pip_install(layout, runner, say, source)
@@ -989,14 +1010,21 @@ def launch_production(
         reason = upgrade_reason(settings, layout, runner, revision)
         if reason:
             say(f"Upgrading the production install first: {reason}.")
-            (upgrade or upgrade_install)(
-                settings,
-                layout=layout,
-                runner=runner,
-                launchctl=launchctl,
-                revision=revision,
-                say=say,
-            )
+            try:
+                (upgrade or upgrade_install)(
+                    settings,
+                    layout=layout,
+                    runner=runner,
+                    launchctl=launchctl,
+                    revision=revision,
+                    say=say,
+                )
+            except UpgradeNotStarted as exc:  # the install is as it was, and still runs
+                stamp = read_stamp(layout)
+                if stamp is None or not layout.venv_python.exists():
+                    raise
+                say(f"Not upgraded: {exc}")
+                say(f"Opening the installed copy (commit {stamp.short}) as it is.")
         web_plist = layout.plist_path("web")
         if web_plist.exists():
             if launchctl.is_loaded("web"):
@@ -1099,9 +1127,10 @@ def install_agents(
         PlanStep(
             f"Upgrade the production install in {layout.install_dir} to commit {commit[:12]}: "
             "export that commit with git archive, stop the sync/backup/web agents, back up the "
-            "production database, pip install -r requirements.txt and pip install --no-deps from "
-            "the export (never the working tree, never editable), run the migrations from the "
-            "install under the sync lock, write the install stamp",
+            "production database, pip install -r requirements.txt -r requirements-build.txt and "
+            "pip install --no-deps --no-build-isolation from the export (never the working tree, "
+            "never editable), run the migrations from the install under the sync lock, write the "
+            "install stamp",
             lambda: upgrade(
                 settings, layout=layout, runner=runner, launchctl=launchctl, restart=False, say=say
             ),

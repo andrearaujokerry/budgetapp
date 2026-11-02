@@ -222,8 +222,15 @@ matching Plaid charge. If it can't tell which card they belong to, the Connectio
 Production never runs code straight from this folder. When the code changes (new commits), the
 next `./run live` notices and upgrades the installed copy first: it backs up the production
 database (a `…-pre-upgrade.dump` copy, kept apart from the nightly backups), installs the new
-commit, upgrades the database while no sync can run, and restarts the agents. `./run install-agents` does the same. If the folder has changes that aren't committed, the
-upgrade stops and asks you to commit or stash them.
+commit, upgrades the database while no sync can run, and restarts the agents.
+`./run install-agents` does the same. Once the packages are installed an upgrade downloads
+nothing, so it also works offline (only a commit that changes `requirements.txt` needs the
+internet once).
+
+If the upgrade can't start, `./run live` says why ("Not upgraded: …") and opens the installed
+copy as it is: for example when the folder has changes that aren't committed (commit or stash
+them, then run `./run live` again to upgrade), or when the backup before the upgrade fails.
+`./run install-agents` stops instead.
 
 Until then, the old installed copy keeps running. If the live app ever shows **"Upgrade
 needed"**, run `./run live` in Terminal and reload the page.

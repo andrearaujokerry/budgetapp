@@ -58,12 +58,16 @@ macOS privacy protection (TCC) blocks launchd-started processes from `~/Desktop`
 repository lives. So production **always** runs the Application Support install:
 - `upgrade_install()` is the only way production code changes: refuse if the repository has
   uncommitted changes → stop the web, sync and backup agents → take a pre-upgrade dump (kept
-  apart from the 30 backups, newest 5) → `pip install -r requirements.txt` then
-  `pip install --no-deps` from `git archive <commit>` (never the working tree, never editable) →
-  run migrations from the new install while holding the sync lock → write the install stamp
-  (that commit) → restart the agents.
+  apart from the 30 backups, newest 5) → `pip install -r requirements.txt -r
+  requirements-build.txt` then `pip install --no-deps --no-build-isolation` from
+  `git archive <commit>` (never the working tree, never editable; the pinned build tools mean
+  nothing is downloaded once the dependencies are installed, so upgrades work offline) → run
+  migrations from the new install while holding the sync lock → write the install stamp (that
+  commit) → restart the agents.
 - `./run live` calls `upgrade_install()` when the repository's commit differs from the stamp,
-  then opens the web agent (or serves from the install when no web agent is installed).
+  then opens the web agent (or serves from the install when no web agent is installed). When the
+  upgrade stops before it changed the install (uncommitted changes, an unreadable database, a
+  failed backup), `./run live` says why and opens the installed copy as it is.
 - A **schema guard** in `db.py` compares the database's Alembic revision with the code's
   head at every entry point. In production nothing migrates automatically: the web app shows
   an "upgrade needed" page and sync exits quietly with one de-duplicated notice. Sandbox
@@ -144,6 +148,7 @@ Rules:
 run                         one command starts everything (MNT-1)
 pyproject.toml              hatchling build (installable package) + pytest/ruff config
 requirements.txt            pinned runtime deps; requirements-dev.txt adds test tools
+requirements-build.txt      pinned build tools (hatchling) for offline production installs
 alembic.ini                 dev convenience; points at budgetapp:migrations
 budgetapp/
   __main__.py, cli.py       `python -m budgetapp <command>`

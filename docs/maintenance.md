@@ -197,7 +197,7 @@ their fix.
 | **"127.0.0.1:8766 is already in use"** | The app already runs in another Terminal window: open the address, or stop that one with Ctrl-C |
 | **"PostgreSQL 18 not found"** | `brew install postgresql@18` |
 | **"Python 3.14 is required"** | `brew install python@3.14` |
-| **"The repository has uncommitted changes"** from `./run live` or `./run install-agents` | Production only runs committed code: commit or stash the changes, then try again |
+| **"The repository has uncommitted changes"** from `./run live` or `./run install-agents` | Production only runs committed code: commit or stash the changes, then try again. Until then `./run live` opens the installed copy as it is ("Not upgraded: …") |
 | **"Refusing to serve the PRODUCTION app from a git checkout"** or to migrate it | Use `./run live`, which runs and upgrades the installed copy |
 | `launchctl bootstrap … failed`, or the agents don't run | Allow the app's background items (listed as Python and sh, not "Budget Tracker") in System Settings → General → Login Items & Extensions → Allow in the Background, then `./run install-agents` again |
 | No notifications | `./run notify-test`, then allow Script Editor in System Settings → Notifications ([Alerts](alerts.md#turn-notifications-on-one-time)) |

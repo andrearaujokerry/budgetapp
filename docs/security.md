@@ -45,8 +45,8 @@ touch your money. This page lists what protects it, and the few things that are 
 
 ## Your data goes only to Plaid
 
-- The only internet traffic is with Plaid (and, at the first `./run`, the download of the app's
-  Python packages).
+- The only internet traffic is with Plaid (and the download of the app's Python packages: at the
+  first `./run`, at the first install of the live app, and when their pinned versions change).
 - There are no analytics, trackers, web fonts or files from other websites. The one outside script
   is Plaid's own, on the Connection page only.
 - Asking questions about your spending in plain English (AI-1) isn't part of this version, so
