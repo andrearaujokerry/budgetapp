@@ -10,6 +10,8 @@
 * Splits count only when they sum exactly to the amount, and suspected duplicates are excluded —
   both handled by the ``v_allocations`` view.
 * Trends (:func:`monthly_spending`) always use calendar months by ``spend_date``.
+* :func:`daily_spending` splits a budget period into days on the same rules (the dashboard's
+  pace chart); its days add up to :func:`period_spending`'s total.
 
 In the posting-date basis a pending row (no ``posted_date`` yet) is dated by its Plaid ``date``.
 """
