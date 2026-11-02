@@ -3,7 +3,8 @@
 {%- import "components/ui.html" as ui -%}
 {%- import "trends/_macros.html" as tm -%}
 {%- set c = t.selected -%}
-{% call ui.card('Month by month', subtitle='Each month compared with the one before', flush=true, id='trends-months-card') %}
+{%- set footer %}{% if t.current and c.so_far_change %}<p class="muted text-xs trends-footnote mt-0">{{ t.current.period.start|month_label }} so far is compared with the same days of {{ t.months[-2].period.start|month_label }}, through {{ t.current_through|date_short }}.</p>{% endif %}{% endset -%}
+{% call ui.card('Month by month', subtitle='Each month compared with the one before', footer=footer|trim or none, flush=true, id='trends-months-card') %}
 <div class="table-wrap">
 <table class="table table--compact trends-table" id="trends-month-table">
 <thead><tr>
@@ -29,7 +30,5 @@
 </tbody>
 </table>
 </div>
-{%- if t.current and c.so_far_change %}
-<p class="trends-footnote muted text-xs">The change for {{ t.current.period.start|month_label }} so far compares it with the same days of {{ t.months[-2].period.start|month_label }}, through {{ t.current_through|date_short }}.</p>
-{%- endif %}
+
 {% endcall %}

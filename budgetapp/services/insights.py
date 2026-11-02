@@ -266,8 +266,10 @@ def pace(
     start on the budget basis)."""
     daily = spending.daily_spending(session, period)
     cumulative = _cumulative(daily)
+    # Days of the period that have started, today included.
+    elapsed = min(max((today - period.start).days + 1, 0), period.days)
     # Through today, or through the last day with spending when a row is dated later.
-    last = periods.days_elapsed(period, today)
+    last = elapsed
     for index, day in enumerate(daily):
         if day.amount != 0:
             last = max(last, index + 1)
@@ -281,7 +283,7 @@ def pace(
             previous_cumulative[i] if i < len(previous_cumulative) else None
             for i in range(period.days)
         )
-        index = min(max(periods.days_elapsed(period, today), 1), len(previous_cumulative))
+        index = min(max(elapsed, 1), len(previous_cumulative))
         previous_spent: Decimal | None = previous_cumulative[index - 1]
         previous_total: Decimal | None = previous_cumulative[-1]
         through: dt.date | None = previous_period.start + dt.timedelta(days=index - 1)
@@ -294,7 +296,7 @@ def pace(
         days=tuple(d.day for d in daily),
         current=current,
         previous=previous,
-        elapsed=periods.days_elapsed(period, today),
+        elapsed=elapsed,
         spent=spent,
         previous_spent=previous_spent,
         previous_total=previous_total,
@@ -406,7 +408,8 @@ class ChartSeries:
 class Trends:
     """Spending per category per calendar month (INS-2); see the module docstring.
 
-    ``months`` oldest first (``span`` of them, ending with ``through``). ``compare`` is the
+    ``months`` oldest first (``span`` of them, ending with ``through``, less any before the
+    history: ``trimmed``). ``compare`` is the
     latest month in range that has ended and has data, ``previous`` the month before it (each
     ``None`` when there is no such month). ``current`` is the month in progress when it is in
     range, ``current_through`` the previous month's day it is compared to. ``categories`` holds
@@ -432,10 +435,18 @@ class Trends:
     choices: tuple[Period, ...]
     selected: CategoryTrend | None = None
     selected_ref: CategoryRef | None = None
+    #: Months before the history were left out, so fewer than ``span`` months are shown.
+    trimmed: bool = False
 
     @property
     def has_data(self) -> bool:
+        """Any spending history at all."""
         return self.history_start is not None
+
+    @property
+    def range_has_data(self) -> bool:
+        """Any month shown has data (the range isn't wholly before the history)."""
+        return any(m.has_data for m in self.months)
 
     @property
     def changed(self) -> tuple[CategoryTrend, ...]:
@@ -483,7 +494,8 @@ class Trends:
                     amounts.append(None)
                 else:
                     amounts.append(to_money(sum((c.amounts[i] or ZERO for c in rest), ZERO)))
-            out.append(ChartSeries(None, f"Other ({len(rest)})", "other", tuple(amounts)))
+            label = f"{len(rest)} more categories"
+            out.append(ChartSeries(None, label, "other", tuple(amounts)))
         return tuple(out)
 
 
@@ -553,7 +565,10 @@ def trends(
         month = data[month_index]
         return month.total if category_id is None else month.amount_for(category_id)
 
-    shown = range(1, len(data))
+    # Months before the history have no data: the range starts with the history's first month
+    # (``Trends.trimmed`` says so), unless no month in it has data.
+    start = next((i for i in range(1, len(data)) if statuses[i] != BEFORE), 1)
+    shown = range(start, len(data))
     months = tuple(
         TrendMonth(
             data[i].month,
@@ -592,11 +607,6 @@ def trends(
         for row in data[i].categories:
             refs.setdefault(row.category_id, _ref(row))
             totals_by_id[row.category_id] = totals_by_id.get(row.category_id, ZERO) + row.amount
-    # A category that only had spending the month before the range still shows as "gone".
-    if compare_index == 1:
-        for row in data[0].categories:
-            refs.setdefault(row.category_id, _ref(row))
-            totals_by_id.setdefault(row.category_id, ZERO)
 
     def trend(category: CategoryRef | None) -> CategoryTrend:
         cid = category.id if category is not None else None
@@ -652,7 +662,7 @@ def trends(
         months=months,
         compare=data[compare_index].month if compare_index is not None else None,
         previous=data[compare_index - 1].month if compare_index is not None else None,
-        current=months[current_index - 1] if current_index is not None else None,
+        current=months[current_index - start] if current_index is not None else None,
         current_through=current_through,
         categories=categories,
         totals=totals,
@@ -663,6 +673,7 @@ def trends(
         choices=_choices(first_day, this_month),
         selected=selected,
         selected_ref=selected_ref,
+        trimmed=start > 1,
     )
 
 

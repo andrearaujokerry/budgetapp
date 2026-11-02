@@ -47,10 +47,6 @@
 {% endcall %}
 {%- else %}
 <div class="card" id="trends-changes">
-{%- if t.history_start > t.through.end %}
-{{ ui.empty_state('Nothing to compare in these months', 'Your history starts on ' ~ (t.history_start|date_long) ~ '. Choose a later month under “Through”.', icon='calendar', compact=true) }}
-{%- else %}
 {{ ui.empty_state('No month to compare yet', 'Your history starts on ' ~ (t.history_start|date_long) ~ '. Once a month has ended, this page compares it with the month before.', icon='calendar', compact=true) }}
-{%- endif %}
 </div>
 {%- endif %}

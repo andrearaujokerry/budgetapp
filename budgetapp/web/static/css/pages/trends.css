@@ -71,6 +71,10 @@
   font-variant-numeric: tabular-nums;
 }
 
+.trends-table th .table__secondary {
+  font-weight: 400;
+}
+
 .trends-footnote {
   margin: var(--sp-3) 0 0;
 }
