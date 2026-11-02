@@ -141,6 +141,10 @@ def _forget_after_rollback(session: Session, previous_transaction: Any) -> None:
 
 
 def _deliver_after_commit(session: Session) -> None:
+    # SQLAlchemy fires after_commit when a savepoint is released too; only the caller's own
+    # COMMIT may send (a released savepoint can still be rolled back with its transaction).
+    if session.get_nested_transaction() is not None:
+        return
     queue = session.info.get(_PENDING)
     if not queue:
         return
