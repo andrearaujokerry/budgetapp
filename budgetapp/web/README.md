@@ -155,6 +155,11 @@ the credit colour); see the design-system README §3.2.
   (`hx-trigger="every …"`) and `data-quiet` requests never toast.
 - Row edits: `hx_post=…, hx_target="closest tr", hx_swap="outerHTML"`; answer with the new
   `<tr>` (it glows briefly) plus `oob=flash_oob("success", "Saved")`.
+- Keyboard focus: htmx puts it back after a swap only on an element with the same id, so give
+  each control in a swapped region a stable id (`rule-3-edit`; for rows that leave a list, the
+  row's place, `suspect-2-keep`, so focus lands on the row that moves up). If the control is gone
+  anyway, app.js focuses the nearest container with an id that is still shown (its heading, else
+  its first control), never `<body>`.
 - Dialog forms: success → the updated fragment with `headers={"HX-Trigger": "dialog:close"}`;
   errors → the form again with status 422.
 - Never put `<script src>` in a partial (scripts belong to the full page). JSON data islands

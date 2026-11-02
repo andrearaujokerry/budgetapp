@@ -365,6 +365,8 @@ def test_healthy(probe_client, db, at_now):
     assert 'data-tooltip="American Express via Plaid"' in html
     assert 'hx-post="/connection/sync"' in html and 'action="/connection/sync"' in html
     assert 'class="notices"' not in html and 'hx-trigger="every 4s"' not in html
+    # htmx puts keyboard focus back on Sync now after its swap only if it has an id.
+    assert re.search(r'<button type="submit" class="btn btn--sm sync-now"[^>]* id="sync-now"', html)
 
 
 def test_syncing_polls_and_disables_sync_now(probe_client, db, at_now):

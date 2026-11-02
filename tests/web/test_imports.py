@@ -360,6 +360,23 @@ def test_keep_and_delete_with_htmx(client, db):
     assert db.get(Transaction, drop_id) is None
 
 
+def test_keyboard_focus_moves_to_the_next_held_row(client, db):
+    """Keep and Delete take their row away. Their ids name the row's place, so htmx puts
+    focus on the same button of the row that moves up."""
+    first = make_suspect(db, name="FIRST ROW", date="2025-10-02")
+    make_suspect(db, name="SECOND ROW", date="2025-10-03")
+    page = client.get("/import").text
+    assert re.findall(r'<button[^>]* id="(suspect-[^"]+)"', page) == [
+        "suspect-1-keep",
+        "suspect-1-delete",
+        "suspect-2-keep",
+        "suspect-2-delete",
+    ]
+    response = client.post(f"/import/suspects/{first.id}/keep", headers=HTMX)
+    keep = re.search(r'<button[^>]* id="suspect-1-keep"[^>]*>', response.text).group(0)
+    assert 'aria-label="Keep SECOND ROW, ' in keep
+
+
 def test_keep_without_javascript_redirects(client, db):
     suspect = make_suspect(db)
     response = client.post(f"/import/suspects/{suspect.id}/keep", follow_redirects=False)

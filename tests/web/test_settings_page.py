@@ -238,6 +238,15 @@ class TestSave:
         assert csp_problems(response.text, rendered=True) == []
         assert stored(db).statement_settle_days == 5
 
+    def test_save_keeps_keyboard_focus_after_the_swap(self, client):
+        """The form swaps itself: htmx puts focus back on Save only if it has an id."""
+        for response in (
+            client.get("/settings"),
+            client.post("/settings", data=form(), headers=HTMX),
+        ):
+            save = re.search(r'<button[^>]*type="submit"[^>]*>', response.text).group(0)
+            assert 'id="settings-save"' in save
+
     def test_unticked_boxes_and_blank_large_charge_turn_things_off(self, client, db):
         set_app_settings(db, large_charge_threshold=Decimal("500"))
         data = form(budget_alerts_enabled=None, alert_thresholds="", sync_alerts_enabled=None)

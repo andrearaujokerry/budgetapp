@@ -66,6 +66,7 @@
   var inFlight = 0;
   doc.addEventListener("htmx:beforeRequest", function (evt) {
     var d = evt.detail || {};
+    if (!evt.defaultPrevented && d.xhr) rememberFocus(d.xhr);
     if (evt.defaultPrevented || !d.xhr || isQuiet(d.elt)) return;
     var el = d.target && d.target.setAttribute ? d.target : null;
     if (el) el.setAttribute("aria-busy", "true");
@@ -1067,6 +1068,49 @@
     return true;
   }
 
+  // htmx puts keyboard focus back after a swap only on an element with the same id. When
+  // the focused control is gone (its row left the list, Sync now turned into "Syncing…"),
+  // focus would fall to <body> and a keyboard or screen-reader user would start again at
+  // the top of the page. So each request remembers the focused element and the ids around
+  // it; if focus was lost, it goes back to that control, else to the nearest of those
+  // containers still shown: its heading, or else its first control.
+  var CONTROLS = "a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), " +
+    "select:not([disabled]), textarea:not([disabled]), summary";
+
+  function rememberFocus(xhr) {
+    var a = doc.activeElement;
+    if (!a || a === doc.body) return;
+    var ids = [];
+    for (var el = a; el && el !== doc.body; el = el.parentElement) {
+      if (el.id) ids.push(el.id);
+    }
+    xhr._focus = { el: a, ids: ids };
+  }
+
+  function firstShown(el, selector) {
+    return Array.prototype.filter.call(el.querySelectorAll(selector), visible)[0] || null;
+  }
+
+  function restoreFocus(xhr) {
+    var from = xhr && xhr._focus;
+    if (!from) return;
+    xhr._focus = null;
+    // A timer, so page scripts that place focus themselves after a swap go first.
+    window.setTimeout(function () {
+      if (doc.activeElement && doc.activeElement !== doc.body) return;
+      var places = [from.el].concat(from.ids.map(function (id) { return doc.getElementById(id); }));
+      for (var i = 0; i < places.length; i++) {
+        var el = places[i];
+        if (!el || !el.isConnected || !visible(el)) continue;
+        var to = el.matches(CONTROLS) ? el : (firstShown(el, "h1, h2, h3") || firstShown(el, CONTROLS));
+        if (!to) continue;
+        if (!to.matches(CONTROLS) && !to.hasAttribute("tabindex")) to.setAttribute("tabindex", "-1");
+        to.focus();
+        if (doc.activeElement === to) return;
+      }
+    }, 0);
+  }
+
   // htmx fires afterSettle once per settled element; coalesce the page-wide work
   // into one pass. (setTimeout rather than requestAnimationFrame, which never
   // fires in hidden tabs.)
@@ -1077,6 +1121,7 @@
     if (xhr && xhr.status === 422 && !xhr._errorShown && el && el.nodeType === 1) {
       xhr._errorShown = focusFormError(el);
     }
+    restoreFocus(xhr);
     if (el && el.nodeType === 1 && el.id !== "flash") flashSwapped(el);
     if (settleQueued) return;
     settleQueued = true;

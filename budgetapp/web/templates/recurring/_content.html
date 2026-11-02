@@ -25,8 +25,10 @@
 </td>
 {%- endmacro -%}
 
-{#- One series' (or choice's) buttons: they post every key it is listed under. -#}
-{%- macro actions(keys, also, label, buttons) -%}
+{#- One series' (or choice's) buttons: they post every key it is listed under. `place` ("active-2":
+    the list and the row's number in it) names the buttons' ids with their slot. htmx puts focus
+    back on the same id after the swap: the next row's button when this row left the list. -#}
+{%- macro actions(keys, also, label, buttons, place) -%}
 <td class="table__actions">
 <form class="rec-actions" method="post" action="/recurring/override" hx-post="/recurring/override" hx-target="#recurring-content" hx-swap="outerHTML">
 {%- for key in keys %}
@@ -37,7 +39,7 @@
 {%- endfor %}
 <input type="hidden" name="name" value="{{ label }}">
 {%- for status, text, icon in buttons %}
-{{ ui.button(text ~ ": " ~ label, icon=icon, icon_only=true, variant="ghost", size="sm", type="submit", name="status", value=status, tooltip=text) }}
+{{ ui.button(text ~ ": " ~ label, icon=icon, icon_only=true, variant="ghost", size="sm", type="submit", name="status", value=status, tooltip=text, id="rec-" ~ place ~ "-" ~ loop.index) }}
 {%- endfor %}
 </form>
 </td>
@@ -80,6 +82,7 @@
 </tr></thead>
 <tbody>
 {%- for s in o.active %}
+{%- set place = "active-" ~ loop.index %}
 <tr>
 {{ merchant_cell(s, ("late since " ~ (s.next_expected|date_short)) if s.late else (("next " ~ (s.next_expected|date_short)) if s.next_expected else "no next date")) }}
 <td class="col-optional-sm">{{ s.cadence_label }}</td>
@@ -94,7 +97,7 @@
 {%- else %}<span class="muted">—</span>{% endif %}
 </td>
 <td class="col-optional-md">{{ ui.category_badge(s.category) }}</td>
-{{ actions(s.keys, s.also, series_label(s), [reset, ignore] if s.is_confirmed else [keep, ignore]) }}
+{{ actions(s.keys, s.also, series_label(s), [reset, ignore] if s.is_confirmed else [keep, ignore], place) }}
 </tr>
 {%- endfor %}
 </tbody>
@@ -128,13 +131,14 @@
 </tr></thead>
 <tbody>
 {%- for s in o.lapsed %}
+{%- set place = "lapsed-" ~ loop.index %}
 <tr>
 {{ merchant_cell(s, "last " ~ (s.last_date|date_short)) }}
 <td class="col-optional-sm">{{ s.cadence_label }}</td>
 {{ amount_cell(s) }}
 <td class="col-optional-sm"><span class="table__primary">{{ s.last_date|date_long }}</span><span class="table__secondary">{{ ((o.today - s.last_date).days)|pluralize("day") }} ago</span></td>
 <td class="col-optional-md">{{ ui.category_badge(s.category) }}</td>
-{{ actions(s.keys, s.also, series_label(s), [reset, ignore] if s.is_confirmed else [keep, ignore]) }}
+{{ actions(s.keys, s.also, series_label(s), [reset, ignore] if s.is_confirmed else [keep, ignore], place) }}
 </tr>
 {%- endfor %}
 </tbody>
@@ -162,7 +166,7 @@
 {{ merchant_cell(s, s.count|pluralize("charge")) }}
 <td class="col-optional-sm">{{ s.cadence_label }}</td>
 {{ amount_cell(s) }}
-{{ actions(s.keys, s.also, series_label(s), [("reset", "Restore", "refresh")]) }}
+{{ actions(s.keys, s.also, series_label(s), [("reset", "Restore", "refresh")], "ignored-" ~ loop.index) }}
 </tr>
 {%- endfor %}
 {#- Choices whose charges no longer form a series: still undoable. -#}
@@ -172,7 +176,7 @@
 <td class="col-grow"><span class="table__primary">{{ label }}</span><span class="table__secondary">{{ "Ignored" if c.status == "ignored" else "Always listed" }} · no repeating charges lately</span></td>
 <td class="col-optional-sm"><span class="muted">—</span></td>
 <td class="num">{% if c.amount is not none %}{{ ui.money(c.amount, tone="neutral") }}{% else %}<span class="amount amount--none">—</span>{% endif %}</td>
-{{ actions([c.key], [], label, [("reset", "Restore" if c.status == "ignored" else "Back to automatic", "refresh")]) }}
+{{ actions([c.key], [], label, [("reset", "Restore" if c.status == "ignored" else "Back to automatic", "refresh")], "ignored-" ~ (o.ignored|length + loop.index)) }}
 </tr>
 {%- endfor %}
 </tbody>

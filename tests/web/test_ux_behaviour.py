@@ -55,3 +55,17 @@ def test_a_form_returned_with_errors_shows_its_first_problem():
     body = function_body(js, "focusFormError")
     assert '[aria-invalid="true"]' in body and '[role="alert"]' in body
     assert ".focus(" in body and "scrollIntoView(" in body
+
+
+def test_focus_lost_in_a_swap_goes_to_the_nearest_container():
+    """When the focused control is gone after a swap (its row left the list, Sync now became
+    "Syncing…"), focus goes to the nearest surviving container with an id (its heading or
+    first control), not to <body>."""
+    js = source("js/app.js")
+    assert "rememberFocus(" in listener(js, "htmx:beforeRequest")
+    assert "restoreFocus(" in listener(js, "htmx:afterSettle")
+    remember = function_body(js, "rememberFocus")
+    assert "doc.activeElement" in remember and "parentElement" in remember
+    restore = function_body(js, "restoreFocus")
+    assert "getElementById(" in restore and ".focus(" in restore
+    assert '"h1, h2, h3"' in js and "doc.body" in restore

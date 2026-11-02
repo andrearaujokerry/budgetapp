@@ -347,7 +347,9 @@ var(--chart-other)
 {#- sort_th(label, key, sort, url, num=false, param="sort", target=none, first="desc")
     A sortable <th>. `sort` is the current value ("date", "-date" = descending);
     `url` the current URL without the sort/page parameters. A first click sorts
-    by `first` ("desc" or "asc"); clicking the active column flips it. -#}
+    by `first` ("desc" or "asc"); clicking the active column flips it. With an id
+    `target` ("#results") the link gets the id "results-sort-<key>", so keyboard
+    focus stays on it after the swap. -#}
 {%- macro sort_th(label, key, sort, url, num=false, param="sort", target=none, first="desc") -%}
 {%- set s = (sort or '')|string -%}
 {%- set active = s.lstrip('-') == key -%}
@@ -355,7 +357,7 @@ var(--chart-other)
 {%- set next = (key if desc else '-' ~ key) if active else ('-' ~ key if first == 'desc' else key) -%}
 {%- set href = _with_param(url, param, next) -%}
 <th scope="col"{% if num %} class="num"{% endif %}{% if active %} aria-sort="{{ 'descending' if desc else 'ascending' }}"{% endif %}>
-<a class="th-sort" href="{{ href }}"{% if target %} hx-get="{{ href }}" hx-target="{{ target }}" hx-push-url="true"{% endif %}>{{ label }}{{ _svg(('arrow-down' if desc else 'arrow-up') if active else 'sort') }}</a>
+<a class="th-sort" href="{{ href }}"{% if target %} hx-get="{{ href }}" hx-target="{{ target }}" hx-push-url="true"{% endif %}{% if target and target.startswith('#') %} id="{{ target[1:] }}-sort-{{ key }}"{% endif %}>{{ label }}{{ _svg(('arrow-down' if desc else 'arrow-up') if active else 'sort') }}</a>
 </th>
 {%- endmacro -%}
 

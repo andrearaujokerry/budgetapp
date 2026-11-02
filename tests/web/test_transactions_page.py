@@ -230,6 +230,16 @@ class TestListPage:
         last = client.get("/transactions?tag=work&page=99")
         assert last.context["page"].page == 2 and len(row_ids(last.text)) == 5
 
+    def test_sort_links_keep_keyboard_focus_after_the_swap(self, client, db, card):
+        """htmx puts focus back on the sort header that was pressed only if it has an id."""
+        make_transaction(db, card, name="ONE")
+        html = client.get("/transactions", headers=HTMX).text
+        links = re.findall(r'<a class="th-sort"[^>]*>', html)
+        assert [re.search(r' id="([^"]+)"', a).group(1) for a in links] == [
+            "results-sort-date",
+            "results-sort-amount",
+        ]
+
     def test_filter_bar_reflects_the_url(self, client, db, card, cats):
         make_transaction(db, card, account_owner="SAM RIVERA", tags=["work"], merchant_name="Uber")
         url = (
