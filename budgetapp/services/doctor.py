@@ -353,6 +353,30 @@ def check_paths(ctx: DoctorContext) -> Iterable[Check]:
             )
 
 
+#: A log this big means something keeps failing (the backup agent trims them nightly).
+LOG_WARN_BYTES = 50 * 2**20
+
+
+def check_logs(ctx: DoctorContext) -> Iterable[Check]:
+    section = "This Mac"
+    folder = ctx.settings.logs_dir
+    try:
+        sizes = {path: path.stat().st_size for path in folder.glob("*.log*") if path.is_file()}
+    except OSError:
+        sizes = {}
+    huge = [p for p, size in sizes.items() if size > LOG_WARN_BYTES]
+    for path in sorted(huge, key=sizes.__getitem__, reverse=True):
+        yield Check(
+            section,
+            WARN,
+            f"{path.name} is {sizes[path] / 2**20:.0f} MB: something keeps writing to it",
+            detail=str(path),
+            fix=f"tail -n 50 {_quote(path)} shows what; the backup agent trims logs nightly",
+        )
+    if not huge:
+        yield Check(section, PASS, f"Logs are under {LOG_WARN_BYTES // 2**20} MB each")
+
+
 def check_permissions(ctx: DoctorContext) -> Iterable[Check]:
     section = "This Mac"
     s = ctx.settings
@@ -1387,6 +1411,7 @@ CHECKS: tuple[Callable[[DoctorContext], Iterable[Check]], ...] = (
     check_other_users,
     check_paths,
     check_permissions,
+    check_logs,
     check_postgres_running,
     check_database,
     check_postgres_settings,

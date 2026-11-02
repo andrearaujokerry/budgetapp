@@ -441,6 +441,17 @@ class TestPermissions:
     def test_private_folders(self, dr):
         assert dr.one(doctor.check_permissions).status == PASS
 
+    def test_a_huge_log_is_a_warning(self, dr, monkeypatch):
+        """Final review ops-7: a crash-looping agent can fill the disk with its log."""
+        monkeypatch.setattr(doctor, "LOG_WARN_BYTES", 1_000)
+        (dr.settings.logs_dir / "backup.log").write_text("ok\n")
+        assert dr.one(doctor.check_logs).status == PASS
+        web = dr.settings.logs_dir / "web.log"
+        web.write_text("Traceback (most recent call last):\n" * 100)
+        check = dr.one(doctor.check_logs)
+        assert check.status == WARN and check.title.startswith("web.log is ")
+        assert check.fix.startswith("tail -n 50 ") and str(web) in check.fix
+
     def test_a_readable_data_folder_fails_with_the_chmod(self, dr):
         os.chmod(dr.settings.pg_data_dir, 0o750)
         check = dr.one(doctor.check_permissions)

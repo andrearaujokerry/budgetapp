@@ -118,7 +118,7 @@ FAILs.
 
 | Section | What it checks |
 | --- | --- |
-| This Mac | FileVault is on; no other macOS user accounts (the app has no login); app folders are private and outside Desktop, Documents, Downloads and iCloud |
+| This Mac | FileVault is on; no other macOS user accounts (the app has no login); app folders are private and outside Desktop, Documents, Downloads and iCloud; no log has grown huge |
 | Database | the server runs and accepts this environment's user; it listens only on this Mac; its socket and settings are private; the client and server versions match; no stale lock file; the database layout matches the code |
 | Web app | whether the app answers on its port, and only on this Mac |
 | Keychain | every key and password this environment needs is saved and readable |
@@ -160,6 +160,12 @@ before writing.
 | `web-sandbox.log`, `web-production.log` | the web app: requests, warnings and errors (production logs no requests) |
 | `sync-sandbox.log`, `sync-production.log` | `./run sync`, the sync agent and the Sandbox helpers |
 | `sync.log`, `backup.log`, `web.log` | the background agents' own output |
+
+Logs can't fill the disk. The app's own logs (`web-…` and `sync-…`) start a new file at 5 MB and
+keep the 3 before it (`web-production.log.1` and so on). Each night the backup agent cuts any
+other log over 10 MB (an agent that keeps failing and restarting writes one quickly) down to its
+newest 1 MB, and `./run doctor` warns about a log over 50 MB with the command that shows its last
+lines.
 
 ## Where everything lives
 

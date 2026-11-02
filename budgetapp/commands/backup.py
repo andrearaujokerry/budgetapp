@@ -5,7 +5,7 @@
 30. The nightly launchd agent runs ``backup --env production --if-due --unattended`` at 02:30 and at
 login, skipping when a backup was already made since the last 02:30: it waits up to two minutes for
 the database, never shows a Keychain dialog, and notifies once a day when a backup fails or the
-newest one is over 26 hours old.
+newest one is over 26 hours old. It also trims oversized logs (``logsetup.trim_logs``).
 
 ``./run restore FILE`` replaces this environment's database with a backup of that same database.
 It shows what it will do and asks you to type the environment's name; production needs an
@@ -30,6 +30,7 @@ from budgetapp import clock, secrets
 from budgetapp.commands import add_command
 from budgetapp.config import ConfigError, Settings
 from budgetapp.db import wait_for_db
+from budgetapp.logsetup import trim_logs
 from budgetapp.services import agents
 from budgetapp.services import backup as backups
 from budgetapp.services.notify import get_notifier
@@ -142,6 +143,8 @@ def run_backup(args: argparse.Namespace, settings: Settings) -> int:
             backups.note_agent_run(settings)
         except OSError as exc:
             _say(unattended, f"warning: could not note this run ({exc}).", error=True)
+        for path in trim_logs(settings.logs_dir):  # before the wait: postgres may crash-loop
+            _say(unattended, f"Trimmed {path.name} to its newest lines.")
     try:
         ready = wait_for_db(settings, timeout=agents.DB_WAIT if unattended else 15)
     except ConfigError as exc:  # PostgresNotFound: the PostgreSQL 18 programs are missing

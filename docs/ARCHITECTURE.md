@@ -49,7 +49,9 @@ Paths — never inside the git checkout, never under `~/Desktop`, `~/Documents`,
 - `~/Library/Application Support/budgetapp/backups/<env>/` — nightly `pg_dump` files (REL-2)
 - `~/Library/Application Support/budgetapp/state/` — small marker files (alert de-duplication
   when the database or Keychain is unavailable, install stamp, recovery files)
-- `~/Library/Logs/budgetapp/` — app, sync, backup and postgres logs (never contain secrets)
+- `~/Library/Logs/budgetapp/` — app, sync, backup and postgres logs (never contain secrets). The
+  app's own logs rotate (5 MB, 3 kept); the backup agent trims any other log over 10 MB to its
+  newest 1 MB in place (launchd and PostgreSQL keep those files open with `O_APPEND`)
 
 All are created with mode `0700`; files written there are `0600`.
 

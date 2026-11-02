@@ -483,6 +483,20 @@ class TestBackupCommand:
             backup_command.run_backup(args(unattended=True), bk)
         assert backup.agent_last_run(bk) == NOW
 
+    def test_an_unattended_run_trims_oversize_logs(self, bk, notifier, monkeypatch):
+        """Final review ops-7: nothing capped the logs launchd and PostgreSQL write; a crash loop
+        appends a traceback every 30 s. The backup agent trims them, even with the database down
+        (a postgres crash loop is exactly that)."""
+        trimmed = []
+        monkeypatch.setattr(
+            backup_command, "trim_logs", lambda folder: trimmed.append(folder) or []
+        )
+        monkeypatch.setattr(backup_command, "wait_for_db", lambda settings, timeout: False)
+        backup_command.run_backup(args(), bk)
+        assert trimmed == []  # by hand: not the agent's job
+        backup_command.run_backup(args(unattended=True), bk)
+        assert trimmed == [bk.logs_dir]
+
     def test_the_skip_message_names_the_schedule(self, bk, capsys):
         backup.run_backup(bk)
         assert backup_command.run_backup(args(if_due=True, min_age_hours=None), bk) == 0
