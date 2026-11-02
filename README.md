@@ -28,8 +28,9 @@ cd ~/Desktop/budgetapp
 ./run                # the app with Plaid's Sandbox test data, at http://127.0.0.1:8766
 ```
 
-To look around before you have any keys, use made-up demo data:
-`./run demo create try`, then `./run serve --demo try` and open http://127.0.0.1:8800.
+To look around before you have any keys, run `./run setup --skip-plaid` and then use made-up
+demo data: `./run demo create try`, then `./run serve --demo try` and open
+http://127.0.0.1:8800.
 
 Your real card comes last, once the Sandbox works: see [Going live](docs/going-live.md).
 

@@ -202,7 +202,8 @@ These commands refuse to run in production.
 ## Demo data
 
 Demo data lets you explore every page with two years of realistic, made-up card activity, without
-Plaid keys or a link:
+Plaid keys or a link. It needs only the app's database server: run `./run setup` first
+(`--skip-plaid` if you have no keys yet), and `./run db start` if the server isn't running.
 
 ```sh
 ./run demo create try          # make (or remake) demo "try"; takes about a second
