@@ -19,7 +19,8 @@ without a duplicate. :func:`clear_alert` deletes an event so it can fire again.
     for 36 hours, ``services.status``) alerts once a day (``stale:<item>:<day>``), silently when a
     failure or reconnect alert goes out in the same run (its message says how old the data is).
   - SYNC-6: consent renewal due within ``consent_reminder_days`` alerts once per due date
-    (``consent:<item>:<due date>``), whatever ``sync_alerts_enabled`` says.
+    (``consent:<item>:<due date>``), whatever ``sync_alerts_enabled`` says, except while the Item
+    needs reconnecting (reconnecting renews the consent too).
   - ALR-1: :func:`evaluate_budgets` after every successful run (so budget and setting edits are
     picked up by the next sync too).
   - ALR-3, when ``large_charge_threshold`` is set: Plaid rows in
@@ -346,7 +347,7 @@ def _sync_problems(
         return []
     results: list[AlertResult] = []
     name = _institution(item)
-    stale_note = _stale_sentence(state, item) if state.stale else ""
+    stale_note = _stale_sentence(state) if state.stale else ""
     if item.status == "needs_reconnect" or outcome.needs_reconnect:
         results.append(_reconnect(session, notifier, item, outcome, name, stale_note))
     elif outcome.status == "error":
@@ -425,7 +426,7 @@ def _close_reconnect(session: Session, item_id: int) -> None:
         session.flush()
 
 
-def _stale_sentence(state: status.ItemStatus, item: PlaidItem) -> str:
+def _stale_sentence(state: status.ItemStatus) -> str:
     now = clock.now()
     if state.last_sync_success_at is None:
         age = _age_text(now - state.linked_at)
@@ -445,8 +446,12 @@ def _stale_advice(item: PlaidItem) -> str:
 def _consent(
     session: Session, notifier: Notifier, item: PlaidItem, state: status.ItemStatus
 ) -> list[AlertResult]:
-    """SYNC-6: renewal due within ``consent_reminder_days``, once per due date."""
-    if not state.consent_warning:
+    """SYNC-6: renewal due within ``consent_reminder_days``, once per due date.
+
+    Not while the Item needs reconnecting (as on the Connection page): reconnecting is update mode,
+    which renews the consent too, and the reconnect alert already asks for it.
+    """
+    if not state.consent_warning or item.status == "needs_reconnect":
         return []
     due = state.consent_due_at.astimezone().date()
     name = _institution(item)

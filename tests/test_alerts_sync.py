@@ -328,6 +328,15 @@ def test_consent_wording_close_to_and_after_the_date(db, notifier, item, offset,
     assert f"Plaid's access to American Express {words.format(due=due)}." in reminder.message
 
 
+def test_no_consent_reminder_while_a_reconnect_is_needed(db, notifier, item):
+    item.consent_expires_at = NOW - DAY  # expired: Plaid now answers ITEM_LOGIN_REQUIRED
+    evaluate(db, notifier, fail(item, "ITEM_LOGIN_REQUIRED", reconnect=True))
+    assert notifier.titles == ["Reconnect American Express"] and keys(db, "consent") == []
+    item.consent_expires_at = NOW + 20 * DAY  # a reconnect that did not move the date
+    evaluate(db, notifier, succeed(item))
+    assert notifier.titles[-1] == "Renew your American Express connection"
+
+
 # --------------------------------------------------------------------------- ALR-3
 
 
