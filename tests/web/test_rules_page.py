@@ -6,12 +6,14 @@ from __future__ import annotations
 import datetime as dt
 import html
 import re
+import time
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
 
 from budgetapp.models import Rule
+from budgetapp.services import categorize
 from tests.factories import (
     card_payments,
     get_category,
@@ -76,6 +78,11 @@ def uber_form(world, **extra) -> dict[str, str]:
     }
     values.update(extra)
     return values
+
+
+def navigation(site: str) -> dict[str, str]:
+    """The Fetch Metadata a browser sends with a top-level navigation from ``site``."""
+    return {"Sec-Fetch-Site": site, "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}
 
 
 # --------------------------------------------------------------------------- the list
@@ -259,6 +266,29 @@ class TestForm:
         assert "1 transaction goes to a rule that runs first" in text  # Uber Eats → Food
         assert csp_problems(response.text, rendered=True) == []
 
+    @pytest.mark.parametrize("site", ["cross-site", "same-site"])
+    def test_a_link_from_another_site_opens_a_blank_form(self, client, world, site):
+        # Any website can send the browser to /rules/new?…; its query string must not fill the
+        # form or run the preview (a pattern that backtracked for ever froze the app).
+        response = client.get(
+            f"/rules/new?match_type=regex&merchant_pattern=uber&category_id={world.travel.id}",
+            headers=navigation(site),
+        )
+        assert response.status_code == 200
+        draft = response.context["f"]["draft"]
+        assert (draft.merchant_pattern, draft.match_type, draft.category_id) == ("", "contains", "")
+        assert response.context["pv"] == {"state": "blank"}
+        assert "past transactions match" not in response.text
+
+    @pytest.mark.parametrize("site", ["same-origin", "none"])
+    def test_the_apps_own_links_and_typed_addresses_still_prefill(self, client, world, site):
+        response = client.get(
+            f"/rules/new?merchant_pattern=UBER&category_id={world.transportation.id}",
+            headers=navigation(site),
+        )
+        assert response.context["f"]["draft"].merchant_pattern == "UBER"
+        assert response.context["pv"]["preview"].match_count == 4
+
     def test_hidden_cards_are_left_out_unless_chosen(self, client, db, world):
         hidden = make_account(db, name="Old card", mask="9999", is_hidden=True)
         response = client.get("/rules/new")
@@ -345,6 +375,22 @@ class TestPreview:
         assert pv["state"] == "invalid" and "merchant_pattern" in pv["errors"]
         assert "Fix the form to see the preview" in response.text
         assert "Not a valid regular expression" in response.text
+
+    def test_a_pattern_too_slow_on_past_transactions_is_a_field_error(self, client, db, world):
+        # It passes the probes run before saving, but backtracks on this merchant name.
+        make_transaction(db, world.account, name="B" * 34 + "!")
+        params = uber_form(world, merchant_pattern=r"^(b|bb)+$", match_type="regex")
+        start = time.monotonic()
+        response = client.get("/rules/preview", params=params, headers=HTMX)
+        assert time.monotonic() - start < 2
+        assert response.status_code == 200
+        pv = response.context["pv"]
+        assert pv["state"] == "invalid"
+        assert pv["errors"] == {"merchant_pattern": categorize.REGEX_TOO_SLOW}
+        assert categorize.REGEX_TOO_SLOW in html.unescape(response.text)
+        saved = client.post("/rules", data=params)
+        assert saved.status_code == 422
+        assert saved.context["f"]["errors"] == {"merchant_pattern": categorize.REGEX_TOO_SLOW}
 
     def test_blank_preview(self, client, world):
         response = client.get("/rules/preview", params={"category_id": "1"}, headers=HTMX)

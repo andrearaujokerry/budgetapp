@@ -574,6 +574,10 @@ def preview(
 
     ``changes_first`` puts the rows whose category would change at the top of the sample (each
     group newest first), so they show even when older than the newest matches.
+
+    A regex pattern that runs past ``categorize.REGEX_TIMEOUT`` on one of the transactions is a
+    ``RuleValidationError`` too (saving then refuses it); it costs that one search, not one per
+    row, because a pattern that timed out matches nothing at once.
     """
     current = get_rule(session, rule_id) if rule_id is not None else None
     clean = clean_rule(session, draft, current=current)
@@ -653,6 +657,14 @@ def preview(
                     note=note,
                 )
             )
+    if candidate.match_type == "regex":
+        slow = {
+            field: categorize.REGEX_TOO_SLOW
+            for field in ("merchant_pattern", "description_pattern")
+            if categorize.regex_too_slow(getattr(candidate, field))
+        }
+        if slow:
+            raise RuleValidationError(slow)
     return RulePreview(
         match_count=matched,
         would_change_count=changed,

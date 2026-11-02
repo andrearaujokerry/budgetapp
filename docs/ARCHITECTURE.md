@@ -289,7 +289,11 @@ Rewards while positive fees stay in Fees & Interest.
 | is_system | bool not null default false | seeded rules |
 | source_transaction_id | FK transactions ON DELETE SET NULL, null | one-click rule origin |
 
-`CHECK` requires at least one condition. All set conditions must match (AND).
+`CHECK` requires at least one condition. All set conditions must match (AND). A `regex`
+pattern runs on the `regex` package with a 0.1 s limit per search (`categorize.REGEX_TIMEOUT`;
+Python's `re` has none, and a pattern like `^(a|aa)+$` backtracks for ever while holding the
+GIL). Saving and the preview refuse a pattern that runs past the limit on a few probe texts or on
+a past transaction; a saved one that does matches nothing from then on (logged once).
 
 ### transactions
 | column | type | notes |
@@ -728,6 +732,9 @@ Security middleware (SEC-1, SEC-4):
   `Sec-Fetch-Dest: document`) passes; anything else gets 403. This blocks cross-site
   subresource loads of pages such as `/transactions?q=…` (XS-Search). Requests without Fetch
   Metadata (curl, old browsers) are not checked.
+- The new-rule form fills itself from the query string (`/rules/new?merchant_pattern=…`) only
+  when `Sec-Fetch-Site` is absent, `same-origin` or `none`: a link from another site opens a
+  blank form, so it can't make the preview run its pattern on every past transaction.
 - **CSP on every page:** `default-src 'self'; script-src 'self'; style-src 'self';
   style-src-attr 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none';
   form-action 'self'; frame-ancestors 'none'` (inline `style=""` attributes are allowed for
