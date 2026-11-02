@@ -784,22 +784,34 @@ Notifications) and `doctor` checks it.
 
 `alerts.record_and_notify` records each alert once (its `dedupe_key`) and sends the notification
 only after the caller's transaction commits, and only if the alert row is still there: a rolled
-back transaction or savepoint sends nothing, and no notification runs while a lock is held.
+back transaction or savepoint sends nothing, a released savepoint is not the caller's commit
+(SQLAlchemy reports both as `after_commit`), and no notification runs while a lock is held. Each
+evaluation runs in a savepoint of its own and logs its errors: an alert problem never breaks the
+sync, import or edit that called it.
 
-- **Budget thresholds (ALR-1):** evaluated with `period_spending` (same basis and pending setting
-  as the Budgets page) after each sync, import and edit that changes categories. A threshold `t`
-  is crossed when `spent > 0` and `spent ≥ available × t / 100` (so a zero or negative available
-  amount fires on the first spending). Each fires once per category, period and threshold; if
-  spending falls back below a threshold (a pending hold dropped), its event is deleted so it can
-  fire again.
+- **Budget thresholds (ALR-1):** evaluated with the Budgets page's numbers (`budgets.overview`
+  over `period_spending`, same basis and pending setting) after each successful sync, import and
+  edit that changes categories (transactions, rule re-apply, category merge): every monthly
+  category budget the page lists, the overall target, and annual budgets for the calendar year. A
+  threshold `t` is crossed when `spent > 0` and `spent ≥ available × t / 100` (so a zero or
+  negative available amount fires on the first spending). Each fires once per category, period
+  and threshold (`budget:<category|overall>:<period start>:<t>`; annual
+  `budget:<category>:<year>:<t>`); several crossed at once notify only the highest (the others
+  are recorded silently). If spending falls back below a threshold (a pending hold dropped, a
+  bigger budget), its event is deleted so it can fire again. An event keyed within 10 days of the
+  period's start belongs to the period (a statement cycle's start can still move). A flagged
+  cycle's message says to check the Statements page.
 - **Sync problems (ALR-2):** failures (Plaid or internal) once per Item, error code and day;
-  reconnect needed once per occurrence; stale data after 36 h; Keychain approval needed (marker
-  file).
-- **Consent (SYNC-6):** renewal due within `consent_reminder_days`, once per due date.
-- **Large charges (ALR-3):** only rows inserted by a sync, dated within the last 7 days, after the
-  initial history load; once per charge and not again when it posts. The sync outcome lists only
-  new charges: a row that replaces one the app already had (a posting, linked or matched, or a
-  re-delivery after account churn) is left out.
+  reconnect needed once per occurrence (`reconnect:<item>:open` until a sync sees the Item
+  healthy, then renamed, so the next occurrence alerts); stale data after 36 h once a day (folded
+  into a failure or reconnect alert sent in the same run); Keychain approval needed (marker file).
+- **Consent (SYNC-6):** renewal due within `consent_reminder_days`, once per due date; not while
+  the Item needs reconnecting (update mode renews the consent too).
+- **Large charges (ALR-3):** only Plaid rows inserted by a sync for more than
+  `large_charge_threshold`, dated within the last 7 days, after the initial history load; once
+  per charge and not again when it posts. The sync outcome lists only new charges: a row that
+  replaces one the app already had (a posting, linked or matched, or a re-delivery after account
+  churn) is left out. More than 3 new ones in a run send one summary notification.
 - **Backups:** failed or stale, once a day.
 
 ## 12. Testing (MNT-2)
