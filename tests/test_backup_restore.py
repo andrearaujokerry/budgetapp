@@ -93,7 +93,7 @@ class TestRestore:
         assert result.counts["transactions"] == 1 and result.counts["accounts"] == 1
         pre = result.pre_restore
         assert pre is not None and pre.path.name.endswith("-pre-restore.dump")
-        assert backup.parse_backup_name(pre.path)[3] is True
+        assert backup.parse_backup_name(pre.path)[3] == backup.PRE_RESTORE
         assert pre.path.stat().st_mode & 0o777 == 0o600
         assert said[0].startswith("Saved the current data first (verified): ")
         assert any(line.startswith("Restored ") for line in said)
@@ -103,6 +103,17 @@ class TestRestore:
             settings, backup.inspect_backup(settings, pre.path), engine=engine, say=print
         )
         assert names(engine) == ["Lunch"]
+
+    def test_a_pre_upgrade_copy_restores_like_any_backup(self, scratch):
+        """Final review ops-1: the copy an upgrade takes first is its own set, and still a
+        backup that ./run restore accepts."""
+        settings, engine = scratch
+        seed(engine, "Coffee")
+        copy = backup.run_backup(settings, kind=backup.PRE_UPGRADE).path
+        assert copy.name.endswith("-pre-upgrade.dump")
+        seed(engine, "Lunch")
+        backup.restore(settings, backup.inspect_backup(settings, copy), engine=engine, say=print)
+        assert names(engine) == ["Coffee"]
 
     def test_objects_stay_owned_by_the_environment_role(self, dumped):
         settings, engine, dump = dumped
@@ -490,9 +501,9 @@ class TestRestoreKeepsTheBackups:
         result = backup.restore(settings, plan, engine=engine, say=print)
         assert names(engine) == ["Coffee"]
         assert oldest.exists() and all(path.exists() for path in newer)
-        kept = [b.path for b in backup.list_backups(settings, pre_restore=False)]
+        kept = [b.path for b in backup.list_backups(settings, kind="")]
         assert len(kept) == 30 and kept[-1] == oldest
-        copies = [b.path for b in backup.list_backups(settings, pre_restore=True)]
+        copies = [b.path for b in backup.list_backups(settings, kind=backup.PRE_RESTORE)]
         assert copies == [result.pre_restore.path] and result.pruned == ()
 
     def test_the_command_restores_the_oldest_of_30(self, thirty, monkeypatch, capsys):
@@ -512,7 +523,7 @@ class TestRestoreKeepsTheBackups:
                     settings, backup.inspect_backup(settings, oldest), engine=engine, say=print
                 )
         assert oldest.exists() and all(path.exists() for path in newer)
-        assert len(backup.list_backups(settings, pre_restore=True)) == 2  # both copies stay
+        assert len(backup.list_backups(settings, kind=backup.PRE_RESTORE)) == 2  # both copies stay
         assert names(engine) == ["Lunch"]
 
     def test_the_dump_is_read_before_anything_else_happens(self, dumped, monkeypatch):
@@ -533,7 +544,9 @@ class TestRestoreKeepsTheBackups:
         settings, engine, dump = dumped
         start = dt.datetime.now(dt.UTC) - dt.timedelta(days=10)
         copies = [
-            backup.run_backup(settings, pre_restore=True, now=start + dt.timedelta(days=d)).path
+            backup.run_backup(
+                settings, kind=backup.PRE_RESTORE, now=start + dt.timedelta(days=d)
+            ).path
             for d in range(5)
         ]
         # An undo with the OLDEST copy: the pruning after it must not delete that copy.
@@ -541,13 +554,13 @@ class TestRestoreKeepsTheBackups:
             settings, backup.inspect_backup(settings, copies[0]), engine=engine, say=print
         )
         assert first.pruned == () and copies[0].exists()
-        assert len(backup.list_backups(settings, pre_restore=True)) == 6
+        assert len(backup.list_backups(settings, kind=backup.PRE_RESTORE)) == 6
         said: list[str] = []
         second = backup.restore(
             settings, backup.inspect_backup(settings, dump), engine=engine, say=said.append
         )
         assert set(second.pruned) == {copies[0], copies[1]}
-        kept = {b.path for b in backup.list_backups(settings, pre_restore=True)}
+        kept = {b.path for b in backup.list_backups(settings, kind=backup.PRE_RESTORE)}
         assert kept == {second.pre_restore.path, first.pre_restore.path, *copies[2:]}
         assert "Removed 2 older pre-restore copy(ies); the newest 5 are kept." in said
         assert dump.exists() and names(engine) == ["Coffee"]

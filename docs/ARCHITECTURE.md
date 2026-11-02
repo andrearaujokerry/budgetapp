@@ -57,10 +57,11 @@ All are created with mode `0700`; files written there are `0600`.
 macOS privacy protection (TCC) blocks launchd-started processes from `~/Desktop`, where the
 repository lives. So production **always** runs the Application Support install:
 - `upgrade_install()` is the only way production code changes: refuse if the repository has
-  uncommitted changes → stop the web, sync and backup agents → take a backup →
-  `pip install -r requirements.txt` then `pip install --no-deps` from `git archive <commit>`
-  (never the working tree, never editable) → run migrations from the new install while holding
-  the sync lock → write the install stamp (that commit) → restart the agents.
+  uncommitted changes → stop the web, sync and backup agents → take a pre-upgrade dump (kept
+  apart from the 30 backups, newest 5) → `pip install -r requirements.txt` then
+  `pip install --no-deps` from `git archive <commit>` (never the working tree, never editable) →
+  run migrations from the new install while holding the sync lock → write the install stamp
+  (that commit) → restart the agents.
 - `./run live` calls `upgrade_install()` when the repository's commit differs from the stamp,
   then opens the web agent (or serves from the install when no web agent is installed).
 - A **schema guard** in `db.py` compares the database's Alembic revision with the code's
@@ -783,7 +784,8 @@ Homebrew; every entry point waits for the database first:
 **Backups (REL-2):** as the environment's role, `pg_dump --format=custom` into a temporary file
 (`umask 077`), verified with `pg_restore --list` and a full `pg_restore --file=/dev/null`, renamed
 into place, newest 30 kept; a "backup failed or stale" alert fires when the newest verified dump is
-over 26 hours old. **Restore** reads the dump's database name and refuses a dump from another
+over 26 hours old. The dump `upgrade_install()` takes first is named `…-pre-upgrade.dump` and kept
+apart (newest 5), like pre-restore dumps: neither counts toward the 30, "due" or "stale". **Restore** reads the dump's database name and refuses a dump from another
 environment, asks for a typed confirmation (the environment's name) and, for production, an
 explicit `--env production` on the command line, takes the sync locks (refusing while a sync
 runs) before it stops the web, sync and backup agents, takes a pre-restore dump (kept apart from

@@ -11,10 +11,11 @@ from pathlib import Path
 
 import pytest
 
+from budgetapp import clock
 from budgetapp import secrets as app_secrets
 from budgetapp.commands import backup as backup_command
 from budgetapp.config import load_settings
-from budgetapp.services import backup
+from budgetapp.services import agents, backup
 from budgetapp.services.notify import RecordingNotifier
 
 UTC = dt.UTC
@@ -33,10 +34,11 @@ def stamp(when: dt.datetime) -> str:
     return when.astimezone(UTC).strftime(backup.TIMESTAMP_FORMAT)
 
 
-def fake_dump(settings, when: dt.datetime, *, pre=False, mode=0o600, db=None) -> Path:
+def fake_dump(settings, when: dt.datetime, *, pre=False, kind="", mode=0o600, db=None) -> Path:
     """A file with a final dump name (for listing/rotation tests; not a real dump)."""
     directory = backup.ensure_backup_dir(settings)
-    suffix = "-pre-restore" if pre else ""
+    kind = backup.PRE_RESTORE if pre else kind
+    suffix = f"-{kind}" if kind else ""
     path = directory / f"{db or settings.db_name}-{stamp(when)}{suffix}.dump"
     path.write_bytes(b"PGDMP")
     os.chmod(path, mode)
@@ -85,7 +87,7 @@ class TestRealBackup:
         result = backup.run_backup(bk)
         assert result.created and result.path is not None
         parsed = backup.parse_backup_name(result.path)
-        assert parsed is not None and parsed[0] == bk.db_name and parsed[3] is False
+        assert parsed is not None and parsed[0] == bk.db_name and parsed[3] == ""
         assert result.path.stat().st_mode & 0o777 == 0o600
         assert result.path.parent.stat().st_mode & 0o777 == 0o700
         assert result.info.database == bk.db_name
@@ -146,6 +148,29 @@ class TestRealBackup:
             backup.run_backup(missing)
         assert list(bk.backups_dir.iterdir()) == []
 
+    def test_pre_upgrade_copies_never_rotate_out_nightly_backups(self, bk):
+        """Final review ops-1: each upgrade (and each retry of a failing one) took an ordinary
+        backup, so the 30 kept were "the 30 newest dumps of any kind" and every upgrade attempt
+        deleted one nightly restore point."""
+        nightly = [fake_dump(bk, NOW - dt.timedelta(days=d)) for d in range(30)]
+        made = []
+        for minute in (0, 5, 10):  # three ./run live attempts, two of them failing later on
+            with clock.frozen(now=NOW + dt.timedelta(hours=8, minutes=minute)):
+                made.append(agents._default_backup(bk))
+        assert [b.path for b in backup.list_backups(bk, kind="")] == nightly
+        copies = backup.list_backups(bk, kind=backup.PRE_UPGRADE)
+        assert [b.path for b in copies] == made[::-1]
+        assert all(p.name.endswith("-pre-upgrade.dump") for p in made)
+        assert backup.newest_backup(bk).path == nightly[0]
+
+    def test_pre_upgrade_copies_keep_their_newest_5(self, bk):
+        old = [fake_dump(bk, NOW - dt.timedelta(days=d), kind=backup.PRE_UPGRADE) for d in range(6)]
+        nightly = fake_dump(bk, NOW - dt.timedelta(days=40))
+        result = backup.run_backup(bk, kind=backup.PRE_UPGRADE, now=NOW + dt.timedelta(hours=1))
+        kept = [b.path for b in backup.list_backups(bk, kind=backup.PRE_UPGRADE)]
+        assert kept == [result.path, *old[:4]] and result.kept == backup.PRE_UPGRADE_KEEP
+        assert set(result.removed) == set(old[4:]) and nightly.exists()
+
     def test_if_due_skips_a_recent_backup(self, bk):
         first = backup.run_backup(bk, now=NOW)
         skipped = backup.run_backup(bk, if_due=True, now=NOW + dt.timedelta(hours=19))
@@ -163,14 +188,17 @@ class TestListing:
     def test_only_final_dumps_of_this_database_count(self, bk):
         good = fake_dump(bk, NOW)
         pre = fake_dump(bk, NOW + dt.timedelta(hours=1), pre=True)
+        upgrade = fake_dump(bk, NOW + dt.timedelta(hours=3), kind=backup.PRE_UPGRADE)
         fake_dump(bk, NOW + dt.timedelta(hours=2), db="budgetapp_sandbox")
         (bk.backups_dir / f".{bk.db_name}-{stamp(NOW)}.partial").write_bytes(b"x")
         (bk.backups_dir / "notes.txt").write_text("hi")
         (bk.backups_dir / f"{bk.db_name}-garbage.dump").write_bytes(b"x")
         found = backup.list_backups(bk)
-        assert [b.path for b in found] == [pre, good]
-        assert found[0].pre_restore and not found[1].pre_restore
-        assert found[1].created_at == NOW
+        assert [b.path for b in found] == [upgrade, pre, good]
+        assert [b.kind for b in found] == [backup.PRE_UPGRADE, backup.PRE_RESTORE, ""]
+        assert found[1].pre_restore and not found[0].pre_restore and not found[2].pre_restore
+        assert found[2].created_at == NOW
+        assert backup.parse_backup_name(upgrade)[3] == backup.PRE_UPGRADE
 
     def test_an_absent_folder_has_no_backups(self, bk):
         assert backup.list_backups(bk) == [] and backup.newest_backup(bk) is None
@@ -182,8 +210,8 @@ class TestListing:
         removed = backup.rotate(bk, keep=2)
         assert removed == [backups[1], backups[0]]  # 2 backups stay; the copies don't count
         assert all(path.exists() for path in [*backups[2:], *copies])
-        assert [b.path for b in backup.list_backups(bk, pre_restore=False)] == backups[:1:-1]
-        assert [b.path for b in backup.list_backups(bk, pre_restore=True)] == copies[::-1]
+        assert [b.path for b in backup.list_backups(bk, kind="")] == backups[:1:-1]
+        assert [b.path for b in backup.list_backups(bk, kind=backup.PRE_RESTORE)] == copies[::-1]
         with pytest.raises(ValueError):
             backup.rotate(bk, keep=0)
 
@@ -200,6 +228,7 @@ class TestListing:
         them (and holds the data the restore replaced)."""
         nightly = fake_dump(bk, NOW - dt.timedelta(hours=30))
         fake_dump(bk, NOW - dt.timedelta(hours=1), pre=True)
+        fake_dump(bk, NOW - dt.timedelta(hours=2), kind=backup.PRE_UPGRADE)
         assert backup.newest_backup(bk).path == nightly
         assert backup.is_due(bk, now=NOW)
         assert backup.backup_health(bk, now=NOW) == (True, backup.newest_backup(bk))
@@ -218,10 +247,11 @@ class TestListing:
 
     def test_fix_permissions(self, bk):
         path = fake_dump(bk, NOW, mode=0o644)
+        copy = fake_dump(bk, NOW, kind=backup.PRE_UPGRADE, mode=0o644)
         os.chmod(bk.backups_dir, 0o755)
         changed = backup.fix_permissions(bk)
-        assert set(changed) == {bk.backups_dir, path}
-        assert path.stat().st_mode & 0o777 == 0o600
+        assert set(changed) == {bk.backups_dir, path, copy}
+        assert path.stat().st_mode & 0o777 == 0o600 and copy.stat().st_mode & 0o777 == 0o600
 
     def test_the_dump_header(self):
         info = backup.parse_dump_header(listing("budgetapp"))

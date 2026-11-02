@@ -22,6 +22,7 @@ import os
 import plistlib
 import re
 import subprocess
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1101,7 +1102,7 @@ def check_backups(ctx: DoctorContext) -> Iterable[Check]:
                 detail=str(directory),
                 fix=f"chmod 700 {_quote(directory)}",
             )
-    found = backups.list_backups(s)  # every dump, pre-restore copies included
+    found = backups.list_backups(s)  # every dump, pre-restore and pre-upgrade copies included
     loose = [b for b in found if (_mode(b.path) or 0) & 0o077]
     if loose:
         yield Check(
@@ -1110,9 +1111,8 @@ def check_backups(ctx: DoctorContext) -> Iterable[Check]:
             f"{len(loose)} dump(s) are readable by others",
             fix=f"chmod 600 {_quote(directory)}/*.dump",
         )
-    # Freshness is about the nightly backups: a restore's copy of replaced data doesn't count.
-    regular = [b for b in found if not b.pre_restore]
-    copies = len(found) - len(regular)
+    # Freshness is about the nightly backups: the copies restores and upgrades take don't count.
+    regular = [b for b in found if not b.kind]
     newest = regular[0] if regular else None
     if newest is None:
         yield Check(
@@ -1133,7 +1133,9 @@ def check_backups(ctx: DoctorContext) -> Iterable[Check]:
             fix=f"./run backup --env {s.env}; then read {s.logs_dir / 'backup.log'}",
         )
     else:
-        extra = f", plus {copies} pre-restore copy(ies)" if copies else ""
+        copies = Counter(b.kind for b in found if b.kind)
+        counts = " and ".join(f"{copies[kind]} {kind}" for kind in sorted(copies))
+        extra = f", plus {counts} copy(ies)" if counts else ""
         yield Check(
             section,
             PASS,

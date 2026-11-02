@@ -20,6 +20,9 @@ wakes). To back up by hand:
   named after the database and the time in UTC, for example
   `budgetapp-20261101T023012Z.dump`. Only you can read them.
 - The newest 30 are kept (`--keep N` changes that for a manual run).
+- Each upgrade of the live app (`./run live` or `./run install-agents` after new commits) first
+  saves a copy named `…-pre-upgrade.dump`. These copies are kept apart from the 30 backups (the
+  newest 5 stay), so upgrading, or retrying an upgrade, never pushes a nightly backup out.
 - If a backup fails, or the newest one is more than 26 hours old, you get a notification (once a
   day) and `./run doctor --env production` reports it.
 - Backups hold the database only. Your keys and the access token stay in Keychain; keep a copy of
@@ -163,7 +166,7 @@ before writing.
 | `~/Desktop/budgetapp` | the code (git), with its Python environment in `.venv` |
 | `~/Library/Application Support/budgetapp/postgres` | the PostgreSQL 18 data (skipped by Time Machine) |
 | `~/Library/Application Support/budgetapp/run` | the database server's private socket folder |
-| `~/Library/Application Support/budgetapp/backups/production`, `…/sandbox` | verified backups and pre-restore safety copies |
+| `~/Library/Application Support/budgetapp/backups/production`, `…/sandbox` | verified backups, pre-restore safety copies and pre-upgrade copies |
 | `~/Library/Application Support/budgetapp/venv` | the installed production copy that `./run live` and the agents run |
 | `~/Library/Application Support/budgetapp/bin` | the small script the postgres agent starts |
 | `~/Library/Application Support/budgetapp/state` | small marker files (once-a-day notices, the install stamp) and, only if Keychain failed during a link, `recovery/` |

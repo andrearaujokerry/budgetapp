@@ -6,8 +6,9 @@ lives, so production always runs a NON-editable install in
 
 * :func:`upgrade_install` is the only way production code changes: refuse a dirty tree → export
   the commit (``git archive``) into a private temporary folder → stop the web, sync and backup
-  agents that are loaded → back up the production database → ``pip install -r requirements.txt``
-  then ``pip install --no-deps`` from that export into the install → run the migrations FROM THE
+  agents that are loaded → back up the production database (a ``…-pre-upgrade.dump`` copy, kept
+  apart from the nightly backups) → ``pip install -r requirements.txt`` then
+  ``pip install --no-deps`` from that export into the install → run the migrations FROM THE
   NEW INSTALL while holding the sync lock → write the install stamp (the git commit, which
   ``doctor`` compares with the repository) → start the agents again. The install is built from
   the commit itself, never from the working tree, so a file saved during the upgrade can't
@@ -626,11 +627,13 @@ def _install_env(layout: Layout) -> dict[str, str]:
 
 
 def _default_backup(settings: Settings) -> Path | None:
+    """The copy taken before an upgrade: a ``…-pre-upgrade.dump`` of its own set, so upgrades
+    (and retries of a failing one) never push nightly backups out of the newest 30."""
     from budgetapp.services import backup
 
     _refuse_production_in_tests(settings)
     try:
-        return backup.run_backup(settings).path
+        return backup.run_backup(settings, kind=backup.PRE_UPGRADE).path
     except backup.BackupError as exc:  # ./run live reports AgentError only
         raise AgentError(
             f"The backup before the upgrade failed ({exc}), so nothing was upgraded. "

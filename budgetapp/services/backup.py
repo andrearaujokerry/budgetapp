@@ -15,6 +15,10 @@ separate set: they never count toward the 30 nightly/manual backups, nor toward 
 and the newest 5 are kept, pruned only after a restore succeeds. Taking one never deletes anything,
 so a restore can never delete the backup it was asked to restore.
 
+The copy each production upgrade takes first (``<db>-<timestamp>-pre-upgrade.dump``, see
+``services.agents``) is a third set for the same reason: upgrades, and retries of a failing one,
+never push nightly backups out, nor count toward "due" or "stale". The newest 5 are kept.
+
 **Restore** (``./run restore FILE``) replaces the environment's database with a dump of that same
 database, in ONE transaction, so it either completes or changes nothing:
 
@@ -65,6 +69,8 @@ log = logging.getLogger(__name__)
 DEFAULT_KEEP = 30
 #: Copies of replaced data kept by restores (a separate set; never counted toward DEFAULT_KEEP).
 PRE_RESTORE_KEEP = 5
+#: Copies taken before production upgrades (another separate set).
+PRE_UPGRADE_KEEP = 5
 DUE_AFTER = dt.timedelta(hours=20)
 STALE_AFTER = dt.timedelta(hours=26)
 #: A temporary file older than this is left over from a killed run and is removed.
@@ -73,11 +79,14 @@ PARTIAL_MAX_AGE = dt.timedelta(hours=6)
 AGENT_EXIT_WAIT = 10.0
 DUMP_TIMEOUT = 3600  # seconds, for pg_dump / pg_restore / psql
 TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+#: Dump kinds: ``""`` (a backup: nightly or ``./run backup``) and the two kinds of copies.
 PRE_RESTORE = "pre-restore"
+PRE_UPGRADE = "pre-upgrade"
 PARTIAL_SUFFIX = ".partial"
-#: ``<db>-<timestamp>[-<n>][-pre-restore].dump``; only verified dumps carry this name.
+#: ``<db>-<timestamp>[-<n>][-pre-restore|-pre-upgrade].dump``; only verified dumps carry this name.
 DUMP_NAME = re.compile(
-    r"^(?P<db>[a-z0-9_]+)-(?P<ts>\d{8}T\d{6}Z)(?:-(?P<seq>\d{1,3}))?(?P<pre>-pre-restore)?\.dump$"
+    r"^(?P<db>[a-z0-9_]+)-(?P<ts>\d{8}T\d{6}Z)(?:-(?P<seq>\d{1,3}))?"
+    r"(?:-(?P<kind>pre-restore|pre-upgrade))?\.dump$"
 )
 #: The end of a complete ``pg_restore --file`` script.
 SCRIPT_COMPLETE = "-- PostgreSQL database dump complete"
@@ -117,12 +126,16 @@ class Backup:
     database: str
     created_at: dt.datetime  # aware, UTC (from the file name)
     size: int
-    pre_restore: bool = False
+    kind: str = ""  # "" (a backup), PRE_RESTORE or PRE_UPGRADE
     sequence: int = 0
 
     @property
     def name(self) -> str:
         return self.path.name
+
+    @property
+    def pre_restore(self) -> bool:
+        return self.kind == PRE_RESTORE
 
     def age(self, now: dt.datetime | None = None) -> dt.timedelta:
         return (now or clock.now()) - self.created_at
@@ -133,20 +146,21 @@ def backup_dir(settings: Settings) -> Path:
     return Path(settings.backups_dir)
 
 
-def parse_backup_name(path: Path) -> tuple[str, dt.datetime, int, bool] | None:
-    """``(database, created_at, sequence, pre_restore)`` for a final dump name, else ``None``."""
+def parse_backup_name(path: Path) -> tuple[str, dt.datetime, int, str] | None:
+    """``(database, created_at, sequence, kind)`` for a final dump name, else ``None``."""
     match = DUMP_NAME.match(path.name)
     if match is None:
         return None
     created = dt.datetime.strptime(match["ts"], TIMESTAMP_FORMAT).replace(tzinfo=dt.UTC)
-    return match["db"], created, int(match["seq"] or 0), match["pre"] is not None
+    return match["db"], created, int(match["seq"] or 0), match["kind"] or ""
 
 
-def list_backups(settings: Settings, *, pre_restore: bool | None = None) -> list[Backup]:
+def list_backups(settings: Settings, *, kind: str | None = None) -> list[Backup]:
     """Verified dumps of this environment's database, newest first (temporary files ignored).
 
-    ``pre_restore``: ``None`` lists every dump, ``False`` only the backups (nightly or
-    ``./run backup``), ``True`` only the copies restores took of the data they replaced.
+    ``kind``: ``None`` lists every dump, ``""`` only the backups (nightly or ``./run backup``),
+    :data:`PRE_RESTORE` only the copies restores took of the data they replaced,
+    :data:`PRE_UPGRADE` only the copies taken before production upgrades.
     """
     directory = backup_dir(settings)
     found: list[Backup] = []
@@ -158,7 +172,7 @@ def list_backups(settings: Settings, *, pre_restore: bool | None = None) -> list
         parsed = parse_backup_name(path)
         if parsed is None or parsed[0] != settings.db_name:
             continue
-        if pre_restore is not None and parsed[3] != pre_restore:
+        if kind is not None and parsed[3] != kind:
             continue
         try:
             stat = path.stat()
@@ -166,16 +180,16 @@ def list_backups(settings: Settings, *, pre_restore: bool | None = None) -> list
             continue
         if not path.is_file():
             continue
-        database, created, sequence, pre = parsed
-        found.append(Backup(path, database, created, stat.st_size, pre, sequence))
+        database, created, sequence, dump_kind = parsed
+        found.append(Backup(path, database, created, stat.st_size, dump_kind, sequence))
     found.sort(key=lambda b: (b.created_at, b.sequence, b.name), reverse=True)
     return found
 
 
 def newest_backup(settings: Settings) -> Backup | None:
-    """The newest backup (pre-restore copies don't count: they say nothing about whether the
-    nightly backups work, and they hold the data a restore replaced)."""
-    backups = list_backups(settings, pre_restore=False)
+    """The newest backup (pre-restore and pre-upgrade copies don't count: they say nothing about
+    whether the nightly backups work)."""
+    backups = list_backups(settings, kind="")
     return backups[0] if backups else None
 
 
@@ -354,9 +368,9 @@ def verify_dump(settings: Settings, path: Path, *, runner: Runner = subprocess.r
     return info
 
 
-def _final_path(directory: Path, database: str, when: dt.datetime, *, pre_restore: bool) -> Path:
+def _final_path(directory: Path, database: str, when: dt.datetime, *, kind: str) -> Path:
     stamp = when.astimezone(dt.UTC).strftime(TIMESTAMP_FORMAT)
-    suffix = f"-{PRE_RESTORE}" if pre_restore else ""
+    suffix = f"-{kind}" if kind else ""
     for sequence in range(1000):
         middle = f"-{sequence}" if sequence else ""
         path = directory / f"{database}-{stamp}{middle}{suffix}.dump"
@@ -410,10 +424,10 @@ def rotate(
 ) -> list[Path]:
     """Delete all but the ``keep`` newest backups; returns the removed paths.
 
-    Pre-restore copies are never touched (see :func:`prune_pre_restore`), nor are ``protect``ed
-    paths.
+    Pre-restore and pre-upgrade copies are never touched (see :func:`prune_pre_restore`), nor are
+    ``protect``ed paths.
     """
-    return _remove_all_but(list_backups(settings, pre_restore=False), keep, protect)
+    return _remove_all_but(list_backups(settings, kind=""), keep, protect)
 
 
 def prune_pre_restore(
@@ -421,7 +435,7 @@ def prune_pre_restore(
 ) -> list[Path]:
     """Delete all but the ``keep`` newest pre-restore copies, never a ``protect``ed path (the
     file a restore just read may itself be a pre-restore copy: an undo)."""
-    return _remove_all_but(list_backups(settings, pre_restore=True), keep, protect)
+    return _remove_all_but(list_backups(settings, kind=PRE_RESTORE), keep, protect)
 
 
 def fix_permissions(settings: Settings) -> list[Path]:
@@ -465,32 +479,35 @@ def run_backup(
     keep: int = DEFAULT_KEEP,
     if_due: bool = False,
     min_age: dt.timedelta = DUE_AFTER,
-    pre_restore: bool = False,
+    kind: str = "",
     runner: Runner = subprocess.run,
     store: secrets.SecretStore | None = None,
     now: dt.datetime | None = None,
 ) -> BackupResult:
     """Dump the environment's database into its backup folder (see the module docstring).
 
-    A backup then rotates the backups (newest ``keep`` stay). A ``pre_restore`` copy deletes
-    nothing: it is taken while a restore may be reading the oldest backup, and the restore prunes
-    its own copies once it has succeeded.
+    A backup (``kind=""``) then rotates the backups (newest ``keep`` stay). A :data:`PRE_RESTORE`
+    copy deletes nothing: it is taken while a restore may be reading the oldest backup, and the
+    restore prunes its own copies once it has succeeded. A :data:`PRE_UPGRADE` copy keeps the
+    newest :data:`PRE_UPGRADE_KEEP` of its own set. ``if_due`` applies to backups only.
 
     Raises :class:`BackupError` when the dump or its verification fails; the temporary file is
     removed, so nothing unverified ever carries a final name.
     """
     if keep < 1:
         raise ValueError("keep at least one backup")
+    if kind not in ("", PRE_RESTORE, PRE_UPGRADE):
+        raise ValueError(f"unknown dump kind {kind!r}")
     now = now or clock.now()
     directory = ensure_backup_dir(settings)
-    if if_due:
+    if if_due and not kind:
         newest = newest_backup(settings)
         if newest is not None and newest.age(now) < min_age:
             return BackupResult("skipped", newest=newest, kept=len(list_backups(settings)))
     _remove_stale_partials(directory, now)
     pg_dump = settings.require_pg_bin("pg_dump")
     connection = pg_connection(settings, store=store)
-    final = _final_path(directory, settings.db_name, now, pre_restore=pre_restore)
+    final = _final_path(directory, settings.db_name, now, kind=kind)
     temporary = directory / f".{final.stem}{PARTIAL_SUFFIX}"
     started = time.monotonic()
     try:
@@ -516,7 +533,12 @@ def run_backup(
             temporary.unlink()
         raise
     seconds = time.monotonic() - started
-    removed = () if pre_restore else tuple(rotate(settings, keep))
+    if kind == PRE_RESTORE:
+        removed: tuple[Path, ...] = ()
+    elif kind == PRE_UPGRADE:
+        removed = tuple(_remove_all_but(list_backups(settings, kind=kind), PRE_UPGRADE_KEEP))
+    else:
+        removed = tuple(rotate(settings, keep))
     size = final.stat().st_size
     log.info(
         "backup %s (%d bytes, %.1f s); removed %d old", final.name, size, seconds, len(removed)
@@ -529,7 +551,7 @@ def run_backup(
         info=info,
         removed=removed,
         newest=newest_backup(settings),
-        kept=len(list_backups(settings, pre_restore=pre_restore)),
+        kept=len(list_backups(settings, kind=kind)),
     )
 
 
@@ -1049,7 +1071,7 @@ def restore(
             )
             if safety_copy:
                 try:
-                    pre = run_backup(settings, pre_restore=True, runner=runner, store=store)
+                    pre = run_backup(settings, kind=PRE_RESTORE, runner=runner, store=store)
                 except BackupError as exc:
                     raise SafetyCopyFailed(
                         f"The copy of the current data failed ({exc}), so nothing was restored "
