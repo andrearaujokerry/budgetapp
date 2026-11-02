@@ -436,6 +436,8 @@ class _Applied:
     new_charge_ids: tuple[int, ...]
     #: pending charges stored for a higher amount (posted with a tip, or changed in place)
     pending_raises: tuple[PendingRaise, ...]
+    #: the Item's ``last_sync_success_at`` before this batch
+    previous_success_at: dt.datetime | None
     update_status: str | None
     history_completed_now: bool
 
@@ -1312,6 +1314,7 @@ def _apply_batch(
         item.error_message = None
         item.error_display_message = None
         item.transactions_update_status = batch.update_status
+        previous_success_at = item.last_sync_success_at
         item.last_sync_success_at = now
         s.flush()
         moved = s.execute(
@@ -1331,6 +1334,7 @@ def _apply_batch(
             removed=applier.removed,
             new_charge_ids=tuple(t.id for t in applier.inserted if id(t) not in applier.continued),
             pending_raises=tuple(PendingRaise(t.id, pid, old) for t, pid, old in applier.raises),
+            previous_success_at=previous_success_at,
             update_status=batch.update_status,
             history_completed_now=completed_now,
         )
@@ -1503,6 +1507,7 @@ def _sync_locked(
         removed=applied.removed if applied else 0,
         inserted_transaction_ids=applied.new_charge_ids if applied else (),
         pending_raises=applied.pending_raises if applied else (),
+        previous_success_at=applied.previous_success_at if applied else None,
         initial_history_load=not history_was_complete,
         history_completed_now=applied.history_completed_now if applied else False,
         update_status=update_status,

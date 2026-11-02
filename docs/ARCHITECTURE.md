@@ -836,13 +836,14 @@ that called it.
 - **Consent (SYNC-6):** renewal due within `consent_reminder_days`, once per due date; not while
   the Item needs reconnecting (update mode renews the consent too).
 - **Large charges (ALR-3):** only Plaid rows inserted by a sync for more than
-  `large_charge_threshold`, dated within the last 7 days, after the initial history load; once
-  per charge and not again when it posts. The sync outcome lists only new charges: a row that
-  replaces one the app already had (a posting, linked or matched, or a re-delivery after account
-  churn) is left out. A charge that first goes over the amount when it posts (a pending charge
-  at or under it, posted higher with a tip or hotel incidentals, or raised in place by Plaid;
-  the sync outcome's `pending_raises`) alerts once, under the pending row's key. More than 3
-  new ones in a run send one summary notification.
+  `large_charge_threshold`, dated at most 7 days before the previous successful sync (so a
+  catch-up sync after a break of over a week still announces the break's charges), after the
+  initial history load; once per charge and not again when it posts. The sync outcome lists only
+  new charges: a row that replaces one the app already had (a posting, linked or matched, or a
+  re-delivery after account churn) is left out. A charge that first goes over the amount when it
+  posts (a pending charge at or under it, posted higher with a tip or hotel incidentals, or
+  raised in place by Plaid; the sync outcome's `pending_raises`) alerts once, under the pending
+  row's key. More than 3 new ones in a run send one summary notification.
 - **Backups:** failed or stale, once a day.
 
 ## 12. Testing (MNT-2)

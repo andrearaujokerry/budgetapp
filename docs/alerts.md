@@ -52,11 +52,13 @@ Details:
   budget amount, new percentages or another budget period count from the next sync, within about
   six hours.
 - **Large charges** are checked for new charges from a sync that are strictly over your amount,
-  dated within the last 7 days, and not while Plaid sends your history right after linking. Each
-  charge is announced once: a pending charge that posts isn't announced a second time. A pending
-  charge at or under your amount that goes above it (a tip or hotel incidentals added when it
-  posts, or Plaid raising the pending amount) is announced once, when it goes above. CSV imports
-  never raise one.
+  dated at most 7 days before the previous successful sync (so the first sync after a break,
+  such as a trip with the Mac off or a reconnect fixed late, still announces the break's
+  charges), and not while Plaid sends your history right after linking. Each charge is announced
+  once: a pending charge that posts isn't announced a second time. A pending charge at or under
+  your amount that goes above it (a tip or hotel incidentals added when it posts, or Plaid
+  raising the pending amount) is announced once, when it goes above. CSV imports never raise
+  one.
 - **Keychain approval needed** asks you to run `./run doctor --env production` in Terminal and
   click **Always Allow** for each item (usually after a `brew upgrade` of Python). The sync and
   backup agents simply try again later.

@@ -29,14 +29,17 @@ class SyncOutcome:
     * ``status``: ``success`` | ``error`` | ``skipped`` (another sync held the lock) |
       ``not_ready`` (Plaid's ``NOT_READY``: recorded as a success with no changes).
     * ``inserted_transaction_ids``: rows this sync inserted for charges the app had not seen
-      before (ALR-3 large-charge alerts look only at these, dated within the last 7 days). A row
-      that replaces one the app already had is left out, so each charge appears once: a posted
-      charge naming its pending row, one matched to a removed charge (with or without the user's
-      edits), or a re-delivery after Plaid re-issued an account. ``added`` still counts every
-      inserted row.
+      before (ALR-3 large-charge alerts look only at these, dated at most 7 days before the
+      previous successful sync). A row that replaces one the app already had is left out, so
+      each charge appears once: a posted charge naming its pending row, one matched to a removed
+      charge (with or without the user's edits), or a re-delivery after Plaid re-issued an
+      account. ``added`` still counts every inserted row.
     * ``pending_raises``: charges the app had as pending that this sync stored for a higher
       amount (:class:`PendingRaise`), so a charge that first goes over the large-charge threshold
       when it posts is alerted once (ALR-3).
+    * ``previous_success_at``: the Item's last successful sync before this one (None on the
+      first), so a catch-up sync after a break of over a week still announces the break's
+      large charges.
     * ``initial_history_load``: True while the Item has never completed its historical pull,
       including the run that first sees ``HISTORICAL_UPDATE_COMPLETE``; large-charge alerts skip
       such runs so two years of backfill do not notify.
@@ -55,6 +58,7 @@ class SyncOutcome:
     removed: int = 0
     inserted_transaction_ids: tuple[int, ...] = ()
     pending_raises: tuple[PendingRaise, ...] = ()
+    previous_success_at: dt.datetime | None = None
     initial_history_load: bool = False
     history_completed_now: bool = False
     update_status: str | None = None
