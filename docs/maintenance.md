@@ -91,7 +91,9 @@ they run the installed production copy with your real data, never the Sandbox:
   `~/Library/Logs/budgetapp`.
 - They never show a Keychain dialog. When macOS wants your approval, they notify you once a day
   and try again later: run `./run doctor --env production` in Terminal and click **Always Allow**.
-- Keep **Budget Tracker** allowed in System Settings → General → Login Items & Extensions.
+- Keep them allowed in System Settings → General → Login Items & Extensions → Allow in the
+  Background. macOS lists them under the programs they run (Python and sh), not as "Budget
+  Tracker" (the name the app's messages use).
 - `./run install-agents` again re-installs them (and upgrades the installed copy if the code
   changed); `--dry-run` shows the plan first. `./run uninstall-agents` removes them and keeps your
   data, backups and the installed copy.
@@ -192,10 +194,11 @@ their fix.
 | **"Python 3.14 is required"** | `brew install python@3.14` |
 | **"The repository has uncommitted changes"** from `./run live` or `./run install-agents` | Production only runs committed code: commit or stash the changes, then try again |
 | **"Refusing to serve the PRODUCTION app from a git checkout"** or to migrate it | Use `./run live`, which runs and upgrades the installed copy |
-| `launchctl bootstrap … failed`, or the agents don't run | Allow Budget Tracker in System Settings → General → Login Items & Extensions, then `./run install-agents` again |
+| `launchctl bootstrap … failed`, or the agents don't run | Allow the app's background items (listed as Python and sh, not "Budget Tracker") in System Settings → General → Login Items & Extensions → Allow in the Background, then `./run install-agents` again |
 | No notifications | `./run notify-test`, then allow Script Editor in System Settings → Notifications ([Alerts](alerts.md#turn-notifications-on-one-time)) |
 | **Reconnect needed**, consent banners, **"Linking is paused"** | [Reconnecting and renewing](reconnecting.md) |
 | **"Your data may be out of date."** | The Mac was asleep or offline, or the sync agent isn't running: **Sync now**, then `./run doctor --env production` |
+| **"The last sync failed (…)."**, **Failed** with a code under Recent syncs, or "failed (…)" from `./run sync` | Look the code up in [Reconnecting → Sync failures that fix themselves](reconnecting.md#sync-failures-that-fix-themselves): most clear up by themselves, the codes under [Reconnect](reconnecting.md#reconnect) need you |
 | **"Plaid Link didn't load."** | Check the internet connection and any content blocker for 127.0.0.1, then reload |
 | A statement is **"Off by $…"** | Open it: check the transactions near the closing dates and the numbers you typed ([Statements](using-the-app.md#statements)) |
 | Wrong categories | Fix one with a click, make a rule, then re-apply rules ([Rules](using-the-app.md#rules)) |

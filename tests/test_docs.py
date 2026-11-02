@@ -9,6 +9,8 @@ Nothing here runs a command: command lines are only parsed.
 from __future__ import annotations
 
 import argparse
+import functools
+import html
 import inspect
 import re
 import shlex
@@ -478,13 +480,39 @@ def test_paths_are_the_ones_the_code_uses() -> None:
     assert f"{launch_agents}/{agents.LABEL_PREFIX}*.plist" in where
 
 
+def table_rows(path: Path, header: str) -> list[list[str]]:
+    """The cells of each body row of the table whose header row starts with ``header``."""
+    lines = path.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(header))
+    rows = []
+    for line in lines[start + 2 :]:
+        if not line.startswith("|"):
+            break
+        rows.append([c.strip() for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))])
+    return rows
+
+
 def test_logs_are_the_files_the_code_writes() -> None:
-    text = text_of(REPO / "docs" / "maintenance.md")
-    for name in ("postgres", "web-sandbox", "web-production", "sync-sandbox", "sync-production"):
-        assert f"{name}.log" in text
-    for agent in ("sync", "backup", "web"):
-        assert f"{agent}.log" in text
-    assert f"{agents.LABEL_PREFIX}postgres" in text
+    """The Logs table lists exactly the files the code writes (whole names, not substrings),
+    and each agent's row names that agent's own log."""
+    from budgetapp import pgcluster
+    from budgetapp.commands import sync as sync_command
+
+    for prefix, module in (("sync", sync_command), ("web", serve_command)):
+        assert f'f"{prefix}-{{settings.env}}"' in inspect.getsource(module), prefix
+    assert 'settings.logs_dir / "postgres.log"' in inspect.getsource(pgcluster)
+    layout = agents.Layout.for_settings(load_settings("production"))
+    expected = {"postgres.log", *(layout.log_path(name).name for name in agents.AGENTS)}
+    expected |= {f"{p}-{env}.log" for p in ("sync", "web") for env in ("sandbox", "production")}
+    maintenance = REPO / "docs" / "maintenance.md"
+    rows = table_rows(maintenance, "| File in `~/Library/Logs/budgetapp`")
+    listed = [name for cells in rows for name in re.findall(r"`([^`]+)`", cells[0])]
+    assert sorted(listed) == sorted(expected)
+    agent_rows = table_rows(maintenance, "| Agent | What it runs |")
+    assert len(agent_rows) == len(agents.AGENTS)
+    for cells in agent_rows:
+        name = re.match(r"`([^`]+)`", cells[0]).group(1).removeprefix(agents.LABEL_PREFIX)
+        assert cells[3] == f"`{layout.log_path(name).name}`", name
 
 
 def test_agent_schedules() -> None:
@@ -614,7 +642,184 @@ def test_the_doctor_sample_reads_like_doctor() -> None:
 
 
 def test_recheck_markers_name_a_wave_two_package() -> None:
-    """Sections written before DASH and ALR merged are marked for the integrator."""
+    """Sections written before DASH and ALR merged are marked for the integrator; GOLIVE marks
+    what can only be seen on the Mac once the agents are installed."""
     for path in USER_DOCS:
         for marker in re.findall(r"<!-- RECHECK\((\w+)\)", path.read_text()):
-            assert marker in ("DASH", "ALR"), (_id(path), marker)
+            assert marker in ("DASH", "ALR", "GOLIVE"), (_id(path), marker)
+
+
+# --------------------------------------------------------------------------- on-screen words
+
+_QUOTES = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"'})
+#: Placeholders inside a quoted message: "(…)", "…", *date*, `code`, CODE, "$…".
+_PLACEHOLDER = re.compile(r"\(…\)|…|\*[^*]+\*|`[^`]*`|\bCODE\b|\$")
+BOLD = re.compile(r"\*\*(.+?)\*\*")
+QUOTED = re.compile(r'"([^"]+)"')
+
+#: Bold or quoted words in the guides that are not one of the app's own strings.
+NOT_APP_WORDS = {
+    "on the same connection": "emphasis",
+    "in place": "emphasis",
+    "committed": "emphasis",
+    "encrypted": "emphasis",
+    "safety copy": "emphasis",
+    "Always Allow": "macOS's Keychain dialog (the app's messages say 'click Always Allow')",
+    "Keychain Access": "a macOS app",
+    "Show password": "Keychain Access's checkbox",
+    "Developers → Keys": "Plaid Dashboard's menu",
+    "Statements & Activity": "americanexpress.com (csv_import.DOWNLOAD_STEPS)",
+    "Custom Date Range": "americanexpress.com (csv_import.DOWNLOAD_STEPS)",
+    "Ctrl-C": "a key",
+    "LIVE DATA": "serve.py's banner, the start of a longer line",
+    "127.0.0.1:8766 is already in use": "serve.py: f'… 127.0.0.1:{port} is already in use'",
+    "⋯ menu": "transactions/_row.html: the 'more' icon button",
+    "5 new charges over $500.00": "ALR's f'{n} new charges over {limit}', an example",
+}
+#: Labels of pages still being built by a wave-2 package (RECHECK markers), so not in this
+#: tree yet. The integrator deletes these entries once DASH is merged.
+WAVE_TWO_WORDS = {
+    "All budgets": "DASH: dashboard/_budgets.html",
+    "Days left": "DASH: dashboard/_kpis.html",
+    "Compared with": "DASH: dashboard/_kpis.html",
+    "Import a CSV file": "DASH: dashboard/_empty.html",
+    "Through": "DASH: trends/index.html",
+    "Monthly average": "DASH: trends/_results.html",
+    "Every month": "DASH: trends/_grid.html",
+}
+
+
+def normalise(text: str) -> str:
+    return re.sub(r"\s+", " ", text.translate(_QUOTES)).strip().lower()
+
+
+@functools.cache
+def app_words() -> str:
+    """Everything the app can put on screen or in Terminal, normalised for searching: the
+    templates, Python and JS under ``budgetapp/`` (not vendored libraries) and the ``run``
+    script, with adjacent string literals joined and HTML entities decoded."""
+    sources = [
+        p
+        for p in sorted((REPO / "budgetapp").rglob("*"))
+        if p.suffix in (".py", ".html", ".js") and "vendor" not in p.parts
+    ]
+    text = "\n".join(p.read_text() for p in (*sources, REPO / "run"))
+    text = re.sub(r"(['\"])\s*\+?\s*\n\s*f?(['\"])", "", text)  # "…" "…" and '…' + '…'
+    return normalise(html.unescape(text))
+
+
+def fragments(message: str) -> list[str]:
+    """The literal parts of a quoted message, without its placeholders."""
+    parts = (normalise(p).strip(" .,:;()") for p in _PLACEHOLDER.split(message))
+    return [p for p in parts if len(p) >= 3]
+
+
+def is_shown(label: str, words: str) -> bool:
+    """A bare label (a button, a title) must be a whole string of the app's, not part of a
+    sentence: "Renew access" is in "renew access every 12 months" but is no button."""
+    edge_left = r"""(?:^|["'>`(])\s*"""
+    edge_right = r"""[.:…]?\s*(?:$|["'<`)]|\s·\s)"""
+    return re.search(edge_left + re.escape(normalise(label)) + edge_right, words) is not None
+
+
+def paragraphs(path: Path) -> Iterator[str]:
+    """Prose paragraphs, list items and table rows, each joined onto one line."""
+    prose, _code = split_code(path.read_text())
+    current = ""
+    for line in prose:
+        if not line.strip() or re.match(r"^\s*([-*]\s|\d+\.\s|\||#|<!--)", line):
+            if current:
+                yield current
+            current = line if line.strip() else ""
+        else:
+            current = f"{current} {line.strip()}" if current else line
+    if current:
+        yield current
+
+
+def quoted_labels(path: Path) -> Iterator[tuple[str, bool]]:
+    """``(words, is_message)`` for what a guide says the app shows: bold labels
+    (**Renew consent**), quoted messages in bold (**"Linking is paused."**) and quoted messages
+    in tables. Bold lead-ins are skipped: at the start of a list item or table row, a bold line
+    of its own, or ending in ":", "." or "," (unless the bold holds a quoted message)."""
+    for para in paragraphs(path):
+        for match in BOLD.finditer(para):
+            span, before = match.group(1), para[: match.start()]
+            quoted = QUOTED.findall(span)
+            if quoted:
+                yield from ((q, True) for q in quoted)
+                continue
+            lead_in = re.fullmatch(r"\s*(?:[-*]|\d+\.|\|)\s*", before) is not None
+            whole_line = para.strip() == match.group(0)
+            if not (lead_in or whole_line or span.rstrip().endswith((":", ".", ","))):
+                yield span, False
+    header: list[str] | None = None
+    for line in split_code(path.read_text())[0]:
+        if not line.startswith("|"):
+            header = None
+            continue
+        cells = [c.strip() for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+        if header is None:
+            header = cells
+        elif not set(line) <= set("|-: "):
+            for column, cell in zip(header, cells, strict=False):
+                if "for example" not in column:  # made-up notification examples
+                    yield from ((q, True) for q in QUOTED.findall(cell) if f'**"{q}"**' not in cell)
+
+
+def missing_labels(paths: tuple[Path, ...], words: str) -> list[tuple[str, str]]:
+    allowed = {normalise(w) for w in (*NOT_APP_WORDS, *WAVE_TWO_WORDS)}
+    missing = []
+    for path in paths:
+        for label, is_message in quoted_labels(path):
+            if normalise(label) in allowed:
+                continue
+            if is_message:
+                found = all(part in words for part in fragments(label))
+            else:
+                found = is_shown(label, words)
+            if not found:
+                missing.append((path.name, label))
+    return missing
+
+
+def test_quoted_labels_exist() -> None:
+    """Every button, title and message a guide quotes is one the app really shows."""
+    assert missing_labels(USER_DOCS, app_words()) == []
+
+
+@pytest.mark.parametrize(
+    ("guide", "good", "bad"),
+    [
+        ("reconnecting.md", "Connection → **Renew consent**", "Connection → **Renew permission**"),
+        ("reconnecting.md", "Click **Reconnect**.", "Click **Reconnect now**."),
+        ("maintenance.md", '| **"Upgrade needed"** |', '| **"Update needed"** |'),
+        ("going-live.md", '**"Plaid Link didn\'t finish."**', '**"Plaid Link failed."**'),
+        ("alerts.md", "The **Send test notification**", "The **Send a test notification**"),
+        ("reconnecting.md", "| \"Plaid couldn't be reached.", '| "Plaid is unreachable.'),
+    ],
+)
+def test_the_label_check_catches_a_renamed_label(
+    tmp_path: Path, guide: str, good: str, bad: str
+) -> None:
+    text = (REPO / "docs" / guide).read_text()
+    assert good in text
+    copy = tmp_path / guide
+    copy.write_text(text.replace(good, bad))
+    assert missing_labels((copy,), app_words()), bad
+
+
+def test_the_label_check_skips_lead_ins(tmp_path: Path) -> None:
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        "Click **Sync now**, then **Reconnect**.\n\n- **Made-up lead-in** prose.\n"
+        "- **Made-up sentence.** More.\n\n**Made-up heading**\n\n| **Made-up cell** | x |\n"
+    )
+    assert missing_labels((doc,), app_words()) == []
+
+
+def test_the_exceptions_are_still_used() -> None:
+    """Each allowed exception still appears in a guide, so the lists don't grow stale."""
+    text = " ".join(normalise(p.read_text()) for p in USER_DOCS)
+    for word in (*NOT_APP_WORDS, *WAVE_TWO_WORDS):
+        assert normalise(word) in text, word

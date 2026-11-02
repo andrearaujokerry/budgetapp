@@ -17,7 +17,7 @@ That is why the app treats the production link as a one-time event:
 
 - It offers **Link American Express** only while nothing is linked: no connection in the
   database, no access token in Keychain, no link still open in another window, and no unsaved
-  token in a recovery file. Otherwise the button is replaced by the reason and the way out.
+  token in a recovery file. Otherwise the button stays off and the page says why and what to do.
 - Problems are always repaired **in place**: Reconnect, Renew consent and "Grant access to
   statement details" reopen the same connection in Plaid's window and never use another one
   ([Reconnecting and renewing](reconnecting.md)).
@@ -83,8 +83,17 @@ agents") that keep it running:
 macOS runs a scheduled job it missed while the Mac was asleep as soon as it wakes. Plaid itself
 refreshes from Amex one to four times a day, so four syncs a day are plenty.
 
-macOS then shows **"Background Items Added"**. Keep Budget Tracker allowed in System Settings →
-General → Login Items & Extensions, or the agents won't run.
+macOS then shows **"Background Items Added"**. Keep the app's background items allowed in System
+Settings → General → Login Items & Extensions → Allow in the Background, or the agents won't run.
+macOS doesn't know them as "Budget Tracker" (the name the app's own messages use): it lists them
+under the programs they run (Python and sh).
+
+<!-- RECHECK(GOLIVE): the names macOS shows for the agents were inferred from the plists (no app
+     name or bundle identifier; ProgramArguments are the install's venv/bin/python and /bin/sh),
+     not seen on a Mac: loading agents is off limits while building. After the first
+     ./run install-agents, note the names under Allow in the Background and update this
+     paragraph, docs/maintenance.md (The background agents, Troubleshooting) and OPS's messages
+     (agents.Launchctl.bootstrap, install_agents' last line, doctor's disabled-agent fix). -->
 
 `--with-web` keeps the production app running all the time, so http://127.0.0.1:8765 is always
 there. Without it, `./run live` runs the app only while its Terminal window is open. Run
@@ -140,23 +149,42 @@ Plaid window adds them to the same connection.
 
 ### If something goes wrong while linking
 
-- **"Plaid Link didn't finish."** Nothing was linked and no connection was used. Read the reason,
-  fix it (often a Dashboard checklist item) and try again.
-- **"Linking is paused."** A production link was started and may still finish: a Plaid window may
-  still be open somewhere. Finish or close it there, or wait until the time shown (a started link
-  expires after 4 hours). The same banner explains the other two reasons: a token already saved in
-  Keychain (re-attach it instead), or a token waiting in a recovery file (store it with
-  `./run setup --env production --access-token`).
-- **The token couldn't be saved to Keychain.** The connection exists, so don't link again. The app
+Every problem during a link appears in a red box titled **"Plaid Link didn't finish."**, followed
+by the reason. The reason tells you whether a connection was used:
+
+- **It begins "The connection was created"**, or a box titled **"Your access token, shown only
+  this once"** appears: Plaid created the connection, so it used one of your 10. **Don't link
+  again.** Follow the matching bullet below.
+- **It says Plaid "may or may not have created the connection"**: Plaid couldn't be reached at
+  the last step. Linking stays paused until the time shown; before you link again, check Plaid's
+  Dashboard (dashboard.plaid.com) for a new American Express Item, as the message says.
+- **Any other reason** (you closed Plaid's window, a Dashboard checklist item isn't done, Amex
+  refused, Keychain wanted your approval first): nothing was linked and no connection was used.
+  Fix the cause and try again.
+
+The cases where the connection exists:
+
+- **"The connection was created, but its access token couldn't be saved to Keychain."** The app
   wrote the token to a recovery file readable only by you, under
   `~/Library/Application Support/budgetapp/state/recovery`, and the message names the file. Run
   `./run setup --env production --access-token`, paste the token from that file, then click
   **Re-attach existing connection** on the Connection page. Delete the file once the token is also
   in your password manager.
-- **"Your access token, shown only this once."** The rare case where even the recovery file
+- **"Your access token, shown only this once"**: the rare case where even the recovery file
   couldn't be written. Copy all of it into your password manager right away (it isn't stored
   anywhere else), then follow the message: `./run setup --env production --access-token`, then
   re-attach.
+- **"The connection was created, but Keychain already holds a different access token."** Keychain
+  already had a token from an earlier link; it was not replaced, and the new token went to a
+  recovery file the message names. Re-attach the saved connection on the Connection page, as the
+  message says.
+
+Separately, **"Linking is paused."** above a **Link American Express** button that stays off
+means one of three things. Usually a production link was started and may still finish: a Plaid
+window may still be open somewhere. Finish or close it there, or wait until the time shown (a
+started link expires after 4 hours). The banner names the other two when they apply: a token
+already saved in Keychain (re-attach it instead), or a token waiting in a recovery file (store it
+with `./run setup --env production --access-token`, then re-attach).
 
 ### Keep a copy of the access token (recommended)
 

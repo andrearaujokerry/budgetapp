@@ -1,9 +1,12 @@
 # Alerts and notifications
 
-<!-- RECHECK(ALR): this guide describes the alerts from the requirements (ALR-1..3, SYNC-6) and
-     ARCHITECTURE §11. The ALR package (services/alerts.py) was being built while it was written;
-     check each rule and its wording against the code after the merge (the backup alert and the
-     Keychain notice already exist: services/backup.py, commands/sync.py). -->
+<!-- RECHECK(ALR): written from ALR-1..3, SYNC-6 and ARCHITECTURE §11, then aligned with the
+     ALR package as built on wp/alr at 241e2c7 (services/alerts.py: notification titles, the
+     summary of more than three large charges, the highest-percentage rule, no consent reminder
+     while a reconnect is needed, the pending-raise rule, what triggers budget checks). Its
+     review-fix stage was still running: check each rule and title after the merge. The backup,
+     Keychain and upgrade notices already exist (services/backup.py, secrets.py,
+     commands/sync.py). -->
 
 The app tells you about money and connection problems with Mac notifications. Each alert is sent
 **once**: the app records it, so a later sync doesn't repeat it.
@@ -29,28 +32,34 @@ open, after **Sync now** or a change you make. Demo data never sends any.
 
 ## What you are told
 
-| Alert | When | How often |
-| --- | --- | --- |
-| **Budget reached** | a category's spending reaches one of your percentages of its budget this period (80% and 100% unless you change them) | once per category, period and percentage |
-| **Sync failed** | a sync of your Amex fails (Plaid, Amex or the app had a problem) | once per error and day |
-| **Reconnect needed** | Amex needs you to sign in again ([Reconnecting](reconnecting.md#reconnect)) | once each time it happens |
-| **Data is stale** | no successful sync for 36 hours | once a day |
-| **Consent renewal due** | the yearly Amex consent runs out within your reminder days (30 unless you change it) | once per due date |
-| **Large charge** | a new charge over the amount you set | once per charge |
-| **Keychain approval needed** | macOS asks before the background agents may read the app's Keychain items | once a day |
-| **Backup failed or stale** | the nightly backup failed, or the newest backup is over 26 hours old | once a day |
+| Alert | The notification says, for example | When | How often |
+| --- | --- | --- | --- |
+| **Budget reached** | "Groceries: 80% of budget used", "Groceries: over budget" | a budget reaches one of your percentages this period (80% and 100% unless you change them) | once per budget, period and percentage |
+| **Sync failed** | "American Express sync failed" | a sync of your Amex fails (Plaid, Amex or the app had a problem); the message names the error code | once per error code and day |
+| **Reconnect needed** | "Reconnect American Express" | Amex needs you to sign in again ([Reconnecting](reconnecting.md#reconnect)) | once each time it happens |
+| **Data is stale** | "American Express data is out of date" | no successful sync for 36 hours | once a day (folded into the failure or reconnect alert when one goes out in the same sync) |
+| **Consent renewal due** | "Renew your American Express connection" | the yearly Amex consent runs out within your reminder days (30 unless you change it) | once per due date; not while the connection needs reconnecting (reconnecting renews the consent too) |
+| **Large charge** | "$612.40 at Delta" | a new charge over the amount you set | once per charge; more than three in one sync arrive as one summary ("5 new charges over $500.00") |
+| **Keychain approval needed** | "Budget Tracker needs Keychain approval" | macOS asks before the background agents may read the app's Keychain items | once a day |
+| **Backup failed or stale** | "Budget Tracker backup problem" | the nightly backup failed, or the newest backup is over 26 hours old | once a day |
+| **Upgrade needed** | "Budget Tracker needs an upgrade" | the sync agent finds the database needs an upgrade (for example after restoring an older backup); syncing waits until you run `./run live` | once a day |
 
 Details:
 
 - **Budget alerts** use exactly the numbers on the Budgets page: the same period (calendar month
-  or statement cycle), the same pending setting, and the budget including any rollover. A
-  category whose budget is zero (or below zero after an overspent rollover) alerts on its first
-  spending. They are checked after every sync, after a CSV import and after you change a
-  category. If spending drops back below a percentage (a pending hold that disappeared), that
+  or statement cycle), the same pending setting, and the budget including any rollover. Each
+  monthly category budget, the overall target (if you set one) and each annual budget (for the
+  calendar year) is checked. A budget of zero (or below zero after an overspent rollover) alerts
+  on its first spending. If one change crosses several percentages at once, you are told about
+  the highest. If spending drops back below a percentage (a pending hold that disappeared), that
   alert can fire again later.
+- **When budgets are checked:** after every successful sync, after a CSV import, and right after
+  you change which category a charge counts in (a category click, a split, a rule, a merge). A
+  new budget amount or new percentages count from the next sync.
 - **Large charges** are checked for new charges from a sync, dated within the last 7 days, and
   not while Plaid sends your history right after linking. A pending charge that posts isn't
-  announced a second time, and CSV imports never raise one.
+  announced a second time. A pending charge at or under your amount that goes above it (a tip
+  or hotel incidentals added when it posts) is announced once. CSV imports never raise one.
 - **Keychain approval needed** asks you to run `./run doctor --env production` in Terminal and
   click **Always Allow** for each item (usually after a `brew upgrade` of Python). The sync and
   backup agents simply try again later.
@@ -65,10 +74,9 @@ Settings → **Alerts**:
 | --- | --- | --- |
 | Budget alerts | on | budget alerts at all |
 | Alert at these percentages | 80, 100 | whole percentages from 1 to 200, up to five, separated by commas |
-| Sync problem alerts | on | sync failures, stale data and reconnect alerts |
+| Sync problem alerts | on | sync failures, stale data and reconnect alerts (the consent reminder comes either way) |
 | Large-charge alert (optional) | blank (off) | the amount above which a new charge is announced |
 | Consent renewal reminder | 30 days | how long before the yearly consent runs out to start reminding you (1–120) |
 
-Turning budget alerts off keeps your percentages for when you turn them back on. The reconnect
-and consent banners in the app show whether notifications are on or off; the consent banner
-starts the same number of days before the due date as the reminder.
+Turning budget alerts off keeps your percentages for when you turn them back on. The consent
+banner in the app starts the same number of days before the due date as the reminder.

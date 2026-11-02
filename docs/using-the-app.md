@@ -15,7 +15,8 @@ guide walks through each page in the order of the menu:
   Connection page.
 - **Sync now** (next to it) asks Plaid to fetch fresh data from Amex, syncs at once and again
   after about 15 seconds, 45 seconds and 2 minutes, while Plaid catches up. You rarely need it:
-  the background agent syncs four times a day.
+  the background agent syncs four times a day. When the connection needs you, the button becomes
+  **Reconnect** or **Renew access** and opens the Connection page.
 - **Banners** at the top of every page (except Connection, which shows the same things in more
   detail) tell you when Amex needs you to reconnect or when the yearly consent renewal is due.
   See [Reconnecting and renewing](reconnecting.md).
@@ -41,18 +42,29 @@ The same rules apply on every page and in every alert:
 
 ## Dashboard
 
-<!-- RECHECK(DASH): the Dashboard is being built by the DASH package at the time of writing;
-     check this section against templates/dashboard/ after the merge. -->
+<!-- RECHECK(DASH): written from INS-1 and ARCHITECTURE, then aligned with the DASH package as
+     built on wp/dash at 0b004b9 (templates/dashboard/: tiles, cards, links). Check this section
+     against templates/dashboard/ after the merge. -->
 
-The Dashboard (`/`) is the summary of the current budget period:
+The Dashboard (`/`) is the summary of the current budget period, with exactly the numbers of the
+Budgets page. The heading names the period and the days left.
 
-- spending against your budgets this period, with how many days are left;
-- the categories and merchants where most of the money went;
-- links into the other pages for the details: each figure opens the matching
-  [Transactions](#transactions) list, and budgets open [Budgets](#budgets).
+- **The tiles at the top:** **Spent** against your overall target (or your budgets added up),
+  **Remaining** (with about how much a day that leaves), **Days left**, and **Compared with** the
+  previous period: what you have spent so far against what you had spent by the same day then.
+- **Budgets:** your most-used monthly budgets with what is left; **All budgets** opens the
+  Budgets page.
+- **Top categories:** where the money went this period, with each category's share; the rest
+  are added up in one line so the list adds up to all your spending.
+- **Spending pace:** a chart of your spending added up day by day, against the previous period.
+- **Top merchants:** the places you spent most.
+- **Coming up:** recurring charges expected before the period ends, with their usual amount.
+- **Annual budgets:** each annual budget's spending this year.
 
-It also points out what needs your attention, such as rows held for review after a CSV import.
-It uses exactly the same numbers as the Budgets page.
+Each category, budget and merchant name opens the matching [Transactions](#transactions) list.
+A banner points out rows held for review after a CSV import (**Review** opens the Import page),
+and an unusual statement cycle. Before anything is linked or imported, the page offers
+**Link account** and **Import a CSV file**.
 
 ## Transactions
 
@@ -117,13 +129,26 @@ Budget alerts at 80% and 100% are described in [Alerts and notifications](alerts
 
 ## Trends
 
-<!-- RECHECK(DASH): the Trends page is being built by the DASH package at the time of writing;
-     check this section against templates/trends/ after the merge. -->
+<!-- RECHECK(DASH): written from INS-2 and ARCHITECTURE, then aligned with the DASH package as
+     built on wp/dash at 0b004b9 (templates/trends/: spans, the change rule, links). Check this
+     section against templates/trends/ after the merge. -->
 
-Trends (`/trends`) shows your spending per category per month for the last 12 months or more,
-with the change from the month before. Trends always use calendar months and the date you made
-each charge, whatever budget period you chose, with the same pending setting as budgets. A month
-or a category opens the matching transactions.
+Trends (`/trends`) shows your spending per category per month. Trends always use calendar months
+and the date you made each charge, whatever budget period you chose, with the same pending
+setting as budgets.
+
+- **Show** 12, 24 or 36 months, **Through** a month you choose (this month by default), for all
+  categories or one **Category**.
+- **The change from last month** compares the last complete month with the one before it. The
+  month in progress is shown "so far" and compared with the same days of the month before, so a
+  few days are never set against a whole month. The **Monthly average** counts complete months
+  only.
+- **Change from last month** lists each category with both months, the change and the average;
+  **Every month** shows every category for every month, in whole dollars ("—" before your
+  history starts).
+- A category's name opens its own month-by-month view; there, each month's amount opens the
+  matching [Transactions](#transactions). In the change table, the amount of the last complete
+  month does the same.
 
 ## Recurring
 
