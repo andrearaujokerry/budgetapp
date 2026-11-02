@@ -1077,6 +1077,72 @@ class TestAnnual:
         (only,) = budgets.annual_overviews(db, month_period(2026, 12), today=today)
         assert (only.year, only.as_of) == (2026, day("2026-12-31"))
 
+    @pytest.fixture
+    def year_end(self, db, cats, account, spend):
+        """Statement cycle Dec 28, 2026 – Jan 27, 2027 with an overall target; Gifts $25 on
+        Dec 29 and $10 on Jan 10."""
+        make_budget(db, None, "3000.00", effective_from=day("2026-01-01"))
+        spend(cats["gifts"], "25.00", "2026-12-29")
+        spend(cats["gifts"], "10.00", "2027-01-10")
+        statement_mode(db, account, "2026-11-27", "2026-12-27", closing_day=27)
+        cycle = budgets.period_for(db, day("2027-01-05"))
+        assert (cycle.start, cycle.end) == (day("2026-12-28"), day("2027-01-27"))
+        return cycle
+
+    def tallies(self, db, cycle, today):
+        return {
+            a.year: {entry.category.name: entry.spent for entry in a.lines}
+            for a in budgets.annual_overviews(db, cycle, today=today)
+        }
+
+    def test_an_annual_budget_from_january_leaves_late_december_in_the_target(
+        self, db, cats, year_end
+    ):
+        """Review finding: a cycle across Dec 31 was classified on its last day, so Dec 29 went
+        to Gifts' 2027 annual budget, whose tally starts on Jan 1: it was in no figure."""
+        gifts, today = cats["gifts"], day("2027-02-15")
+        set_budget(db, gifts.id, D("800.00"), effective_from=year_end, period=ANNUAL)
+        result = overview(db, year_end, today=today)
+        assert (result.overall.spent, result.totals.annual_spent) == (D("25.00"), D("10.00"))
+        assert [(u.category.name, u.spent) for u in result.unbudgeted] == [
+            ("Gifts & Donations", D("25.00"))
+        ]
+        assert result.totals.unbudgeted_spent == D("25.00")
+        assert gifts.id in result.annual_category_ids
+        assert result.spent_dates(gifts.id) == (day("2026-12-28"), day("2026-12-31"))
+        assert self.tallies(db, year_end, today) == {2026: {}, 2027: {"Gifts & Donations": 10}}
+
+    def test_a_monthly_budget_from_january_leaves_late_december_to_the_annual_one(
+        self, db, cats, year_end
+    ):
+        """The reverse: Dec 29 is in 2026's annual tally, so the monthly line (and its rollover)
+        counts only January."""
+        gifts, today = cats["gifts"], day("2027-02-15")
+        make_budget(db, gifts, "800.00", effective_from=day("2026-01-01"), period=ANNUAL)
+        set_budget(db, gifts.id, D("100.00"), effective_from=year_end)
+        set_rollover(db, gifts.id, True, effective_from=year_end)
+        result = overview(db, year_end, today=today)
+        gifts_line = line(result, gifts)
+        assert (gifts_line.spent, gifts_line.remaining) == (D("10.00"), D("90.00"))
+        assert (result.totals.annual_spent, result.overall.spent) == (D("25.00"), D("10.00"))
+        assert result.totals.spent == D("35.00") and result.unbudgeted == ()
+        assert gifts.id not in result.annual_category_ids
+        assert result.spent_dates(gifts.id) == (day("2027-01-01"), day("2027-01-27"))
+        assert self.tallies(db, year_end, today) == {2026: {"Gifts & Donations": 25}, 2027: {}}
+        following = overview(db, budgets.next_period(db, year_end), today=today)
+        assert line(following, gifts).carry_in == D("90.00")
+
+    def test_one_type_on_both_sides_of_the_year_end_splits_nothing(self, db, cats, year_end):
+        gifts, today = cats["gifts"], day("2027-02-15")
+        make_budget(db, gifts, "800.00", effective_from=day("2026-01-01"), period=ANNUAL)
+        result = overview(db, year_end, today=today)
+        assert (result.totals.annual_spent, result.overall.spent) == (D("35.00"), D("0.00"))
+        assert result.spent_dates(gifts.id) == (year_end.start, year_end.end)
+        assert self.tallies(db, year_end, today) == {
+            2026: {"Gifts & Donations": 25},
+            2027: {"Gifts & Donations": 10},
+        }
+
     def test_over_an_annual_budget(self, db, cats, spend):
         make_budget(db, cats["gifts"], "100.00", period=ANNUAL)
         spend(cats["gifts"], "150.00", "2026-03-01")

@@ -574,6 +574,12 @@ rows or completed Plaid's history, after every CSV import and after attaching a 
 - **Annual budgets (BUD-5):** calendar year; year-to-date spending uses the same basis rule as
   `period_spending`; shown with a pace line (`amount × elapsed days / days in year`) in a
   separate Annual section, never inside monthly totals.
+- **A statement cycle across Dec 31:** each year's days of a category count by its budget on that
+  year's last day in the cycle (Dec 31, or the cycle's end), the day each year's annual tally is
+  taken. Late-December spending of a category whose annual budget starts in January is spending
+  without a budget (in the overall target); late-December spending that the old year's annual
+  budget counts stays out of a monthly budget set in the cycle (and out of its rollover). Each
+  row's "spent" link covers the same days.
 - "Suggest from last 3 months" = mean of the last 3 complete periods (ended, wholly inside the
   history, not flagged), rounded up to $5.
 - `days_left` counts today: `(period.end − today).days + 1`.

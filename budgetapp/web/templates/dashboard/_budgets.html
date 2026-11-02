@@ -22,7 +22,7 @@
 {%- set c = line.category %}
 <li class="dash-budget" id="dash-line-{{ c.id }}">
 <div class="dash-row">
-{{ ui.category_badge(c, href=spent_href(c.id), class='dash-row__name') }}
+{{ ui.category_badge(c, href=spent_href(c.id, *ov.spent_dates(c.id)), class='dash-row__name') }}
 <span class="dash-row__value">
 {%- if line.remaining < 0 %}<span class="text-over">{{ ui.money_text(-line.remaining) }} over</span>
 {%- else %}{{ ui.money_text(line.remaining) }} left{% endif -%}

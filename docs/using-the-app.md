@@ -131,6 +131,11 @@ The budgets for one period at a time; the arrows next to the period go back and 
 - In statement-cycle mode a budget set during a cycle starts in the middle of that cycle, so a
   statement that closes a day or two late doesn't move it into another cycle. A cycle shorter than
   25 or longer than 35 days is marked "Unusual statement cycle".
+- A statement cycle that runs across December 31 counts each year's days by the budget the
+  category had at that year's end. If an annual budget starts in January, the category's
+  late-December spending shows under **Spending without a budget** (marked "Annual budget for"
+  the new year); if a monthly budget replaces an annual one in January, its row counts only the
+  January days, because the old year's annual budget already counts December.
 
 Budget alerts at 80% and 100% are described in [Alerts and notifications](alerts.md).
 

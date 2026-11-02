@@ -11,6 +11,16 @@
 {%- endif -%}
 {%- endmacro -%}
 
+{#- split_note(ov, cid): in a statement cycle across Dec 31 an annual budget can count one year's
+    days of a category (ov.monthly_dates); its row's spent amount then covers only the other days
+    (BUD-5), and this says which. -#}
+{%- macro split_note(ov, cid) -%}
+{%- if cid in ov.monthly_dates -%}
+{%- set first, last = ov.spent_dates(cid) -%}
+<span class="table__secondary budget-split">{{ first|date_short }} – {{ last|date_short }} only: its other days count in an annual budget</span>
+{%- endif -%}
+{%- endmacro -%}
+
 {#- meter(percent, status, pace, name, remaining): the progress bar of a row; with nothing
     available (a $0 budget, or a negative carry) there is no percentage, so it says so in words. -#}
 {%- macro meter(percent, status, pace, name, remaining) -%}

@@ -877,6 +877,55 @@ class TestAcrossTheYearEnd:
         assert response.context["annual"].as_of == day("2027-01-27")
         assert "Spending from Jan 1 through Jan 27, 2027" in page
 
+    @pytest.fixture
+    def gifts(self, db, cat, spend, account, freeze_today):
+        """Gifts: $25 on Dec 29 and $10 on Jan 10, in the cycle Dec 28 – Jan 27 (today Jan 15),
+        with a $3,000 overall target."""
+        freeze_today("2027-01-15")
+        account.statement_closing_day = 27
+        for closing in ("2026-11-27", "2026-12-27"):
+            make_statement(db, account, closing)
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id)
+        make_budget(db, None, "3000.00", effective_from=day("2026-01-01"))
+        gifts = cat("Gifts & Donations")
+        spend(gifts, "25.00", "2026-12-29")
+        spend(gifts, "10.00", "2027-01-10")
+        return gifts
+
+    def test_late_december_before_a_new_annual_budget_has_no_budget(self, client, gifts):
+        """Review finding: an annual budget added in the cycle (from Jan 12, for 2027) took the
+        whole cycle's $35 out of the target, though 2027's tally counts only January's $10."""
+        response = client.post(
+            "/budgets/add",
+            data={"category_id": str(gifts.id), "kind": "annual", "amount": "500"}
+            | {"period": "2027-01-12"},
+        )
+        assert response.status_code == 200
+        ov = response.context["ov"]
+        assert (ov.overall.spent, ov.totals.annual_spent) == (D("25.00"), D("10.00"))
+        row = row_of(response, "unbudgeted", gifts)
+        assert "$25.00" in row and "<form" not in row
+        span = "from=2026-12-28&amp;to=2026-12-31&amp;basis=posted_date"
+        assert f'href="/transactions?category={gifts.id}&amp;{span}"' in row
+        text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", row)).split())
+        assert "Dec 28 – Dec 31 only: its other days count in an annual budget" in text
+        assert "Annual budget for 2027" in text
+        annual_row = row_of(response, "annual", gifts)
+        assert "$10.00" in annual_row
+        assert response.context["annual_closed"][0].lines == ()
+
+    def test_a_monthly_budget_after_an_annual_one_counts_only_january(self, client, db, gifts):
+        make_budget(db, gifts, "800.00", effective_from=day("2026-01-01"), period="annual")
+        client.post(f"/budgets/category/{gifts.id}", data={"amount": "100", "period": "2027-01-12"})
+        response = client.get("/budgets")
+        ov = response.context["ov"]
+        assert (ov.line_for(gifts.id).spent, ov.totals.annual_spent) == (D("10.00"), D("25.00"))
+        row = row_of(response, "line", gifts)
+        span = "from=2027-01-01&amp;to=2027-01-27&amp;basis=posted_date"
+        assert f'href="/transactions?category={gifts.id}&amp;{span}"' in row
+        assert "Jan 1 – Jan 27 only" in html.unescape(row)
+        assert "$25.00" in self.tally_row(response, 2026, gifts)
+
     def test_when_the_edit_day_falls_in_the_old_year_the_tally_follows(
         self, client, db, cat, spend, account, freeze_today
     ):
