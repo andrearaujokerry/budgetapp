@@ -45,7 +45,7 @@
 {{ form.field("alert_thresholds", "Alert at these percentages", value=values.alert_thresholds, placeholder="80, 100", error=errors.get("alert_thresholds"), help="Whole percentages of the budget, separated by commas.", autocomplete="off", wrapper_class="settings-narrow") }}
 {{ form.switch_field("sync_alerts_enabled", "Sync problem alerts", checked=values.sync_alerts_enabled, help="When a sync fails, the data is more than a day and a half old, or Amex needs you to reconnect.") }}
 <div class="form-row">
-{{ form.money_field("large_charge_threshold", "Large-charge alert", value=values.large_charge_threshold, placeholder="Off", optional=true, error=errors.get("large_charge_threshold"), help="A notification for each new charge over this amount. Leave it blank for none.") }}
+{{ form.money_field("large_charge_threshold", "Large-charge alert", value=values.large_charge_threshold, placeholder="Off", optional=true, error=errors.get("large_charge_threshold"), help="A notification for each charge over this amount, once per charge (also when a pending charge posts above it). Leave it blank for none.") }}
 {{ form.field("consent_reminder_days", "Consent renewal reminder", value=values.consent_reminder_days, type="number", min="1", max="120", step="1", error=errors.get("consent_reminder_days"), help="Days before Amex's yearly consent runs out to start reminding you.") }}
 </div>
 </div>

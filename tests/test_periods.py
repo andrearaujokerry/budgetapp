@@ -52,7 +52,11 @@ class TestCalendarHelpers:
         assert days_left(october, D("2026-10-31")) == 1
         assert days_left(october, D("2026-11-01")) == 0
         assert days_left(october, D("2026-09-30")) == 31
-        assert days_elapsed(october, D("2026-10-10")) == 9
+        assert days_elapsed(october, D("2026-10-10")) == 9  # Oct 1–9; today isn't counted
+        assert days_elapsed(october, D("2026-10-01")) == 0
+        assert days_elapsed(october, D("2026-10-31")) == 30
+        assert days_elapsed(october, D("2026-09-30")) == 0
+        assert days_elapsed(october, D("2026-11-01")) == 31
 
     def test_months_between(self):
         months = months_between(D("2025-11-20"), D("2026-02-03"))

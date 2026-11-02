@@ -135,7 +135,8 @@ def days_left(period: Period, today: date) -> int:
 
 
 def days_elapsed(period: Period, today: date) -> int:
-    """Days of ``period`` already started, counting today (0 before it starts)."""
+    """Days of ``period`` already over, NOT counting today: ``days − days_left`` (0 before and on
+    its first day, every day once it has ended)."""
     return period.days - days_left(period, today)
 
 
