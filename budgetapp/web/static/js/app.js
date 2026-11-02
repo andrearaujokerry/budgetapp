@@ -563,9 +563,15 @@
     return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
   }
 
+  // Escape closes the mobile menu, which covers the page below its bar; from inside it, focus
+  // goes back to its Menu button. Tabbing out of it closes it too (below), so the panel never
+  // hides the focused control. "/" focuses the page's search field.
   doc.addEventListener("keydown", function (evt) {
     if (evt.key === "Escape") {
-      forEach(doc.querySelectorAll("details.mobile-nav[open]"), function (m) { m.removeAttribute("open"); });
+      forEach(doc.querySelectorAll("details.mobile-nav[open]"), function (m) {
+        if (m.contains(doc.activeElement)) m.querySelector("summary").focus();
+        m.removeAttribute("open");
+      });
       return;
     }
     if (evt.key !== "/" || evt.ctrlKey || evt.metaKey || evt.altKey || evt.defaultPrevented) return;
@@ -577,6 +583,11 @@
     evt.preventDefault();
     target.focus();
     if (typeof target.select === "function") target.select();
+  });
+
+  doc.addEventListener("focusout", function (evt) {
+    var menu = evt.target.closest ? evt.target.closest("details.mobile-nav[open]") : null;
+    if (menu && evt.relatedTarget && !menu.contains(evt.relatedTarget)) menu.removeAttribute("open");
   });
 
   /* ---------------------------------------------------------------- charts */

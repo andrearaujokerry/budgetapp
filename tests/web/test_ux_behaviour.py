@@ -92,3 +92,19 @@ def test_a_failed_load_does_not_say_nothing_was_saved():
     loading = next(line for line in server if '!== "get"' not in line)
     assert "Nothing was saved" in saving
     assert "saved" not in loading and "try again" in loading
+
+
+def test_the_mobile_menu_never_hides_keyboard_focus():
+    """Escape closes the menu and puts focus on its Menu button (not on <body>); tabbing out of
+    the open menu closes it, so the panel never covers the control that has focus."""
+    js = source("js/app.js")
+    start = js.index('if (evt.key === "Escape")')
+    escape = js[start : js.index("return;", start)]
+    assert "details.mobile-nav[open]" in escape
+    assert "contains(doc.activeElement)" in escape and 'querySelector("summary")' in escape
+    leave = [
+        js[i : js.index("\n  });", i)]
+        for i in range(len(js))
+        if js.startswith('addEventListener("focusout"', i)
+    ]
+    assert any("details.mobile-nav[open]" in body and "relatedTarget" in body for body in leave)

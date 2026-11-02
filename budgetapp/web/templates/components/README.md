@@ -563,7 +563,7 @@ nearby (the chart's call body is read by screen readers).
 | HTMX 4xx/5xx (except 422) | not swapped; an error toast explains (403, 404, 409, 5xx: "Nothing was saved" for a POST, "nothing was loaded" for a GET); network failure → "Can't reach the app" toast. Never for polling or `data-quiet` requests. When a POST fails (or can't be sent), a control that saves on change (a select, input or switch with `hx_post`, or the controls of a form with `hx-trigger="change…"`) shows its stored value again; a form saved with a button keeps what was typed |
 | HTMX 422 | **swapped**: return the re-rendered form with inline errors and status 422. Focus then moves to its first `aria-invalid="true"` field (else its `role="alert"` banner), scrolled into view if it isn't |
 | keyboard focus after a swap | htmx puts focus back only on an element with the same id, so give every control in a swapped region a stable id (a row's place in a list works when rows leave it: focus lands on the next row). When the focused control is gone anyway, focus goes to the nearest surviving container with an id: its first `h1`–`h3`, else its first control |
-| `details.mobile-nav` | the mobile menu closes on Escape, on a click outside and when a link is followed |
+| `details.mobile-nav` | the mobile menu closes on Escape (focus inside it goes back to its Menu button), when keyboard focus leaves it, on a click outside and when a link is followed |
 
 htmx config (set in app.js): `allowEval=false`, `includeIndicatorStyles=false`,
 `historyCacheSize=0` (page HTML is never copied into browser storage) with
