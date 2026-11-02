@@ -192,6 +192,7 @@ their fix.
 | --- | --- |
 | A page says **"The database isn't responding"**, or a command says the database isn't running | `./run db start`, then reload. `./run db status` shows the server's state; `postgres.log` says why it stopped. With the agents installed, `./run doctor --env production` checks the postgres agent |
 | **"Upgrade needed"** | Sandbox: `./run migrate` (or restart `./run`). Production: `./run live`, which backs up first. Demo: `./run demo create NAME` |
+| **"The Sandbox database was upgraded by a newer version of the app"**, or "which this code doesn't know: newer code upgraded it" from a command | Another branch or checkout with newer code migrated it, so `./run migrate` can't help: check out that code again, or restore an older Sandbox backup with `./run restore FILE` ([Restore a backup](#restore-a-backup)) |
 | **"Setup isn't finished"** | `./run setup --keys-only` for the Plaid keys, or `./run setup` for the database passwords |
 | **"Keychain approval needed"** | `./run doctor --env production` in Terminal, then **Always Allow** for each item |
 | **"127.0.0.1:8766 is already in use"** | The app already runs in another Terminal window: open the address, or stop that one with Ctrl-C |

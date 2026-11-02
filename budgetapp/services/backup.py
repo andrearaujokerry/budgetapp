@@ -730,11 +730,8 @@ class AgentControl(Protocol):
 
 
 def known_revisions() -> set[str]:
-    """Every Alembic revision shipped with this code."""
-    from alembic.script import ScriptDirectory
-
-    script = ScriptDirectory.from_config(db.alembic_config())
-    return {revision.revision for revision in script.walk_revisions()}
+    """Every Alembic revision shipped with this code (:func:`db.known_revisions`)."""
+    return db.known_revisions()
 
 
 def dump_revision(settings: Settings, path: Path, *, runner: Runner = subprocess.run) -> str | None:

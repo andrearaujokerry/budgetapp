@@ -692,6 +692,14 @@ class TestMigrations:
         assert "at schema 0002_seed_defaults" in check.title
         assert prod.one(doctor.check_migrations).fix.startswith("./run live")
 
+    def test_a_database_from_newer_code_is_not_told_to_migrate(self, dr, db):
+        """Final review ops-6."""
+        db.execute(text("UPDATE alembic_version SET version_num = '0099_from_newer'"))
+        db.flush()
+        check = dr.one(doctor.check_migrations)
+        assert check.status == FAIL and "which this code doesn't know" in check.title
+        assert "./run migrate" not in check.fix and "./run restore" in check.fix
+
 
 # =========================================================================== Web app
 

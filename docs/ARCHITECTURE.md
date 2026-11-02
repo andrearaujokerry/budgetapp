@@ -73,7 +73,9 @@ repository lives. So production **always** runs the Application Support install:
   an "upgrade needed" page and sync exits quietly with one de-duplicated notice. Sandbox
   `./run` migrates the sandbox database automatically. A database that cannot be reached is
   not a schema problem: the guard raises `DatabaseUnavailable` ("try later" / an error page),
-  never "upgrade needed".
+  never "upgrade needed". A database at a revision this code doesn't ship (newer code, another
+  branch, migrated it) raises `SchemaAhead`: `migrate_env` refuses it before Alembic runs, and
+  the messages say to check out that code or restore an older backup, never to migrate.
 - `./run setup` creates the production schema only while that database is still empty (the
   first setup); it never upgrades it afterwards, and `migrate --env production` refuses to run
   from a git checkout. Only `upgrade_install()` upgrades production.

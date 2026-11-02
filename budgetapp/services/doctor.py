@@ -706,13 +706,22 @@ def check_migrations(ctx: DoctorContext) -> Iterable[Check]:
     if not reachable:
         yield Check(section, INFO, "Schema check skipped: no database connection")
         return
-    from budgetapp.db import code_head, current_revision
+    from budgetapp.db import code_head, current_revision, known_revisions
 
     with ctx.session() as session:
         current = current_revision(session.connection())
     head = code_head()
     if current == head:
         yield Check(section, PASS, f"The {ctx.settings.env} schema is current ({head})")
+        return
+    if current is not None and current not in known_revisions():
+        yield Check(
+            section,
+            FAIL,
+            f"The {ctx.settings.env} database is at schema {current}, which this code doesn't "
+            "know (newer code upgraded it)",
+            fix="check out that code again, or restore an older backup: ./run restore FILE",
+        )
         return
     if ctx.settings.is_production:
         fix = "./run live (or ./run install-agents): it backs up, then upgrades"

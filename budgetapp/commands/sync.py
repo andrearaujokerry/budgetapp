@@ -221,7 +221,8 @@ def schema_mismatch(rt: Runtime, exc: db.SchemaMismatch, unattended: bool) -> in
                 f"Syncing is paused until you run {fix} in Terminal (it takes a backup first).",
             )
         return EXIT_LATER
-    rt.out(f"The database needs an upgrade before syncing. Run: {fix}")
+    ahead = isinstance(exc, db.SchemaAhead)  # newer code migrated it: str(exc) says what to do
+    rt.out(str(exc) if ahead else f"The database needs an upgrade before syncing. Run: {fix}")
     return EXIT_FAILED
 
 

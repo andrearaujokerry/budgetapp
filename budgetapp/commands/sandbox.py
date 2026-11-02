@@ -120,6 +120,9 @@ def _guarded(rt: Runtime, command: str, body: Any) -> int:
     except db.DatabaseUnavailable:
         rt.out("The database isn't responding. Start it with: ./run db start")
         return EXIT_FAILED
+    except db.SchemaAhead as exc:  # newer code migrated it: ./run migrate can't help
+        rt.out(str(exc))
+        return EXIT_FAILED
     except db.SchemaMismatch:
         rt.out("The Sandbox database is behind this code. Run: ./run migrate")
         return EXIT_FAILED
