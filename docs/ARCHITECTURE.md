@@ -45,6 +45,7 @@ Paths — never inside the git checkout, never under `~/Desktop`, `~/Documents`,
   (excluded from Time Machine; a copy of a live data directory is not a backup anyway)
 - `~/Library/Application Support/budgetapp/run/` — the cluster's private Unix socket directory
 - `~/Library/Application Support/budgetapp/venv/` — the production install of the app
+- `~/Library/Application Support/budgetapp/bin/` — the postgres agent's start-up wrapper script
 - `~/Library/Application Support/budgetapp/backups/<env>/` — nightly `pg_dump` files (REL-2)
 - `~/Library/Application Support/budgetapp/state/` — small marker files (alert de-duplication
   when the database or Keychain is unavailable, install stamp, recovery files)
@@ -133,7 +134,8 @@ Rules:
   rewritten. If the Keychain write fails after a successful exchange, the token goes to a
   0600 recovery file under `state/` and the app stops with instructions. `./run setup --env
   production --access-token` re-enters a saved token (via `getpass`), verified with
-  `/item/get`. The README suggests keeping a copy in the user's password manager.
+  `/item/get`. The user guide (`docs/going-live.md`) suggests keeping a copy in the user's
+  password manager.
 
 ## 4. Repository layout
 
@@ -256,7 +258,11 @@ nulling `item_id`.
 | icon | text | optional emoji |
 | sort_order | int not null default 0 | |
 
-Categories are never deleted except by merging (section 6), which re-points every reference first.
+Categories are never deleted except by merging (`categories.merge_categories`), which re-points
+every reference first: transactions, split parts, rules, mappings, alert events and the category
+ids in tombstones' saved edits. Budgets: the target keeps all its rows; the source's rows move
+only when the target has none; a target with no budget in the current period takes the source's
+current one, written like a budget edit; otherwise the source's rows are dropped.
 
 ### category_mappings (CAT-2)
 `(source, external_key) → category_id` (FK ON DELETE CASCADE), unique on
@@ -739,17 +745,22 @@ environment on every page.
 
 | Command | Purpose |
 | --- | --- |
-| `./run` | Sandbox: start the cluster if needed, migrate the sandbox DB, serve from the repo, open the browser |
+| `./run` (`./run start`) | Sandbox: start the cluster if needed, migrate the sandbox DB, serve from the repo, open the browser |
 | `./run live` | Production: upgrade the install if the repo moved on, then open the app from the install |
-| `./run setup` | create the cluster, roles and databases; store generated DB passwords and the Plaid keys you type in Keychain; `--access-token` re-enters a saved production token |
+| `./run setup` | create the cluster, roles and databases; store generated DB passwords and the Plaid keys you type in Keychain; `--keys-only` asks only for the keys; `--access-token` re-enters a saved production token |
+| `./run serve` | only the web server (no migration, no browser); `--demo NAME [--port N]` serves a demo database; the web agent runs `serve --env production --unattended` |
+| `./run demo create\|drop\|list` | demo databases `budgetapp_test_demo_<NAME>` with realistic made-up data (Sandbox only) |
+| `./run migrate` | upgrade this environment's database (refused for production from a git checkout) |
 | `./run sync` | sync every Item now |
 | `./run import-csv FILE` | import an Amex CSV (preview with `--dry-run`) |
+| `./run recategorize` | re-apply rules and mappings to past transactions (CAT-4) |
 | `./run backup` / `./run restore FILE` | backup now / restore one |
 | `./run doctor` | check SEC-1..6, backups, agents, keys, schema; re-approve Keychain access |
+| `./run notify-test` | send a test notification (the one-time Script Editor permission) |
 | `./run install-agents` / `uninstall-agents` | `upgrade_install()` and (re)load / remove the launchd agents |
 | `./run sandbox-link` / `sandbox-refresh` / `sandbox-reset-login` | Sandbox only test helpers |
 | `./run test` | run the test suite |
-| `./run db start\|stop\|status\|psql` | manage the dedicated cluster (`psql` connects as the env's role) |
+| `./run db start\|stop\|status\|psql\|url` | manage the dedicated cluster (`psql` connects as the env's role) |
 
 LaunchAgents (`~/Library/LaunchAgents/local.budgetapp.*.plist`), all running the Application
 Support install with `BUDGETAPP_ENV=production`, `LC_ALL=C.UTF-8` and a PATH that includes
@@ -766,9 +777,11 @@ Homebrew; every entry point waits for the database first:
 (`umask 077`), verified with `pg_restore --list` and a full `pg_restore --file=/dev/null`, renamed
 into place, newest 30 kept; a "backup failed or stale" alert fires when the newest verified dump is
 over 26 hours old. **Restore** reads the dump's database name and refuses a dump from another
-environment, needs an explicit `--env` and a typed confirmation for production, takes a
-pre-restore dump, stops the web and sync agents and holds the sync lock, restores preserving
-ownership, then runs the schema guard.
+environment, asks for a typed confirmation (the environment's name) and, for production, an
+explicit `--env production` on the command line, takes the sync locks (refusing while a sync runs) before it stops the web, sync and backup agents, takes a
+pre-restore dump (kept apart from the 30 backups, newest 5; `--without-safety-copy` skips it only
+when the current data can't be dumped), restores in one transaction preserving ownership, then
+runs the schema guard.
 
 **Time Machine (SEC-6):** `setup` excludes the cluster directory. Backups stay included only if
 every Time Machine destination is encrypted; `doctor` checks this and explains how to exclude
