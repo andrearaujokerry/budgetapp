@@ -116,8 +116,8 @@ a formula are made safe. Possible duplicates are never exported unless you are v
 The budgets for one period at a time; the arrows next to the period go back and forward.
 
 - **Monthly budgets:** one row per category with its budget, what you spent, what is left and the
-  percentage used, most used first. Type a new amount and **Save**. Each spent amount opens the
-  matching transactions.
+  percentage used, most used first. Type a new amount; it saves when you press Enter or leave the
+  field. Each spent amount opens the matching transactions.
 - **Add budget** gives a category a monthly budget. A change applies from the period shown on;
   earlier periods keep their budgets.
 - **Suggest** proposes the average of your last three complete periods, rounded up to $5.
@@ -215,9 +215,9 @@ One row per statement period of your card, checked against Amex to the cent.
   merged away or given another kind.
 
 **Plaid & Amex categories** decides where a new charge goes when no rule matched: each Plaid
-category (and each Amex CSV category) points to one of yours. Pick a category in **Goes to** and
-**Save**; **Not mapped** removes a choice, so the charge falls back to its group's category, then
-to Uncategorized. Some rows say "for credits": they are tried first for negative amounts, so cash
+category (and each Amex CSV category) points to one of yours. Pick a category in **Goes to**; it
+saves at once. **Not mapped** removes a choice, so the charge falls back to its group's category,
+then to Uncategorized. Some rows say "for credits": they are tried first for negative amounts, so cash
 back goes to Credits & Rewards while fees stay in Fees & Interest. A change applies to new
 transactions; past ones keep their category until you [re-apply rules](#rules), and the message
 after saving says how many would move.
