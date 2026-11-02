@@ -25,6 +25,18 @@
   vertical-align: middle;
 }
 
+/* Phones and narrow windows: category names and Plaid or Amex labels wrap rather than being
+   cut after a few letters (the columns beside them leave little room). */
+@media (max-width: 899.98px) {
+  .categories-table .table__primary,
+  .categories-table .cat__name,
+  .mapping-table .table__primary {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+}
+
 /* The panel under the tabs (the tabs are not a direct child of the page, so they get no
    rhythm of their own). */
 .categories-panel,

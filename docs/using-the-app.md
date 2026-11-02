@@ -94,8 +94,9 @@ Every charge, refund, credit and payment, newest first.
 
 **Changing a transaction**
 
-- Click the **category** in a row to change it. A category you set yourself is never changed
-  again by rules or syncs (until you choose **Reset to automatic**).
+- Click the **category** in a row to change it (in a narrow window, the row's ⋯ menu has
+  **Change category**). A category you set yourself is never changed again by rules or syncs
+  (until you choose **Reset to automatic**).
 - The **⋯ menu** of a row (or the transaction's own page) has **Details**, **Notes and tags**,
   **Split** and **Always categorize like this** (neither for card payments), **Reset to
   automatic** once you have set the category yourself, and **Mark as reviewed** when the row needs

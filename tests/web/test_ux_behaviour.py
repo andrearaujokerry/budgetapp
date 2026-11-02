@@ -173,3 +173,28 @@ def test_swapped_results_are_announced_through_their_live_region():
     body = function_body(js, "announceStatus")
     assert "data-status-for" in body and "[data-status]" in body and "textContent" in body
     assert "announceResults" not in source("js/transactions.js")  # one mechanism for every page
+
+
+def narrow_rules(css: str) -> str:
+    """The text of every ``@media (max-width: 599.98px)`` (phones) and ``899.98px`` (phones and
+    narrow windows) block in a stylesheet."""
+    out = []
+    for match in re.finditer(r"@media \(max-width: (?:599|899)\.98px\) \{", css):
+        depth, i = 1, match.end()
+        while depth:
+            depth += {"{": 1, "}": -1}.get(css[i], 0)
+            i += 1
+        out.append(css[match.end() : i])
+    return "\n".join(out)
+
+
+def test_names_wrap_on_phones_instead_of_being_cut():
+    """Below 600px category names and Plaid and Amex labels, and below 900px rule texts, wrap
+    rather than end in an ellipsis after a few letters, and the rules table fits the window."""
+    categories = narrow_rules(source("css/pages/categories.css"))
+    for selector in (".categories-table .cat__name", ".mapping-table .table__primary"):
+        assert selector in categories
+    rules = narrow_rules(source("css/pages/rules.css"))
+    assert ".rules-table .table__primary" in rules and ".rules-table .table__secondary" in rules
+    assert "white-space: normal" in categories and "white-space: normal" in rules
+    assert re.search(r"\.table-wrap > \.rules-table \{\s*min-width: 0;", rules)

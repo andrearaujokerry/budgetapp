@@ -240,6 +240,17 @@ class TestListPage:
             "results-sort-amount",
         ]
 
+    def test_the_subtitle_says_where_the_category_is_changed_in_a_narrow_window(
+        self, client, db, card
+    ):
+        """Below 600px the row's category is plain text; it is changed under the row's ⋯ menu."""
+        make_transaction(db, card, name="ONE")
+        page = client.get("/transactions").text
+        subtitle = re.search(r'<p class="page-header__subtitle">(.*?)</p>', page, re.S).group(1)
+        assert "Click a category to change it" in subtitle
+        assert "⋯ menu" in subtitle
+        assert ">Change category<" in page
+
     def test_filter_bar_reflects_the_url(self, client, db, card, cats):
         make_transaction(db, card, account_owner="SAM RIVERA", tags=["work"], merchant_name="Uber")
         url = (

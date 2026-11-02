@@ -13,11 +13,13 @@
 {%- if r.name or not r.is_active %}
 <span class="table__secondary">{% if r.name %}{{ r.summary }}{% endif %}{% if r.name and not r.is_active %} · {% endif %}{% if not r.is_active %}Off{% endif %}</span>
 {%- endif %}
+{#- Phones: the category goes here, and its column gives the rule's text room (rules.css). #}
+<span class="table__secondary rule-phone-cat">{{ ui.category_badge(r.category) }}</span>
 </td>
-<td>{{ ui.category_badge(r.category) }}</td>
+<td class="col-optional-sm">{{ ui.category_badge(r.category) }}</td>
 <td class="num col-optional-sm">{{ '{:,}'.format(r.transaction_count) }}</td>
 <td class="center">{{ form.switch_field("is_active", r.title ~ " (rule " ~ r.position ~ ")", checked=r.is_active, id="rule-on-" ~ r.id, wrapper_class="check--bare", hx_post="/rules/" ~ r.id ~ "/active", hx_target="closest tr", hx_swap="outerHTML") }}</td>
-<td class="table__actions">
+<td class="table__actions"><div class="rule-actions">
 <form class="inline-action" method="post" action="/rules/{{ r.id }}/move" hx-post="/rules/{{ r.id }}/move" hx-target="#rules-list" hx-swap="innerHTML">
 <input type="hidden" name="direction" value="up">
 {{- ui.button("Move up: " ~ r.title, icon="arrow-up", icon_only=true, variant="ghost", size="sm", type="submit", disabled=(r.position == 1), id=rid ~ "-up", autofocus=(focus == rid ~ "-up")) -}}
@@ -30,5 +32,5 @@
 <form class="inline-action" method="post" action="/rules/{{ r.id }}/delete" hx-post="/rules/{{ r.id }}/delete" hx-target="#rules-list" hx-swap="innerHTML">
 {{- ui.button("Delete: " ~ r.title, icon="trash", icon_only=true, variant="ghost", size="sm", type="submit", id=rid ~ "-delete", data_confirm="Delete the rule “" ~ r.title ~ "”? The transactions it categorized keep their category.") -}}
 </form>
-</td>
+</div></td>
 </tr>
