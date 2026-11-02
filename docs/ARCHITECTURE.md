@@ -778,10 +778,10 @@ Homebrew; every entry point waits for the database first:
 into place, newest 30 kept; a "backup failed or stale" alert fires when the newest verified dump is
 over 26 hours old. **Restore** reads the dump's database name and refuses a dump from another
 environment, asks for a typed confirmation (the environment's name) and, for production, an
-explicit `--env production` on the command line, takes the sync locks (refusing while a sync runs) before it stops the web, sync and backup agents, takes a
-pre-restore dump (kept apart from the 30 backups, newest 5; `--without-safety-copy` skips it only
-when the current data can't be dumped), restores in one transaction preserving ownership, then
-runs the schema guard.
+explicit `--env production` on the command line, takes the sync locks (refusing while a sync
+runs) before it stops the web, sync and backup agents, takes a pre-restore dump (kept apart from
+the 30 backups, newest 5; `--without-safety-copy` skips it only when the current data can't be
+dumped), restores in one transaction preserving ownership, then runs the schema guard.
 
 **Time Machine (SEC-6):** `setup` excludes the cluster directory. Backups stay included only if
 every Time Machine destination is encrypted; `doctor` checks this and explains how to exclude
