@@ -1091,6 +1091,14 @@ class TestConnection:
         assert checks["Liabilities wasn't consented (no statement balance or due date)"] == WARN
         assert checks["No successful sync for 2 days"] == WARN
 
+    def test_rejected_plaid_keys_point_to_setup(self, dr, db, freeze_today):
+        """Final review ops-4: the fix said to click Sync now, which can't help."""
+        freeze_today(now=NOW)
+        make_item(db, status="error", error_code="INVALID_API_KEYS", liabilities_status="ok")
+        (check,) = [c for c in dr.run(doctor.check_connection) if c.status == WARN]
+        assert check.title == "The last sync of American Express failed (INVALID_API_KEYS)"
+        assert check.fix.startswith("./run setup --keys-only")
+
 
 # =========================================================================== the command
 

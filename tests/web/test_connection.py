@@ -351,6 +351,15 @@ def test_a_failed_sync_shows_the_error(db, client):
     assert "Amex isn't answering Plaid right now" in words
 
 
+def test_rejected_plaid_keys_say_how_to_fix_them(db, client):
+    """Final review ops-4: the page promised a retry that can't succeed."""
+    linked_item(db, status="error", error_code="INVALID_API_KEYS")
+    words = text(main(page(client)))
+    assert "The last sync failed (INVALID_API_KEYS)." in words
+    assert "./run setup --keys-only" in words
+    assert "the next one tries again" not in words
+
+
 def test_stale_data_is_called_out(db, client):
     linked_item(db, last_sync_success_at=NOW - dt.timedelta(hours=40))
     words = text(main(page(client)))

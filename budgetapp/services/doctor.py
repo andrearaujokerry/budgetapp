@@ -1322,7 +1322,9 @@ def check_connection(ctx: DoctorContext) -> Iterable[Check]:
                 section,
                 WARN,
                 f"The last sync of {name} failed ({item.error_code})",
-                fix="Connection page → Sync now; see the log if it repeats",
+                fix="./run setup --keys-only, then Connection page → Sync now"
+                if item.error_code == "INVALID_API_KEYS"  # Plaid refused the client ID or secret
+                else "Connection page → Sync now; see the log if it repeats",
             )
         if item.consent_days_left < 0:
             yield Check(

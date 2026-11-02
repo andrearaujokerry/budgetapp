@@ -1456,6 +1456,13 @@ def test_describe_error_has_words_for_the_usual_codes():
     assert sync.describe_error("SOMETHING_NEW") is None
 
 
+def test_rejected_plaid_keys_say_to_enter_them_again():
+    """Final review ops-4: INVALID_API_KEYS had no words, so the Connection page said the next
+    sync tries again, which can't help until the keys are entered again."""
+    words = sync.describe_error("INVALID_API_KEYS", "INVALID_INPUT")
+    assert "./run setup --keys-only" in words and "try again" not in words
+
+
 def test_a_has_user_state_query_ignores_json_null(db, linked):
     account = make_account_for(linked)
     make_tombstone(db, account, plaid_transaction_id="json-null", user_state=None)

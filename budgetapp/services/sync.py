@@ -222,6 +222,11 @@ def describe_error(error_code: str | None, error_type: str | None = None) -> str
         )
     if error_code == "INVALID_ACCESS_TOKEN":
         return "Plaid didn't accept the saved access token. Run ./run doctor to check the keys."
+    if error_code == "INVALID_API_KEYS":
+        return (
+            "Plaid didn't accept the app's Plaid keys. Enter the client ID and the secret (from "
+            "the same Plaid team) again with ./run setup --keys-only, then click Sync now."
+        )
     if error_code == "TRIAL_CONNECTION_LIMIT":
         return "Your Plaid Trial plan has used all 10 connections; Plaid refuses new ones."
     if error_code == TRANSPORT_ERROR:

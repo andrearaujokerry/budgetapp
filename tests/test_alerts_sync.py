@@ -650,6 +650,17 @@ def test_the_engine_alerts_a_failure_once_a_day(linked, fake_plaid, notifier):
     assert notifier.titles == ["American Express sync failed"]
 
 
+def test_the_engine_says_how_to_fix_rejected_plaid_keys(linked, fake_plaid, notifier):
+    """Final review ops-4: the notification said only "Plaid reported an error"."""
+    linked.sync()
+    error = fake_plaid.plaid_error("INVALID_API_KEYS", error_type="INVALID_INPUT")
+    fake_plaid.queue_error("transactions_sync", error)
+    assert linked.sync().status == "error"
+    (sent,) = notifier.sent
+    assert "./run setup --keys-only" in sent.message
+    assert sent.message.endswith("Code: INVALID_API_KEYS.")
+
+
 def test_the_engine_alerts_a_large_charge_once_and_not_at_posting(db, linked, fake_plaid, notifier):
     set_app_settings(db, large_charge_threshold=Decimal("1000.00"))
     db.commit()
