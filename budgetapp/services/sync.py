@@ -12,12 +12,14 @@ ARCHITECTURE §6 ("Sync apply algorithm", "Locks") and §8; SYNC-2, SYNC-4 … S
     ONE transaction: ledger lock → fold → accounts → upserts → deletes (tombstones) →
         unlinked replacements → history/cutover → reconcile → cursor compare-and-set
     sync run 'success' with counts                       (own short transaction)
-    best effort, each in its own transaction: /accounts/get, /item/get, /liabilities/get,
-        alerts.evaluate_after_sync
+    best effort, each in its own transaction: /accounts/get, /item/get, /liabilities/get
+    sync lock released, then alerts.evaluate_after_sync   (own transaction; notifications)
 
 A Plaid error leaves the ledger and the cursor untouched, records the run and the Item's status
 (``needs_reconnect`` or ``error``) and calls the alerts hook. Any other exception is recorded as
-``INTERNAL`` (Item status ``error``), the alerts hook runs, and the exception is re-raised.
+``INTERNAL`` (Item status ``error``), the alerts hook runs, and the exception is re-raised. The
+alerts hook always runs after the sync lock is released (ARCHITECTURE §11: no notification while a
+lock is held), so a notification that takes seconds never makes another sync of the Item skip.
 
 Several transactions are needed (bookkeeping must survive a rolled-back apply), so this module takes
 a ``sessionmaker`` instead of a session — the documented exception to "services take a session".
@@ -66,7 +68,7 @@ from budgetapp.plaid_gateway import (
 from budgetapp.services import alerts, reconcile, statements, userstate
 from budgetapp.services.background import run_steps
 from budgetapp.services.categorize import Categorizer, apply_carried_state, apply_decision
-from budgetapp.services.events import SyncOutcome
+from budgetapp.services.events import PendingRaise, SyncOutcome
 from budgetapp.services.notify import Notifier
 
 log = logging.getLogger(__name__)
@@ -432,6 +434,8 @@ class _Applied:
     removed: int
     #: the inserted rows that are new charges (not a replacement of a row the app already had)
     new_charge_ids: tuple[int, ...]
+    #: pending charges stored for a higher amount (posted with a tip, or changed in place)
+    pending_raises: tuple[PendingRaise, ...]
     update_status: str | None
     history_completed_now: bool
 
@@ -521,7 +525,9 @@ class _Applier:
     edits (step 5), or matches an unconsumed tombstone without edits by the same rules (a posted
     charge Plaid didn't link to its pending one, or a re-delivery after Plaid re-issued an
     account). Only new charges reach ``SyncOutcome.inserted_transaction_ids`` (ALR-3 alerts once
-    per charge).
+    per charge). A pending charge that comes back for a higher amount (its posting, or Plaid
+    changing it in place) is noted in ``raises`` (``SyncOutcome.pending_raises``), so a charge that
+    first goes over the large-charge threshold when it posts still alerts.
     """
 
     def __init__(self, session: Session, item: PlaidItem, batch: Batch, now: dt.datetime) -> None:
@@ -535,6 +541,7 @@ class _Applier:
         self.tombstones: dict[str, TransactionTombstone] = {}
         self.inserted: list[Transaction] = []
         self.continued: set[int] = set()  # id() of inserted rows that replace a known charge
+        self.raises: list[tuple[Transaction, str, Decimal]] = []  # (row, pending id, old amount)
         self.deleted: set[str] = set()
         self.consumed: set[str] = set()  # tombstones a row of this batch has taken over
         self.consumptions: list[tuple[TransactionTombstone, Transaction]] = []
@@ -637,6 +644,8 @@ class _Applier:
             changed |= _set(txn, name, value)
         if not changed:
             return False
+        if old_pending and txn.plaid_transaction_id:
+            self._note_raise(txn, txn.plaid_transaction_id, True, old_amount)
         if txn.category_source != "user":
             apply_decision(txn, self.categorizer.decide(txn))
         if txn.splits and (to_money(old_amount) != txn.amount or old_pending != txn.pending):
@@ -677,9 +686,18 @@ class _Applier:
         if predecessor is not None:
             self.consumptions.append((predecessor, txn))
             self.consumed.add(predecessor.plaid_transaction_id)
+            self._note_raise(
+                txn, predecessor.plaid_transaction_id, predecessor.pending, predecessor.amount
+            )
         if predecessor is not None or (link and (link in self.rows or link in self.tombstones)):
             self.continued.add(id(txn))  # the pending charge it names was already here
         self.inserted.append(txn)
+
+    def _note_raise(self, txn: Transaction, pending_id: str, pending: bool, amount: Any) -> None:
+        """ALR-3: ``txn`` continues the charge the app had as pending ``pending_id`` for
+        ``amount``; note it when the amount went up."""
+        if pending and amount is not None and to_money(txn.amount) > to_money(amount):
+            self.raises.append((txn, pending_id, to_money(amount)))
 
     # ---------------------------------------------------------------- step 4: deletes
 
@@ -768,11 +786,13 @@ class _Applier:
             apply_carried_state(self.categorizer, txn, userstate.from_json(tomb.user_state))
             tomb.consumed_by_transaction_id = txn.id
             self.continued.add(id(txn))
+            self._note_raise(txn, tomb.plaid_transaction_id, tomb.pending, tomb.amount)
             carried += 1
         rest = [t for t in candidates if id(t) not in self.continued]
         for tomb, txn in match_replacements(plain, rest) if rest else ():
             tomb.consumed_by_transaction_id = txn.id
             self.continued.add(id(txn))
+            self._note_raise(txn, tomb.plaid_transaction_id, tomb.pending, tomb.amount)
         self.s.flush()
         return carried
 
@@ -1268,6 +1288,7 @@ def _apply_batch(
             modified=applier.modified,
             removed=applier.removed,
             new_charge_ids=tuple(t.id for t in applier.inserted if id(t) not in applier.continued),
+            pending_raises=tuple(PendingRaise(t.id, pid, old) for t, pid, old in applier.raises),
             update_status=batch.update_status,
             history_completed_now=completed_now,
         )
@@ -1314,20 +1335,26 @@ def sync_item(
         raise ValueError(f"unknown sync trigger {trigger!r}")
     bind = session_factory.kw["bind"]
     ensure_database(settings, bind)
-    with db.sync_lock(bind, item_id) as acquired:
-        if not acquired:
-            return _record_skipped(session_factory, item_id, trigger, run_id)
-        return _sync_locked(
-            session_factory,
-            gateway,
-            store,
-            settings,
-            item_id,
-            trigger=trigger,
-            notifier=notifier,
-            run_id=run_id,
-            sleep=sleep,
-        )
+    to_alert: list[SyncOutcome] = []
+    try:
+        with db.sync_lock(bind, item_id) as acquired:
+            if not acquired:
+                return _record_skipped(session_factory, item_id, trigger, run_id)
+            return _sync_locked(
+                session_factory,
+                gateway,
+                store,
+                settings,
+                item_id,
+                trigger=trigger,
+                to_alert=to_alert,
+                run_id=run_id,
+                sleep=sleep,
+            )
+    finally:
+        # After the lock is released (also when an INTERNAL failure is re-raised): §11.
+        for outcome in to_alert:
+            _run_alerts(session_factory, notifier, outcome)
 
 
 def _sync_locked(
@@ -1338,10 +1365,12 @@ def _sync_locked(
     item_id: int,
     *,
     trigger: str,
-    notifier: Notifier,
+    to_alert: list[SyncOutcome],
     run_id: int | None,
     sleep: Callable[[float], None],
 ) -> SyncOutcome:
+    """The sync under the lock. Every outcome that needs the alerts hook is appended to
+    ``to_alert``; :func:`sync_item` runs the hook once the lock is released."""
     started = clock.now()
     run_id, start, plaid_item_id, history_was_complete = _start_run(
         session_factory, item_id, trigger, run_id
@@ -1383,14 +1412,16 @@ def _sync_locked(
             update_status=update_status,
         )
     except PlaidGatewayError as err:
-        return _plaid_failure(
-            session_factory, notifier, item_id, trigger, run_id, started, err, history_was_complete
+        outcome = _plaid_failure(
+            session_factory, item_id, trigger, run_id, started, err, history_was_complete
         )
+        to_alert.append(outcome)
+        return outcome
     except MissingAccessToken as exc:
         outcome = _internal_failure(
             session_factory, item_id, trigger, run_id, started, ACCESS_TOKEN_MISSING, str(exc)
         )
-        _run_alerts(session_factory, notifier, outcome)
+        to_alert.append(outcome)
         return outcome
     except secrets.KeychainApprovalNeeded as exc:
         _internal_failure(
@@ -1407,7 +1438,7 @@ def _sync_locked(
             INTERNAL,
             f"{type(exc).__name__}: {exc}",
         )
-        _run_alerts(session_factory, notifier, outcome)
+        to_alert.append(outcome)
         raise
 
     _best_effort(
@@ -1429,6 +1460,7 @@ def _sync_locked(
         modified=applied.modified if applied else 0,
         removed=applied.removed if applied else 0,
         inserted_transaction_ids=applied.new_charge_ids if applied else (),
+        pending_raises=applied.pending_raises if applied else (),
         initial_history_load=not history_was_complete,
         history_completed_now=applied.history_completed_now if applied else False,
         update_status=update_status,
@@ -1445,13 +1477,12 @@ def _sync_locked(
         outcome.removed,
         update_status,
     )
-    _run_alerts(session_factory, notifier, outcome)
+    to_alert.append(outcome)
     return outcome
 
 
 def _plaid_failure(
     session_factory: sessionmaker[Session],
-    notifier: Notifier,
     item_id: int,
     trigger: str,
     run_id: int,
@@ -1459,7 +1490,8 @@ def _plaid_failure(
     err: PlaidGatewayError,
     history_was_complete: bool,
 ) -> SyncOutcome:
-    """A Plaid error: nothing was applied; record the Item status, the run and alert."""
+    """A Plaid error: nothing was applied; record the Item status and the run (the caller
+    alerts once the sync lock is released)."""
     status = item_status_for(err)
     log.warning("Sync of Item %s failed: %s %s", item_id, err.error_code, err.error_message)
     _record_item_error(
@@ -1477,7 +1509,7 @@ def _plaid_failure(
         error_code=err.error_code,
         error_message=err.error_message,
     )
-    outcome = SyncOutcome(
+    return SyncOutcome(
         item_id,
         trigger,
         "error",
@@ -1491,8 +1523,6 @@ def _plaid_failure(
         started_at=started,
         finished_at=finished,
     )
-    _run_alerts(session_factory, notifier, outcome)
-    return outcome
 
 
 def _internal_failure(

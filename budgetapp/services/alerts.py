@@ -27,8 +27,10 @@ without a duplicate. :func:`clear_alert` deletes an event so it can fire again.
     ``outcome.inserted_transaction_ids`` (new charges only) for more than the threshold, dated in
     the last 7 days, never on an initial history load; once per charge
     (``large-charge:<pending id the row names, else its own Plaid id>``), so a posting never alerts
-    again. More than :data:`MAX_CHARGE_NOTIFICATIONS` new ones in a run are recorded silently and
-    announced by one summary (``large-charges:<item>:<sync run>``).
+    again. A pending charge at or under the threshold that this sync stored above it
+    (``outcome.pending_raises``: a tip or hotel incidentals added at posting) alerts once under
+    the pending row's key. More than :data:`MAX_CHARGE_NOTIFICATIONS` new ones in a run are
+    recorded silently and announced by one summary (``large-charges:<item>:<sync run>``).
 
 * :func:`evaluate_after_import` — after a CSV import that inserted or paired rows: budgets only
   (CSV imports never raise large-charge alerts).
@@ -488,16 +490,26 @@ def _large_charges(
     outcome: SyncOutcome,
     today: dt.date,
 ) -> list[AlertResult]:
-    """ALR-3: new charges over ``large_charge_threshold``, once per charge."""
+    """ALR-3: charges over ``large_charge_threshold``, once per charge.
+
+    New charges (``outcome.inserted_transaction_ids``), plus pending charges the app had at or
+    under the threshold that this sync stored above it (``outcome.pending_raises``: a tip or
+    hotel incidentals added at posting). Both are keyed by the pending row's Plaid id when there
+    is one, so a charge that already alerted while pending stays silent when it posts.
+    """
     threshold = settings.large_charge_threshold
-    if threshold is None or outcome.initial_history_load or not outcome.inserted_transaction_ids:
+    if threshold is None or outcome.initial_history_load:
+        return []
+    raised = {r.transaction_id: r for r in outcome.pending_raises if r.previous_amount <= threshold}
+    ids = [*outcome.inserted_transaction_ids, *raised]
+    if not ids:
         return []
     since = today - dt.timedelta(days=LARGE_CHARGE_DAYS)
     rows = list(
         session.scalars(
             select(Transaction)
             .where(
-                Transaction.id.in_(outcome.inserted_transaction_ids),
+                Transaction.id.in_(ids),
                 Transaction.source == "plaid",
                 Transaction.amount > threshold,
                 Transaction.date >= since,
@@ -507,8 +519,9 @@ def _large_charges(
     )
     by_key: dict[str, Transaction] = {}
     for row in rows:  # a pending row and the posting naming it share a key: keep the first
+        charge = raised[row.id].pending_plaid_id if row.id in raised else None
         by_key.setdefault(
-            f"large-charge:{row.pending_transaction_id or row.plaid_transaction_id}", row
+            f"large-charge:{charge or row.pending_transaction_id or row.plaid_transaction_id}", row
         )
     seen = set(
         session.scalars(select(AlertEvent.dedupe_key).where(AlertEvent.dedupe_key.in_(by_key)))
@@ -518,7 +531,22 @@ def _large_charges(
     limit = format_money(threshold)
     results: list[AlertResult] = []
     for key, row in new:
-        state = "pending charge" if row.pending else "charge"
+        when = f"{row.date:%b} {row.date.day}"
+        before = raised.get(row.id)
+        if before is None:
+            state = "pending charge" if row.pending else "charge"
+            message = f"A {state} on {when} is over your {limit} large-charge alert."
+        elif row.pending:
+            message = (
+                f"A pending charge on {when} went up from {format_money(before.previous_amount)}"
+                f" and is over your {limit} large-charge alert."
+            )
+        else:
+            message = (
+                f"A charge on {when} posted for more than the pending "
+                f"{format_money(before.previous_amount)} and is over your {limit} large-charge "
+                "alert."
+            )
         results.append(
             record_and_notify(
                 session,
@@ -526,10 +554,7 @@ def _large_charges(
                 kind=KIND_LARGE_CHARGE,
                 dedupe_key=key,
                 title=f"{format_money(row.amount)} at {_merchant(row)}",
-                message=(
-                    f"A {state} on {row.date:%b} {row.date.day} is over your {limit} "
-                    "large-charge alert."
-                ),
+                message=message,
                 transaction_id=row.id,
                 item_id=item.id,
                 notify=each,

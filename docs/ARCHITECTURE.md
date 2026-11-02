@@ -680,10 +680,12 @@ sync_item(item_id, trigger):
      /accounts/get → balances (SYNC-7)
      /item/get → consent_expires_at, consented_products, item error, Plaid freshness
      /liabilities/get when consented → liabilities columns + statements snapshot (SYNC-7)
-     alerts.evaluate_after_sync
-  on PlaidError: roll back, set item status/error per classification, record the run, alert
+  on PlaidError: roll back, set item status/error per classification, record the run
   on any other exception: roll back, record the run as error 'INTERNAL' with the exception
-     class, set item status 'error', alert (ALR-2, once a day), re-raise (non-zero exit)
+     class, set item status 'error'
+  release the sync lock, then alerts.evaluate_after_sync in its own transaction (after success,
+     not_ready and every failure; ALR-2 once a day); an INTERNAL exception is then re-raised
+     (non-zero exit)
 ```
 
 - **Schedule:** the launchd sync agent runs at 00:15, 06:15, 12:15 and 18:15
@@ -785,13 +787,15 @@ Notifications) and `doctor` checks it.
 `alerts.record_and_notify` records each alert once (its `dedupe_key`) and sends the notification
 only after the caller's transaction commits, and only if the alert row is still there: a rolled
 back transaction or savepoint sends nothing, a released savepoint is not the caller's commit
-(SQLAlchemy reports both as `after_commit`), and no notification runs while a lock is held. Each
-evaluation runs in a savepoint of its own and logs its errors: an alert problem never breaks the
-sync, import or edit that called it.
+(SQLAlchemy reports both as `after_commit`), and no notification runs while a lock is held (the
+sync engine evaluates its alerts after releasing the Item's sync lock). Each evaluation runs in a
+savepoint of its own and logs its errors: an alert problem never breaks the sync, import or edit
+that called it.
 
 - **Budget thresholds (ALR-1):** evaluated with the Budgets page's numbers (`budgets.overview`
   over `period_spending`, same basis and pending setting) after each successful sync, import and
-  edit that changes categories (transactions, rule re-apply, category merge): every monthly
+  edit that changes categories (transactions, a rule saved with "apply to existing", rule
+  re-apply on the Rules page or `./run recategorize`, category merge): every monthly
   category budget the page lists, the overall target, and annual budgets for the calendar year. A
   threshold `t` is crossed when `spent > 0` and `spent ≥ available × t / 100` (so a zero or
   negative available amount fires on the first spending). Each fires once per category, period
@@ -811,7 +815,10 @@ sync, import or edit that called it.
   `large_charge_threshold`, dated within the last 7 days, after the initial history load; once
   per charge and not again when it posts. The sync outcome lists only new charges: a row that
   replaces one the app already had (a posting, linked or matched, or a re-delivery after account
-  churn) is left out. More than 3 new ones in a run send one summary notification.
+  churn) is left out. A charge that first goes over the amount when it posts (a pending charge
+  at or under it, posted higher with a tip or hotel incidentals, or raised in place by Plaid;
+  the sync outcome's `pending_raises`) alerts once, under the pending row's key. More than 3
+  new ones in a run send one summary notification.
 - **Backups:** failed or stale, once a day.
 
 ## 12. Testing (MNT-2)

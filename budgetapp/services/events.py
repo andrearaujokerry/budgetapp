@@ -4,6 +4,22 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
+from decimal import Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class PendingRaise:
+    """A charge the app had as pending that a sync stored for a higher amount (ALR-3).
+
+    ``transaction_id`` is the row as it is now: the posted row that replaced the pending one (the
+    usual case: a restaurant tip or hotel incidentals added at posting), or the pending row itself
+    when Plaid changed its amount in place. ``pending_plaid_id`` is the pending row's Plaid id
+    (the charge's large-charge key) and ``previous_amount`` the amount the app had for it.
+    """
+
+    transaction_id: int
+    pending_plaid_id: str
+    previous_amount: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +34,9 @@ class SyncOutcome:
       charge naming its pending row, one matched to a removed charge (with or without the user's
       edits), or a re-delivery after Plaid re-issued an account. ``added`` still counts every
       inserted row.
+    * ``pending_raises``: charges the app had as pending that this sync stored for a higher
+      amount (:class:`PendingRaise`), so a charge that first goes over the large-charge threshold
+      when it posts is alerted once (ALR-3).
     * ``initial_history_load``: True while the Item has never completed its historical pull,
       including the run that first sees ``HISTORICAL_UPDATE_COMPLETE``; large-charge alerts skip
       such runs so two years of backfill do not notify.
@@ -35,6 +54,7 @@ class SyncOutcome:
     modified: int = 0
     removed: int = 0
     inserted_transaction_ids: tuple[int, ...] = ()
+    pending_raises: tuple[PendingRaise, ...] = ()
     initial_history_load: bool = False
     history_completed_now: bool = False
     update_status: str | None = None

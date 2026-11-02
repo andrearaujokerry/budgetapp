@@ -13,15 +13,16 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from budgetapp import clock
 from budgetapp import secrets as app_secrets
 from budgetapp.commands import sync as sync_cmd
+from budgetapp.db import LOCK_NS_SYNC
 from budgetapp.models import AlertEvent, PlaidItem
 from budgetapp.services import alerts, sync
-from budgetapp.services.events import SyncOutcome
-from budgetapp.services.notify import RecordingNotifier
+from budgetapp.services.events import PendingRaise, SyncOutcome
+from budgetapp.services.notify import NotifyResult, RecordingNotifier
 from tests.factories import (
     get_category,
     make_account,
@@ -464,6 +465,90 @@ def test_more_new_charges_are_summed_up_in_one_notification(db, notifier, item, 
     assert len(keys(db, "large_charge")) == 7 and f"large-charges:{item.id}:42" in keys(db)
 
 
+def raised(item, row, pending_id: str, before: str, **kwargs: Any) -> SyncOutcome:
+    """A sync that stored ``row`` for more than the ``before`` its pending charge had."""
+    kwargs.setdefault("sync_run_id", 8)
+    return succeed(
+        item, pending_raises=(PendingRaise(row.id, pending_id, Decimal(before)),), **kwargs
+    )
+
+
+def test_a_charge_that_goes_over_the_amount_when_it_posts_alerts_once(
+    db, notifier, item, card, threshold
+):
+    """A tip or hotel incidentals added at posting: the pending charge was under the amount."""
+    posted = charge(db, card, "560.00", merchant_name="Hilton", pending_transaction_id="hold-1")
+    evaluate(db, notifier, raised(item, posted, "hold-1", "450.00"))
+    (sent,) = notifier.sent
+    assert sent.title == "$560.00 at Hilton"
+    assert sent.message == (
+        f"A charge on {today():%b} {today().day} posted for more than the pending $450.00 and is "
+        "over your $500.00 large-charge alert."
+    )
+    assert keys(db, "large_charge") == ["large-charge:hold-1"]
+    assert event(db, "large-charge:hold-1").transaction_id == posted.id
+    evaluate(db, notifier, raised(item, posted, "hold-1", "450.00"))
+    assert len(notifier.sent) == 1
+
+
+def test_a_pending_charge_raised_in_place_says_so(db, notifier, item, card, threshold):
+    hold = charge(db, card, "640.00", pending=True, merchant_name="Hertz")
+    evaluate(db, notifier, raised(item, hold, hold.plaid_transaction_id, "300.00"))
+    assert notifier.sent[0].message == (
+        f"A pending charge on {today():%b} {today().day} went up from $300.00 and is over your "
+        "$500.00 large-charge alert."
+    )
+    assert keys(db, "large_charge") == [f"large-charge:{hold.plaid_transaction_id}"]
+
+
+def test_raised_charges_alert_only_when_they_first_go_over_the_amount(
+    db, notifier, item, card, threshold
+):
+    was_over = charge(db, card, "700.00", pending_transaction_id="p-over")
+    still_under = charge(db, card, "500.00", pending_transaction_id="p-under")
+    old = charge(db, card, "800.00", day=today() - dt.timedelta(days=8), pending_transaction_id="p")
+    csv_row = charge(db, card, "900.00", source="csv")
+    outcome = succeed(
+        item,
+        pending_raises=(
+            PendingRaise(was_over.id, "p-over", Decimal("520.00")),  # it was over while pending
+            PendingRaise(still_under.id, "p-under", Decimal("450.00")),
+            PendingRaise(old.id, "p", Decimal("400.00")),
+            PendingRaise(csv_row.id, "p-csv", Decimal("400.00")),
+        ),
+    )
+    evaluate(db, notifier, outcome)
+    posted = charge(db, card, "800.00", pending_transaction_id="p-new")
+    evaluate(db, notifier, raised(item, posted, "p-new", "400.00", initial_history_load=True))
+    evaluate(db, notifier, raised(item, posted, "p-new", "400.00", status="not_ready"))
+    assert keys(db, "large_charge") == [] and notifier.sent == []
+
+
+def test_a_raised_charge_that_already_alerted_while_pending_stays_silent(
+    db, notifier, item, card, threshold
+):
+    hold = charge(db, card, "600.00", pending=True, merchant_name="Hilton")
+    evaluate(db, notifier, new_charges(item, hold))
+    set_app_settings(db, large_charge_threshold=Decimal("650.00"))  # the amount was raised since
+    posted = charge(db, card, "700.00", pending_transaction_id=hold.plaid_transaction_id)
+    evaluate(db, notifier, raised(item, posted, hold.plaid_transaction_id, "600.00"))
+    assert notifier.titles == ["$600.00 at Hilton"]
+
+
+def test_new_and_raised_charges_share_the_summary(db, notifier, item, card, threshold):
+    rows = [charge(db, card, f"{600 + i}.00", merchant_name=f"Shop {i}") for i in range(3)]
+    posted = charge(db, card, "650.00", merchant_name="Tip", pending_transaction_id="p-tip")
+    outcome = succeed(
+        item,
+        sync_run_id=9,
+        inserted_transaction_ids=tuple(r.id for r in rows),
+        pending_raises=(PendingRaise(posted.id, "p-tip", Decimal("480.00")),),
+    )
+    evaluate(db, notifier, outcome)
+    assert notifier.titles == ["4 new charges over $500.00"]
+    assert "large-charge:p-tip" in keys(db, "large_charge")
+
+
 # --------------------------------------------------------------------------- isolation
 
 
@@ -625,3 +710,103 @@ def test_a_recording_notifier_failure_is_recorded_on_the_event(db, linked, fake_
     linked.sync(notifier=failing)
     stored = db.scalars(select(AlertEvent).where(AlertEvent.kind == "reconnect")).one()
     assert stored.error == "osascript exited 1: not allowed" and not stored.delivered
+
+
+@pytest.mark.parametrize(("link", "posted_amount"), [(True, "115.00"), (False, "105.00")])
+def test_the_engine_alerts_a_charge_that_first_goes_over_the_amount_when_it_posts(
+    db, linked, fake_plaid, notifier, link, posted_amount
+):
+    """Pending $90 under a $100 alert, posted higher with the tip: alerted once, at posting
+    (``link=False``: Plaid didn't name the pending row; the app matched it)."""
+    set_app_settings(db, large_charge_threshold=Decimal("100.00"))
+    db.commit()
+    linked.sync()  # the history load
+    hold = fake_plaid.add_pending(
+        linked.fake_item, amount="90.00", date=today(), name="TARTINE", merchant_name="Tartine"
+    )
+    linked.sync()
+    assert notifier.sent == []
+    fake_plaid.post_pending(
+        linked.fake_item, hold["transaction_id"], amount=posted_amount, link=link
+    )
+    outcome = linked.sync()
+    assert outcome.inserted_transaction_ids == ()  # the posting continues a known charge
+    assert notifier.titles == [f"${posted_amount} at Tartine"]
+    assert "posted for more than the pending $90.00" in notifier.sent[0].message
+    assert keys(db, "large_charge") == [f"large-charge:{hold['transaction_id']}"]
+    linked.sync()
+    assert len(notifier.sent) == 1
+
+
+def test_the_engine_alerts_a_pending_charge_plaid_raised_in_place(db, linked, fake_plaid, notifier):
+    set_app_settings(db, large_charge_threshold=Decimal("100.00"))
+    db.commit()
+    linked.sync()
+    hold = fake_plaid.add_pending(
+        linked.fake_item, amount="90.00", date=today(), name="HERTZ", merchant_name="Hertz"
+    )
+    linked.sync()
+    fake_plaid.modify_transaction(linked.fake_item, hold["transaction_id"], amount="140.00")
+    linked.sync()
+    fake_plaid.post_pending(linked.fake_item, hold["transaction_id"], amount="150.00")
+    linked.sync()
+    assert notifier.titles == ["$140.00 at Hertz"]
+    assert "went up from $90.00" in notifier.sent[0].message
+
+
+def test_the_engine_stays_silent_when_a_charge_over_the_amount_on_the_history_load_posts(
+    db, linked, fake_plaid, notifier
+):
+    set_app_settings(db, large_charge_threshold=Decimal("100.00"))
+    db.commit()
+    hold = fake_plaid.add_pending(linked.fake_item, amount="150.00", date=today(), name="DELTA")
+    assert linked.sync().initial_history_load
+    fake_plaid.post_pending(linked.fake_item, hold["transaction_id"], amount="170.00")
+    linked.sync()
+    assert notifier.sent == []
+
+
+class LockProbe:
+    """A notifier that records, for each notification, whether the Item's sync lock is held."""
+
+    def __init__(self, engine, item_id: int) -> None:
+        self.engine, self.item_id = engine, item_id
+        self.titles: list[str] = []
+        self.held: list[int] = []
+
+    def notify(self, title: str, message: str, *, subtitle: str = "") -> NotifyResult:
+        with self.engine.connect() as conn:
+            held = conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted "
+                    "AND classid = :ns AND objid = :item"
+                ),
+                {"ns": LOCK_NS_SYNC, "item": self.item_id},
+            ).scalar_one()
+        self.titles.append(title)
+        self.held.append(held)
+        return NotifyResult(True)
+
+
+@pytest.mark.parametrize("case", ["reconnect", "internal", "large charge"])
+def test_notifications_go_out_after_the_sync_lock_is_released(db, linked, fake_plaid, engine, case):
+    """ARCHITECTURE §11: no notification while a lock is held (osascript can take seconds, and a
+    sync of the Item started meanwhile would be recorded as skipped)."""
+    set_app_settings(db, large_charge_threshold=Decimal("100.00"))
+    db.commit()
+    linked.sync()
+    probe = LockProbe(engine, linked.item.id)
+    if case == "reconnect":
+        fake_plaid.set_item_error(linked.fake_item, "ITEM_LOGIN_REQUIRED")
+        linked.sync(notifier=probe)
+        assert probe.titles == ["Reconnect American Express"]
+    elif case == "internal":  # the alert still goes out when the exception is re-raised
+        fake_plaid.queue_error("transactions_sync", RuntimeError("boom"))
+        with pytest.raises(RuntimeError):
+            linked.sync(notifier=probe)
+        assert probe.titles == ["American Express sync failed"]
+    else:
+        fake_plaid.add_transaction(linked.fake_item, amount="250.00", date=today(), name="BIG")
+        linked.sync(notifier=probe)
+        assert len(probe.titles) == 1
+    assert probe.held == [0]

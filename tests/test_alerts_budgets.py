@@ -11,9 +11,10 @@ import datetime as dt
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
-from budgetapp import periods
+from budgetapp import cli, periods
+from budgetapp.commands import recategorize as recategorize_command
 from budgetapp.models import AlertEvent, Statement
 from budgetapp.services import alerts, budgets, csv_import
 from tests.factories import (
@@ -21,6 +22,7 @@ from tests.factories import (
     make_account,
     make_alert_event,
     make_budget,
+    make_rule,
     make_statement,
     make_transaction,
     set_app_settings,
@@ -526,3 +528,29 @@ def test_a_dry_or_empty_import_evaluates_nothing(db, notifier, dining, monkeypat
     paired = ImportOutcome(1, "a.csv", matched_plaid_count=1)
     alerts.evaluate_after_import(db, notifier, paired)
     assert calls == [1]
+
+
+# --------------------------------------------------------------------------- ./run recategorize
+
+
+def test_the_recategorize_command_evaluates_budgets(db, session_factory, notifier, monkeypatch):
+    """``./run recategorize`` (CAT-4) moves past charges: budget alerts go out on its commit."""
+    command = recategorize_command
+    card = make_account(db)
+    dining = get_category(db, "Dining & Drinks")
+    make_budget(db, dining, "100.00")
+    make_rule(db, dining, merchant_pattern="TARTINE")
+    make_transaction(db, card, amount="95.00", date=TODAY, name="TARTINE BAKERY")
+    db.commit()
+    lines: list[str] = []
+    command.recategorize(session_factory, dry_run=True, out=lines.append, notifier=notifier)
+    assert notifier.sent == [] and lines[2].strip() == "1 would change category"
+    command.recategorize(session_factory, out=lines.append, notifier=notifier)
+    assert notifier.titles == ["Dining & Drinks: 80% of budget used"]
+    # The command line hands the environment's notifier over (a no-op one under pytest).
+    monkeypatch.setattr(command, "open_database", lambda settings: (session_factory, lambda: None))
+    db.execute(delete(AlertEvent))
+    db.commit()
+    assert cli.main(["recategorize"]) == 0
+    db.expire_all()
+    assert db.scalars(select(AlertEvent.dedupe_key)).all() == [f"budget:{dining.id}:{NOV}:80"]

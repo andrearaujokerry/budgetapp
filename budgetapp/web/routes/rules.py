@@ -320,13 +320,17 @@ def _saved_message(verb: str, rule: Any, applied: RecategorizeResult | None) -> 
 
 
 @router.post("/rules")
-def create_rule(request: Request, session: SessionDep, form: FormDep) -> Response:
+def create_rule(
+    request: Request, session: SessionDep, form: FormDep, notifier: NotifierDep
+) -> Response:
     draft = RuleDraft.from_form(form)
     try:
         result = rules.create(session, draft)
     except RuleValidationError as err:
         context = _form_context(session, draft, errors=err.errors)
         return _page(request, "rules/form.html", context, status_code=422)
+    if result.applied is not None:
+        alerts.evaluate_budgets(session, notifier)  # ALR-1: past charges changed category
     session.commit()
     return redirect(
         request, "/rules", "success", _saved_message("saved", result.rule, result.applied)
@@ -334,7 +338,9 @@ def create_rule(request: Request, session: SessionDep, form: FormDep) -> Respons
 
 
 @router.post("/rules/{rule_id:int}")
-def update_rule(request: Request, rule_id: int, session: SessionDep, form: FormDep) -> Response:
+def update_rule(
+    request: Request, rule_id: int, session: SessionDep, form: FormDep, notifier: NotifierDep
+) -> Response:
     rule = _get_rule(session, rule_id)
     draft = RuleDraft.from_form(form)
     try:
@@ -342,6 +348,8 @@ def update_rule(request: Request, rule_id: int, session: SessionDep, form: FormD
     except RuleValidationError as err:
         context = _form_context(session, draft, rule_id=rule.id, errors=err.errors)
         return _page(request, "rules/form.html", context, status_code=422)
+    if result.applied is not None:
+        alerts.evaluate_budgets(session, notifier)  # ALR-1: past charges changed category
     session.commit()
     return redirect(
         request, "/rules", "success", _saved_message("updated", result.rule, result.applied)

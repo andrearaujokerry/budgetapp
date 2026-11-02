@@ -82,3 +82,44 @@ def test_a_refused_merge_sends_nothing(db, client, notifier, card, dining):
     db.commit()
     client.post(f"/categories/{other.id}/merge", data={"target_id": ""})
     assert notifier.sent == [] and budget_keys(db) == []
+
+
+def rule_form(category, *, apply: bool) -> dict[str, str]:
+    form = {
+        "merchant_pattern": "TARTINE",
+        "match_type": "contains",
+        "category_id": str(category.id),
+        "is_active": "1",
+        "priority": "1",
+    }
+    if apply:
+        form["apply_to_existing"] = "1"
+    return form
+
+
+def test_a_rule_saved_with_apply_to_existing_alerts(db, client, notifier, card, dining):
+    """The Rules page form (pre-filled by a transaction's "make a rule" link) moves past charges."""
+    shopping = get_category(db, "Shopping")
+    make_transaction(db, card, amount="95.00", date=TODAY, name="TARTINE BAKERY", category=shopping)
+    db.commit()
+    assert client.post("/rules", data=rule_form(dining, apply=False)).status_code == 200
+    assert notifier.sent == [] and budget_keys(db) == []
+    assert client.post("/rules", data=rule_form(dining, apply=True)).status_code == 200
+    assert notifier.titles == ["Dining & Drinks: 80% of budget used"]
+    assert budget_keys(db) == [f"budget:{dining.id}:2026-11-01:80"]
+
+
+def test_editing_a_rule_with_apply_to_existing_alerts_and_re_arms(
+    db, client, notifier, card, dining
+):
+    shopping = get_category(db, "Shopping")
+    rule = make_rule(db, dining, merchant_pattern="TARTINE")
+    make_transaction(db, card, amount="95.00", date=TODAY, name="TARTINE BAKERY", category=shopping)
+    db.commit()
+    client.post("/rules/reapply", data={"scope": "all", "action": "apply"})
+    assert notifier.titles == ["Dining & Drinks: 80% of budget used"]
+    response = client.post(f"/rules/{rule.id}", data=rule_form(shopping, apply=True))
+    assert response.status_code == 200
+    assert budget_keys(db) == []  # the charge left Dining: the 80% alert can fire again
+    client.post(f"/rules/{rule.id}", data=rule_form(dining, apply=True))
+    assert notifier.titles == ["Dining & Drinks: 80% of budget used"] * 2
