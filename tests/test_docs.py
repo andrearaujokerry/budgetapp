@@ -458,7 +458,9 @@ def test_the_guide_names_no_save_button_on_rows_that_save_on_change() -> None:
         visible = re.sub(
             r"<noscript>.*?</noscript>", "", (templates / name).read_text(), flags=re.S
         )
-        assert "Save" not in visible, f"{name} has a visible Save button: update the guide"
+        assert not re.search(r"ui\.button\(\s*[\"']Save[\"']|>Save<", visible), (
+            f"{name} has a visible Save button: update the guide"
+        )
     text = (REPO / "docs" / "using-the-app.md").read_text()
     monthly = re.search(r"^- \*\*Monthly budgets:\*\*.*?(?=^- )", text, flags=re.M | re.S).group(0)
     goes_to = re.search(r"[^.]*\*\*Goes to\*\*[^.;]*[.;]?[^.]*", text).group(0)

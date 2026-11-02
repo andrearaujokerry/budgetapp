@@ -17,6 +17,9 @@
 <input type="hidden" name="period" value="{{ labels.param }}">
 {{ form.inline_money('amount', err.raw if err else (line.budget if line else none), label=category.name ~ ' monthly budget', id='budget-' ~ cid, placeholder='No budget', aria_invalid='true' if err else none, aria_describedby=('budget-' ~ cid ~ '-error') if err else none) }}
 </form>
+{%- if suggestion is not none %}
+<p class="budget-hint" id="budget-{{ cid }}-hint" hidden>Saves when you leave the field · Esc cancels</p>
+{%- endif %}
 {{- bud.field_error('budget-' ~ cid ~ '-error', err) }}
 </td>
 <td class="num"><a class="budget-spent" id="spent-{{ cid }}" href="{{ spent_href(cid) }}" aria-label="{{ ui.money_text(spent) }} spent on {{ category.name }}: see the transactions">{{ ui.money(spent) }}</a></td>

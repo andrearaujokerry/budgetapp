@@ -342,6 +342,18 @@ class TestPage:
     def test_no_suggestions_without_history(self, client, groceries):
         response = client.get("/budgets")
         assert "data-suggest=" not in response.text
+        assert "-hint" not in response.text
+
+    def test_a_row_with_a_suggestion_has_a_hint_for_it(self, client, db, cat, spend, groceries):
+        """Suggest fills the field without saving; while it waits, a hint under the field says
+        that leaving it saves and Esc cancels (budgets.js shows it)."""
+        for month, amount in ((7, "600.00"), (8, "612.40"), (9, "625.00")):
+            spend(groceries, amount, f"2026-{month:02d}-01")
+        row = row_of(client.get("/budgets"), "line", groceries)
+        hint = re.search(rf'<p [^>]*id="budget-{groceries.id}-hint"[^>]*>(.*?)</p>', row, re.S)
+        assert hint is not None
+        assert " hidden" in hint.group(0)
+        assert "Saves when you leave the field · Esc cancels" in html.unescape(hint.group(1))
 
 
 class TestPeriods:

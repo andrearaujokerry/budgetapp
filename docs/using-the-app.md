@@ -120,7 +120,9 @@ The budgets for one period at a time; the arrows next to the period go back and 
   field. Each spent amount opens the matching transactions.
 - **Add budget** gives a category a monthly budget. A change applies from the period shown on;
   earlier periods keep their budgets.
-- **Suggest** proposes the average of your last three complete periods, rounded up to $5.
+- **Suggest** fills in the average of your last three complete periods, rounded up to $5. In a
+  budget row it saves like a typed amount, when you leave the field or press Enter; Esc puts
+  the old amount back.
 - **Rollover** (per category) carries what is left, or what you overspent, into the next period.
 - **Overall target:** one number for all your spending, compared with every category except those
   with an annual budget. Without one, the card adds up your category budgets and lists spending
