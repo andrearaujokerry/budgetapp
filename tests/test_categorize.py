@@ -1,9 +1,5 @@
 import datetime as dt
-import subprocess
-import sys
-import textwrap
 from decimal import Decimal
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +20,7 @@ from budgetapp.services.categorize import (
     system_category_id,
 )
 from budgetapp.services.userstate import UserState
+from tests.bounded import run_bounded
 from tests.factories import (
     card_payments,
     get_category,
@@ -244,29 +241,6 @@ class TestRuleMatching:
 
     def test_a_rule_without_conditions_matches_nothing(self):
         assert not rule_matches(Rule(category_id=1, match_type="contains"), txn())
-
-
-REPO = Path(__file__).resolve().parent.parent
-
-
-def run_bounded(code: str, limit: float = 5.0) -> str | None:
-    """What ``code`` prints in a fresh interpreter, or ``None`` when it runs past ``limit`` s.
-
-    A runaway regular expression holds the GIL, so the test process couldn't stop it: in a
-    subprocess a regression fails the test instead of hanging the suite.
-    """
-    try:
-        done = subprocess.run(
-            [sys.executable, "-c", textwrap.dedent(code)],
-            cwd=REPO,
-            capture_output=True,
-            text=True,
-            timeout=limit,
-            check=True,
-        )
-    except subprocess.TimeoutExpired:
-        return None
-    return done.stdout.strip()
 
 
 class TestRegexTimeLimit:

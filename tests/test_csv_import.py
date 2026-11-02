@@ -21,6 +21,7 @@ from budgetapp.db import LEDGER_KEY, LOCK_NS_GLOBAL
 from budgetapp.models import Account, CsvImport, Transaction, v_allocations
 from budgetapp.services import alerts, csv_import, reconcile
 from budgetapp.services.csv_import import ImportRefused
+from tests.bounded import run_bounded
 from tests.factories import (
     card_payments,
     get_category,
@@ -437,6 +438,61 @@ class TestRowErrors:
         parsed = csv_import.parse_file(data)
         assert [(r.row_number, r.name) for r in parsed.rows] == [(2, "A")]
         assert [(e.row_number, e.reason) for e in parsed.errors] == [(3, "The amount is missing.")]
+
+
+class TestHostileFiles:
+    """A crafted file can't keep the app busy: every check on a cell is linear in its length.
+
+    Two parser checks backtracked over long whitespace runs (quadratic: a 120 KB file took 40 s,
+    holding the GIL, so the whole app froze during Import → Preview)."""
+
+    @pytest.mark.parametrize("cell", ["extended_details", "date"])
+    def test_long_whitespace_runs_parse_quickly(self, cell):
+        out = run_bounded(
+            f"""
+            import time
+            from budgetapp.services import csv_import
+            from tests.test_csv_import import amex_csv, amex_row
+            rows = [amex_row("2025-08-01", f"SHOP {{i}}", "6.50") for i in range(250)]
+            for row in rows:
+                if {cell!r} == "date":
+                    row["Date"] = "1" + " " * 40_000 + "1"
+                else:
+                    row["Extended Details"] = "\\n " * 20_000
+            data = amex_csv(*rows)
+            start = time.monotonic()
+            parsed = csv_import.parse_file(data)
+            print(len(data), len(parsed.rows), len(parsed.errors), time.monotonic() - start)
+            """,
+            limit=20,
+        )
+        assert out is not None, f"a crafted ~10 MB file with long runs in {cell} ran past 20 s"
+        size, rows, errors, took = out.split()
+        # About 1 s here; the quadratic checks would take hours on a file this size.
+        assert int(size) > 9_000_000 and float(took) < 5
+        assert (int(rows), int(errors)) == ((0, 250) if cell == "date" else (250, 0))
+
+    def test_a_long_whitespace_run_is_still_not_a_date(self):
+        (error,) = csv_import.parse_file(
+            amex_csv(amex_row("2025-08-01", "SHOP", "1.00", Date="8/1/2025" + " " * 50 + "x"))
+        ).errors
+        assert error.reason.endswith("isn’t a date (expected M/D/YYYY).")
+
+    @pytest.mark.parametrize("field", ["Description", "Appears On Your Statement As"])
+    def test_a_description_no_amex_download_has_is_a_row_error(self, field):
+        # Categorizing searches the description with patterns that are quadratic on such text
+        # ("PAYMENT " repeated: about 17 s per 128 KB cell), so it never gets that far.
+        long_text = "PAYMENT " * 16_000
+        parsed = csv_import.parse_file(
+            amex_csv(
+                amex_row("2025-08-01", "PHILZ COFFEE", "5.25", **{field: long_text}),
+                amex_row("2025-08-02", "x" * csv_import.MAX_DESCRIPTION_LENGTH, "-5.25"),
+            )
+        )
+        assert [r.row_number for r in parsed.rows] == [3]
+        assert [(e.row_number, e.reason) for e in parsed.errors] == [
+            (2, "The description is too long to be from an Amex download.")
+        ]
 
 
 # --------------------------------------------------------------------------- targets

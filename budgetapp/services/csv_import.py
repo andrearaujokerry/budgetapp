@@ -10,7 +10,9 @@ Parsing (:func:`parse_file`, no database): UTF-8 (BOM or not), else Windows-1252
 extra columns ignored; dates ``M/D/YYYY``, ``MM/DD/YY`` and ISO; amounts exact to the cent
 (``$``, ``,`` and spaces stripped, 0–2 decimals; Amex's sign is Plaid's); References stripped of
 their apostrophes and kept as text. Rows that can't be used are reported with their spreadsheet
-row number and a reason.
+row number and a reason. Every check is linear in a cell's length (a crafted file must not keep
+the app busy), and a description longer than any Amex download has is a row error before the
+categorization patterns see it.
 
 Mapping: ``Description`` → ``name``, ``Appears On Your Statement As`` → ``original_description``,
 ``Category`` → ``external_category`` (blank for payments), ``Card Member`` → ``account_owner``,
@@ -76,6 +78,9 @@ MANUAL_ACCOUNT_NAME = "American Express (CSV)"
 NEW_ACCOUNT = "new"
 #: Row ids are BIGINT; a larger number never names a row.
 MAX_ROW_ID = 2**63 - 1
+#: Longest Description / "Appears On Your Statement As" (real ones are far shorter): the payment
+#: patterns of categorization take quadratic time on long text such as "PAYMENT " repeated.
+MAX_DESCRIPTION_LENGTH = 500
 _CHUNK = 1000
 
 DOWNLOAD_STEPS = (
@@ -115,12 +120,16 @@ COLUMNS: dict[str, tuple[str, ...]] = {
 _ALIASES = {alias: name for name, aliases in COLUMNS.items() for alias in aliases}
 _BASIC_FIELDS = frozenset({"date", "description", "amount", "receipt"})
 
-_WEEKDAY = re.compile(r"\s+(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?$", re.IGNORECASE)
+#: ``(?<!\s)``: tried only where a whitespace run starts, so a long run is scanned once, not once
+#: per character (quadratic).
+_WEEKDAY = re.compile(r"(?<!\s)\s+(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?$", re.IGNORECASE)
 _DATE_FORMATS = ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d")
 _NUMBER = re.compile(r"^[-+]?(\d+(\.\d*)?|\.\d+)$")
 _SCIENTIFIC = re.compile(r"^[-+]?\d+(\.\d+)?e\+?\d+$", re.IGNORECASE)
 #: A cell that swallowed the following records (an unclosed quote): a line that starts a new row.
-_SWALLOWED_ROW = re.compile(r"\n\s*(\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2})(\s+\w+)?\s*,")
+#: No newline may lead the date (the newline of the date's own line is found anyway), so each line
+#: is scanned once, not once per earlier blank line (quadratic).
+_SWALLOWED_ROW = re.compile(r"\n[^\S\n]*(\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2})(\s+\w+)?\s*,")
 _UNSAFE_NAME = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -381,6 +390,8 @@ def _parse_row(
     name = clean_text(cell("description")) or statement_as
     if not name:
         return RowError(number, "The description is missing.")
+    if max(len(name), len(statement_as or "")) > MAX_DESCRIPTION_LENGTH:
+        return RowError(number, "The description is too long to be from an Amex download.")
     location = {
         key: value
         for key, value in (
