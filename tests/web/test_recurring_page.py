@@ -114,6 +114,26 @@ class TestPage:
         assert all('method="post" action="/recurring/override"' in f for f in forms)
         assert all('hx-post="/recurring/override"' in f for f in forms)
 
+    def test_action_ids_keep_keyboard_focus_in_place(self, client, subscriptions):
+        """htmx puts focus back after a swap only on an element with the same id. The ids name
+        the row's place in its list and the button's slot, so after "Ignore it" focus lands on
+        the next row's "Ignore it", and after "Always list it" on "Back to automatic"."""
+        page = client.get("/recurring").text
+        forms = re.findall(r'<form class="rec-actions".*?</form>', page, re.S)
+        ids = [re.findall(r'<button[^>]* id="([^"]+)"', f) for f in forms]
+        assert ids == [
+            ["rec-active-1-1", "rec-active-1-2"],
+            ["rec-active-2-1", "rec-active-2-2"],
+            ["rec-lapsed-1-1", "rec-lapsed-1-2"],
+        ]
+        response = override(client, "netflix", "ignored", headers=HTMX)
+        ignore = re.search(r'<button[^>]* id="rec-active-1-2"[^>]*>', response.text).group(0)
+        assert 'aria-label="Ignore it: SPOTIFY USA 8777787"' in ignore
+        assert 'id="rec-ignored-1-1"' in response.text  # Netflix's Restore
+        response = override(client, "spotify usa", "confirmed", name="Spotify", headers=HTMX)
+        first = re.search(r'<button[^>]* id="rec-active-1-1"[^>]*>', response.text).group(0)
+        assert 'aria-label="Back to automatic: SPOTIFY USA 8777787"' in first
+
 
 class TestOverrides:
     def test_ignore_with_htmx_swaps_the_content_and_toasts(self, client, db, subscriptions):

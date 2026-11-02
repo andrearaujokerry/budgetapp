@@ -487,7 +487,10 @@ Every table goes in a `.table-wrap` (inside a `card(flush=true)` for full-bleed 
   wrap becomes a plain box so the sticky header follows the page under the top bar) or
   `.is-scrollable` (header sticks inside the wrap; the edge that has more columns fades:
   `.is-scrolled` / `.is-scrolled-end`). `.table-wrap--scroll` is a fixed-height scroller
-  (`--table-max-h`, default 420px) with its own sticky header.
+  (`--table-max-h`, default 420px) with its own sticky header. A control in the rows of an
+  `.is-fit` table is never scrolled into view under that header (`scroll-margin-top`), and the
+  page's `scroll-padding-top` leaves room for the top bar and, in Sandbox, test and demo, the
+  environment bar above it.
 - **`.col-grow`** (on the `<th>` and every `<td>` of ONE text column: description, merchant, rule):
   the column takes the width the other columns leave and its `.table__primary` /
   `.table__secondary` lines truncate to fit, so the table fits its card at desktop widths. It
@@ -559,10 +562,12 @@ nearby (the chart's call body is read by screen readers).
 | `[data-toast]` in `#flash` | ok/info/warn auto-dismiss after 6 s (paused while hovered/focused); errors (`data-persist`) stay; `[data-dismiss]` closes it (also any `[data-dismissible]` container). Toasts in the page HTML (after a POST → 303 → GET) are announced once through a live region. An identical toast already showing is not added again |
 | swapped `<tr>` / `[data-flash]` | a row replaced by an HTMX swap (`hx-swap="outerHTML"` on a `<tr>`), and any swapped element marked `data-flash`, glows briefly (`.flash-in`, 1.6 s; kept under reduced motion since it is a colour fade) |
 | `.table-wrap` | gets `.is-fit` or `.is-scrollable` (+ `.is-scrolled` / `.is-scrolled-end`), see section 6 |
+| `<p class="sr-only" role="status" data-status-for="<id>">` | a live region kept outside the region `#<id>` that a filter, sort or period change swaps: after the swap, the `data-status` text of the new content (the swapped element or its first `[data-status]`, e.g. "Budgets for Oct 2026, 29 days left.") is announced to screen readers (WCAG 4.1.3). Used by Transactions, Budgets, Trends and Plaid & Amex categories |
 | any HTMX request | `aria-busy="true"` on its target (dimmed to 60%) and a 2px progress bar at the top of the window; polling (`hx-trigger="every …"`) and elements with `data-quiet` stay silent |
-| HTMX 4xx/5xx (except 422) | not swapped; an error toast explains (403, 404, 409, 5xx); network failure → "Can't reach the app" toast. Never for polling or `data-quiet` requests |
-| HTMX 422 | **swapped**: return the re-rendered form with inline errors and status 422 |
-| `details.mobile-nav` | the mobile menu closes on Escape, on a click outside and when a link is followed |
+| HTMX 4xx/5xx (except 422) | not swapped; an error toast explains (403, 404, 409, 5xx: "Nothing was saved" for a POST, "nothing was loaded" for a GET); network failure → "Can't reach the app" toast. Never for polling or `data-quiet` requests. When a POST fails (or can't be sent), a control that saves on change (a select, input or switch with `hx_post`, or the controls of a form with `hx-trigger="change…"`) shows its stored value again; a form saved with a button keeps what was typed |
+| HTMX 422 | **swapped**: return the re-rendered form with inline errors and status 422. Focus then moves to its first `aria-invalid="true"` field (else its `role="alert"` banner), scrolled into view if it isn't |
+| keyboard focus after a swap | htmx puts focus back only on an element with the same id, so give every control in a swapped region a stable id (a row's place in a list works when rows leave it: focus lands on the next row). When the focused control is gone anyway, focus goes to the nearest surviving container with an id: its first `h1`–`h3`, else its first control |
+| `details.mobile-nav` | the mobile menu closes on Escape (focus inside it goes back to its Menu button), when keyboard focus leaves it, on a click outside and when a link is followed |
 
 htmx config (set in app.js): `allowEval=false`, `includeIndicatorStyles=false`,
 `historyCacheSize=0` (page HTML is never copied into browser storage) with
@@ -621,7 +626,7 @@ toasts, buttons, filters, pagination and tabs (the statements page prints as a c
 
 | Group | Tokens |
 | --- | --- |
-| Surfaces | `--bg` (page), `--surface` (cards), `--surface-raised` (dialogs, toasts), `--surface-sunken` (wells, table footers), `--surface-hover`, `--sidebar-bg`, `--border`, `--border-strong`, `--control-bg`, `--control-border`, `--control-border-hover`, `--track` (meter track), `--switch-off`, `--skeleton`, `--skeleton-hi` |
+| Surfaces | `--bg` (page), `--surface` (cards), `--surface-raised` (dialogs, toasts), `--surface-sunken` (wells, table footers), `--surface-hover`, `--sidebar-bg`, `--border`, `--border-strong`, `--control-bg`, `--control-border`, `--control-border-hover`, `--track` (meter track), `--switch-off`, `--skeleton`, `--skeleton-hi`; field borders and off switches (`--control-border`, `--switch-off`) reach 3:1 on `--surface`, `--bg` and `--control-bg` in both themes (WCAG 1.4.11) |
 | Text | `--text`, `--text-secondary`, `--text-muted`, `--text-faint` (placeholders); all ≥ 4.5:1 on every surface in both themes |
 | Accent | `--accent` (fills, primary buttons), `--accent-hover`, `--accent-text` (links, selected nav), `--accent-soft` (selected backgrounds), `--accent-contrast` (text on accent), `--focus` (focus outlines and focused control borders), `--focus-ring` (box-shadow, derived from `--focus`), `--danger`, `--danger-hover`, `--danger-contrast` |
 | Status | for each of `ok`, `warn`, `over`, `info`, `sandbox`, `demo`: `--<s>` (fill: bars, dots), `--<s>-text`, `--<s>-soft` (background), `--<s>-border`; plus `--over-deep` (overspend hatch) |

@@ -25,6 +25,28 @@
   vertical-align: middle;
 }
 
+/* Phones and narrow windows: category names and Plaid or Amex labels wrap between words
+   rather than being cut after a few letters (the columns beside them leave little room). On
+   phones the cells are a little narrower, so the longest words fit on their line. */
+@media (max-width: 899.98px) {
+  .categories-table .table__primary,
+  .categories-table .cat__name,
+  .mapping-table .table__primary {
+    overflow: visible;
+    overflow-wrap: break-word;
+    white-space: normal;
+  }
+}
+
+@media (max-width: 599.98px) {
+  .categories-table th,
+  .categories-table td,
+  .mapping-table th,
+  .mapping-table td {
+    padding-inline: 8px;
+  }
+}
+
 /* The panel under the tabs (the tabs are not a direct child of the page, so they get no
    rhythm of their own). */
 .categories-panel,

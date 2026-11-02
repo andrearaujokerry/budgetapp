@@ -39,6 +39,52 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The rule's category, shown under it on phones only (its column is hidden there). */
+.rule-phone-cat {
+  display: none;
+}
+
+/* Below 900px the table fits the window instead of scrolling sideways (which hid the switch
+   and the actions): names, conditions and categories wrap rather than being cut after a few
+   letters, and the four actions take two rows (.rule-actions). On phones the category moves
+   under the rule, and its column goes. */
+@media (max-width: 899.98px) {
+  .table-wrap > .rules-table {
+    min-width: 0;
+  }
+
+  .rules-table th,
+  .rules-table td {
+    padding-inline: 8px;
+  }
+
+  .rules-table .table__primary,
+  .rules-table .table__secondary,
+  .rules-table .cat__name {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  .rules-table .rule-actions {
+    display: grid;
+    grid-template-columns: repeat(2, auto);
+    gap: 2px;
+    justify-content: end;
+  }
+
+  .rules-table .rule-actions > * {
+    margin-left: 0;
+  }
+}
+
+@media (max-width: 599.98px) {
+  .rules-table .rule-phone-cat {
+    display: block;
+    margin-top: 2px;
+  }
+}
+
 /* The rule form and its preview: each card as tall as its own content. */
 .rule-editor {
   align-items: start;

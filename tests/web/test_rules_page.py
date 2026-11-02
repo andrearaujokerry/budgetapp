@@ -112,6 +112,19 @@ class TestList:
         assert re.search(r'aria-label="Move down: [^"]*"[^>]*disabled', last)
         assert 'class="is-muted"' in last  # the rule that is off
 
+    def test_phones_show_the_category_under_the_rule(self, client, world):
+        """Below 600px the Category column gives its room to the rule's text, which wraps
+        (rules.css), and the category shows as a line under the rule instead."""
+        page = client.get("/rules").text
+        head = re.search(r"<thead>.*?</thead>", page, re.S).group(0)
+        assert re.search(r'<th scope="col" class="col-optional-sm">Category</th>', head)
+        first = re.search(rf'<tr id="rule-row-{world.food.id}".*?</tr>', page, re.S).group(0)
+        cells = re.findall(r"<td[^>]*>.*?</td>", first, re.S)
+        assert 'class="col-optional-sm"' in cells[2] and "Dining &amp; Drinks" in cells[2]
+        rule = cells[1]
+        assert 'class="table__secondary rule-phone-cat"' in rule
+        assert "Dining &amp; Drinks" in rule[rule.index("rule-phone-cat") :]
+
     def test_empty_database(self, client):
         response = client.get("/rules")
         assert response.status_code == 200

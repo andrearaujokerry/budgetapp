@@ -14,6 +14,7 @@
  *   data-toast / data-dismiss  flash messages: ok/info/warn auto-dismiss after 6 s, errors stay; close button
  *   data-flash                 swapped-in element glows briefly (swapped <tr> rows always do)
  *   .table-wrap                gets .is-fit (table fits: header sticks to the page) or .is-scrollable
+ *   data-status-for="<id>"     live region: after #<id> is swapped, its [data-status] text is announced
  *
  * Page scripts can use window.App: toast(level, text), renderCharts(force),
  * formatMoney(number).
@@ -66,6 +67,7 @@
   var inFlight = 0;
   doc.addEventListener("htmx:beforeRequest", function (evt) {
     var d = evt.detail || {};
+    if (!evt.defaultPrevented && d.xhr) rememberFocus(d.xhr);
     if (evt.defaultPrevented || !d.xhr || isQuiet(d.elt)) return;
     var el = d.target && d.target.setAttribute ? d.target : null;
     if (el) el.setAttribute("aria-busy", "true");
@@ -83,25 +85,54 @@
     if (!inFlight) root.classList.remove("is-loading");
   });
 
+  function verbOf(detail) {
+    var config = detail && detail.requestConfig;
+    return String((config && config.verb) || "get").toLowerCase();
+  }
+
+  // A save that failed changed nothing, so a control that saves on change (a row's category,
+  // a switch, a budget amount) shows the stored value again rather than one that isn't saved.
+  // A form saved with a button keeps what was typed, to try again.
+  function restoreControls(elt) {
+    var controls;
+    if (!elt || !elt.tagName) return;
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(elt.tagName)) controls = [elt]; // htmx's default trigger: change
+    else if (elt.tagName === "FORM" && /\bchange\b/.test(elt.getAttribute("hx-trigger") || "")) controls = elt.elements;
+    else return;
+    forEach(controls, function (c) {
+      if (c.tagName === "SELECT") {
+        forEach(c.options, function (o) { o.selected = o.defaultSelected; });
+        updateCategoryDot(c);
+      } else if (c.type === "checkbox" || c.type === "radio") {
+        c.checked = c.defaultChecked;
+      } else if (c.tagName === "TEXTAREA" || (c.tagName === "INPUT" && c.type !== "hidden")) {
+        c.value = c.defaultValue;
+      }
+    });
+  }
+
   // Polling (hx-trigger="every …") and data-quiet requests never raise toasts: a
   // stopped app would otherwise add an alert every few seconds.
   doc.addEventListener("htmx:responseError", function (evt) {
-    if (isQuiet(evt.detail && evt.detail.elt)) return;
-    var xhr = evt.detail && evt.detail.xhr;
-    var status = xhr ? xhr.status : 0;
-    var config = evt.detail && evt.detail.requestConfig;
-    var verb = String((config && config.verb) || "get").toLowerCase();
+    var d = evt.detail || {};
+    var verb = verbOf(d);
+    if (verb !== "get") restoreControls(d.elt);
+    if (isQuiet(d.elt)) return;
+    var status = d.xhr ? d.xhr.status : 0;
     var text;
     if (status === 403) text = "That action was blocked by the app's security check. Reload the page and try again.";
     else if (status === 404 && verb !== "get") text = "That action isn't available. Reload the page and try again.";
     else if (status === 404) text = "That item no longer exists. Reload the page to see the latest data.";
     else if (status === 409) text = "Something changed in the meantime. Reload the page and try again.";
-    else if (status >= 500) text = "Something went wrong (" + status + "). Nothing was saved; the details are in the app's log.";
+    else if (status >= 500 && verb !== "get") text = "Something went wrong (" + status + "). Nothing was saved; the details are in the app's log.";
+    else if (status >= 500) text = "Something went wrong (" + status + ") and nothing was loaded; try again. The details are in the app's log.";
     else text = "The request failed (" + status + ").";
     toast("error", text);
   });
   doc.addEventListener("htmx:sendError", function (evt) {
-    if (isQuiet(evt.detail && evt.detail.elt)) return;
+    var d = evt.detail || {};
+    if (verbOf(d) !== "get") restoreControls(d.elt);
+    if (isQuiet(d.elt)) return;
     toast("error", "Can't reach the app. Is it still running?");
   });
 
@@ -533,9 +564,15 @@
     return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
   }
 
+  // Escape closes the mobile menu, which covers the page below its bar; from inside it, focus
+  // goes back to its Menu button. Tabbing out of it closes it too (below), so the panel never
+  // hides the focused control. "/" focuses the page's search field.
   doc.addEventListener("keydown", function (evt) {
     if (evt.key === "Escape") {
-      forEach(doc.querySelectorAll("details.mobile-nav[open]"), function (m) { m.removeAttribute("open"); });
+      forEach(doc.querySelectorAll("details.mobile-nav[open]"), function (m) {
+        if (m.contains(doc.activeElement)) m.querySelector("summary").focus();
+        m.removeAttribute("open");
+      });
       return;
     }
     if (evt.key !== "/" || evt.ctrlKey || evt.metaKey || evt.altKey || evt.defaultPrevented) return;
@@ -547,6 +584,11 @@
     evt.preventDefault();
     target.focus();
     if (typeof target.select === "function") target.select();
+  });
+
+  doc.addEventListener("focusout", function (evt) {
+    var menu = evt.target.closest ? evt.target.closest("details.mobile-nav[open]") : null;
+    if (menu && evt.relatedTarget && !menu.contains(evt.relatedTarget)) menu.removeAttribute("open");
   });
 
   /* ---------------------------------------------------------------- charts */
@@ -1052,12 +1094,92 @@
     });
   }
 
+  // A form that comes back with errors (422) may have been sent from far below them
+  // (Settings is longer than a screen): focus its first invalid field, or else its error
+  // banner, and scroll it into view unless it already is. True when something got focus.
+  function focusFormError(el) {
+    var field = el.matches('[aria-invalid="true"]') ? el : el.querySelector('[aria-invalid="true"]');
+    var target = field || el.querySelector('[role="alert"]');
+    if (!target || !visible(target)) return false;
+    if (!field && !target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+    target.focus({ preventScroll: true });
+    var top = parseFloat(getComputedStyle(root).scrollPaddingTop) || 0; // under the sticky bars
+    var r = target.getBoundingClientRect();
+    if (r.top < top || r.bottom > window.innerHeight) target.scrollIntoView({ block: "center" });
+    return true;
+  }
+
+  // htmx puts keyboard focus back after a swap only on an element with the same id. When
+  // the focused control is gone (its row left the list, Sync now turned into "Syncing…"),
+  // focus would fall to <body> and a keyboard or screen-reader user would start again at
+  // the top of the page. So each request remembers the focused element and the ids around
+  // it; if focus was lost, it goes back to that control, else to the nearest of those
+  // containers still shown: its heading, or else its first control.
+  var CONTROLS = "a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), " +
+    "select:not([disabled]), textarea:not([disabled]), summary";
+
+  function rememberFocus(xhr) {
+    var a = doc.activeElement;
+    if (!a || a === doc.body) return;
+    var ids = [];
+    for (var el = a; el && el !== doc.body; el = el.parentElement) {
+      if (el.id) ids.push(el.id);
+    }
+    xhr._focus = { el: a, ids: ids };
+  }
+
+  function firstShown(el, selector) {
+    return Array.prototype.filter.call(el.querySelectorAll(selector), visible)[0] || null;
+  }
+
+  function restoreFocus(xhr) {
+    var from = xhr && xhr._focus;
+    if (!from) return;
+    xhr._focus = null;
+    // A timer, so page scripts that place focus themselves after a swap go first.
+    window.setTimeout(function () {
+      if (doc.activeElement && doc.activeElement !== doc.body) return;
+      var places = [from.el].concat(from.ids.map(function (id) { return doc.getElementById(id); }));
+      for (var i = 0; i < places.length; i++) {
+        var el = places[i];
+        if (!el || !el.isConnected || !visible(el)) continue;
+        var to = el.matches(CONTROLS) ? el : (firstShown(el, "h1, h2, h3") || firstShown(el, CONTROLS));
+        if (!to) continue;
+        if (!to.matches(CONTROLS) && !to.hasAttribute("tabindex")) to.setAttribute("tabindex", "-1");
+        to.focus();
+        if (doc.activeElement === to) return;
+      }
+    }, 0);
+  }
+
+  // Results that a filter or the period arrows replace change silently for screen readers,
+  // so they are announced (WCAG 4.1.3): the new [data-status] text of a swapped region goes to
+  // its live region, <p role="status" data-status-for="<region id>">, kept outside it. The
+  // region is emptied first, so the same text (e.g. after re-sorting) is announced again.
+  var statusTimers = {};
+  function announceStatus(el) {
+    if (!el || !el.id || !el.querySelector) return;
+    var live = doc.querySelector('[data-status-for="' + CSS.escape(el.id) + '"]');
+    var from = el.matches("[data-status]") ? el : el.querySelector("[data-status]");
+    if (!live || !from) return;
+    var text = from.getAttribute("data-status") || "";
+    live.textContent = "";
+    window.clearTimeout(statusTimers[el.id]);
+    statusTimers[el.id] = window.setTimeout(function () { live.textContent = text; }, 150);
+  }
+
   // htmx fires afterSettle once per settled element; coalesce the page-wide work
   // into one pass. (setTimeout rather than requestAnimationFrame, which never
   // fires in hidden tabs.)
   var settleQueued = false;
   doc.addEventListener("htmx:afterSettle", function (evt) {
     var el = evt.target;
+    var xhr = evt.detail && evt.detail.xhr;
+    if (xhr && xhr.status === 422 && !xhr._errorShown && el && el.nodeType === 1) {
+      xhr._errorShown = focusFormError(el);
+    }
+    restoreFocus(xhr);
+    announceStatus(el);
     if (el && el.nodeType === 1 && el.id !== "flash") flashSwapped(el);
     if (settleQueued) return;
     settleQueued = true;

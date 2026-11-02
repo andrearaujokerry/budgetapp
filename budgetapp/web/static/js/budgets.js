@@ -1,10 +1,11 @@
 /* Budgets page: the "Suggest" buttons.
  *
  * A Suggest button (data-suggest-target="<input id>", data-suggest="615.00") fills that amount
- * field and selects it; it never saves by itself. In a budget row, which saves when its value
- * changes, Enter saves the suggestion, and Esc or leaving the field puts the saved amount back,
- * so the row never shows an amount that isn't saved. In the "Add a budget" dialog the button
- * reads the suggestion from the chosen category (data-suggest-select="<select id>"). */
+ * field and selects it; it never saves by itself. In a budget row the suggestion then saves
+ * like a typed amount: when you leave the field or press Enter. Esc puts the saved amount back.
+ * While it waits, the field is dashed and the hint under it (#<input id>-hint) says so; screen
+ * readers hear the hint with the field. In the "Add a budget" dialog the button reads the
+ * suggestion from the chosen category (data-suggest-select="<select id>"). */
 (function () {
   "use strict";
 
@@ -18,9 +19,27 @@
     return !!(input.form && input.form.classList.contains("budget-form"));
   }
 
+  function showHint(input, on) {
+    var hint = doc.getElementById(input.id + "-hint");
+    if (!hint) return;
+    hint.hidden = !on;
+    var ids = (input.getAttribute("aria-describedby") || "").split(/\s+/).filter(function (id) {
+      return id && id !== hint.id;
+    });
+    if (on) ids.push(hint.id);
+    if (ids.length) input.setAttribute("aria-describedby", ids.join(" "));
+    else input.removeAttribute("aria-describedby");
+  }
+
+  // The suggestion is no longer pending: it was saved, edited or cancelled.
+  function settle(input) {
+    input.classList.remove("is-suggested");
+    showHint(input, false);
+  }
+
   function revert(input) {
     if (!input.classList.contains("is-suggested")) return;
-    input.classList.remove("is-suggested");
+    settle(input);
     input.value = input.defaultValue;
   }
 
@@ -46,9 +65,13 @@
       }
     }
     if (!value) return;
-    // The value goes in before the field takes focus, so leaving it is not a change (no save).
+    // The value goes in before the field takes focus, so the browser sees no "change" when the
+    // field is left: the focusout handler below saves it instead.
     input.value = value;
-    if (inlineRow(input)) input.classList.add("is-suggested");
+    if (inlineRow(input)) {
+      input.classList.add("is-suggested");
+      showHint(input, true);
+    }
     input.focus();
     input.select();
   });
@@ -56,7 +79,7 @@
   // Editing a suggested amount makes it an ordinary edit (saved when the field is left).
   doc.addEventListener("input", function (evt) {
     var input = evt.target;
-    if (input && input.classList) input.classList.remove("is-suggested");
+    if (input && input.classList && input.classList.contains("is-suggested")) settle(input);
   });
 
   doc.addEventListener("keydown", function (evt) {
@@ -66,12 +89,15 @@
       evt.preventDefault();
       revert(input);
     } else if (evt.key === "Enter") {
-      input.classList.remove("is-suggested");
+      settle(input);
     }
   });
 
+  // Leaving the field saves the suggestion, the same as a typed amount.
   doc.addEventListener("focusout", function (evt) {
     var input = evt.target;
-    if (input && input.classList && input.classList.contains("is-suggested")) revert(input);
+    if (!input || !input.classList || !input.classList.contains("is-suggested")) return;
+    settle(input);
+    if (inlineRow(input) && input.value !== input.defaultValue) input.form.requestSubmit();
   });
 })();

@@ -230,6 +230,27 @@ class TestListPage:
         last = client.get("/transactions?tag=work&page=99")
         assert last.context["page"].page == 2 and len(row_ids(last.text)) == 5
 
+    def test_sort_links_keep_keyboard_focus_after_the_swap(self, client, db, card):
+        """htmx puts focus back on the sort header that was pressed only if it has an id."""
+        make_transaction(db, card, name="ONE")
+        html = client.get("/transactions", headers=HTMX).text
+        links = re.findall(r'<a class="th-sort"[^>]*>', html)
+        assert [re.search(r' id="([^"]+)"', a).group(1) for a in links] == [
+            "results-sort-date",
+            "results-sort-amount",
+        ]
+
+    def test_the_subtitle_says_where_the_category_is_changed_in_a_narrow_window(
+        self, client, db, card
+    ):
+        """Below 600px the row's category is plain text; it is changed under the row's ⋯ menu."""
+        make_transaction(db, card, name="ONE")
+        page = client.get("/transactions").text
+        subtitle = re.search(r'<p class="page-header__subtitle">(.*?)</p>', page, re.S).group(1)
+        assert "Click a category to change it" in subtitle
+        assert "⋯ menu" in subtitle
+        assert ">Change category<" in page
+
     def test_filter_bar_reflects_the_url(self, client, db, card, cats):
         make_transaction(db, card, account_owner="SAM RIVERA", tags=["work"], merchant_name="Uber")
         url = (
@@ -361,12 +382,15 @@ class TestListPage:
 
     def test_the_result_count_is_announced_to_screen_readers(self, client, db, card):
         # WCAG 2.2 SC 4.1.3: after a filter, sort or page swap, a status message says how many
-        # transactions match. The live region sits outside #results; transactions.js fills it
-        # from #results' data-status.
+        # transactions match. The live region sits outside #results; app.js fills it from
+        # #results' data-status.
         for i in range(51):
             make_transaction(db, card, name=f"T{i}", date="2026-10-01")
         html = client.get("/transactions").text
-        live = '<p id="txn-results-status" class="sr-only" role="status"></p>'
+        live = (
+            '<p id="txn-results-status" class="sr-only" role="status"'
+            ' data-status-for="results"></p>'
+        )
         assert live in html and html.index(live) < html.index('<div id="results"')
         partial = client.get("/transactions?sort=amount&page=2", headers=HTMX).text
         assert live not in partial

@@ -65,7 +65,7 @@
 <button type="button" class="btn btn--sm sync-now is-busy" disabled aria-label="Sync now (a sync is already running)">{{ ui.icon('refresh', class='icon--spin') }}<span class="sync-now__label">Sync now</span></button>
 {%- else %}
 <form class="sync-form" method="post" action="/connection/sync">
-<button type="submit" class="btn btn--sm sync-now" hx-post="/connection/sync" hx-target="#sync-status" hx-swap="outerHTML" hx-disabled-elt="this" aria-label="Sync now" data-tooltip="Fetch new transactions now" data-tooltip-pos="bottom-end">{{ ui.icon('refresh', class='icon--spin') }}<span class="sync-now__label">Sync now</span></button>
+<button type="submit" class="btn btn--sm sync-now" id="sync-now" hx-post="/connection/sync" hx-target="#sync-status" hx-swap="outerHTML" hx-disabled-elt="this" aria-label="Sync now" data-tooltip="Fetch new transactions now" data-tooltip-pos="bottom-end">{{ ui.icon('refresh', class='icon--spin') }}<span class="sync-now__label">Sync now</span></button>
 </form>
 {%- endif %}
 {%- endif %}

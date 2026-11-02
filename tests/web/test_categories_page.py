@@ -405,6 +405,28 @@ class TestMappingsTab:
         tab = client.get("/categories/mappings", headers=HTMX)
         assert tab.template.name == "categories/_view.html"
 
+    def test_new_results_are_announced(self, client, world):
+        """Screen readers hear what Source and Show now list (app.js copies the results'
+        data-status into the live region kept outside #mappings-results)."""
+        page = client.get("/categories/mappings").text
+        live = re.search(r'<p [^>]*data-status-for="mappings-results"[^>]*>', page).group(0)
+        assert 'role="status"' in live
+        assert page.index(live) < page.index('id="mappings-results"')
+        response = client.get(
+            "/categories/mappings?source=amex_csv&show=all",
+            headers={**HTMX, "HX-Target": "mappings-results"},
+        )
+        rows = len(response.context["listing"].rows)
+        status = re.search(r' data-status="([^"]*)"', response.text).group(1)
+        assert html.unescape(status) == f"{rows} Amex CSV categories."
+        response = client.get(
+            "/categories/mappings?source=amex_csv&show=used",
+            headers={**HTMX, "HX-Target": "mappings-results"},
+        )
+        rows = len(response.context["listing"].rows)
+        status = re.search(r' data-status="([^"]*)"', response.text).group(1)
+        assert html.unescape(status).endswith(" in your transactions.")
+
     def test_unknown_filter_values_fall_back(self, client, world):
         response = client.get("/categories/mappings?source=visa&show=some")
         assert (response.context["source"], response.context["show"]) == ("plaid_pfc", "used")

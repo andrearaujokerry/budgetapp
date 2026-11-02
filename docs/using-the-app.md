@@ -95,8 +95,9 @@ Every charge, refund, credit and payment, newest first.
 
 **Changing a transaction**
 
-- Click the **category** in a row to change it. A category you set yourself is never changed
-  again by rules or syncs (until you choose **Reset to automatic**).
+- Click the **category** in a row to change it (in a narrow window, the row's ⋯ menu has
+  **Change category**). A category you set yourself is never changed again by rules or syncs
+  (until you choose **Reset to automatic**).
 - The **⋯ menu** of a row (or the transaction's own page) has **Details**, **Notes and tags**,
   **Split** and **Always categorize like this** (neither for card payments), **Reset to
   automatic** once you have set the category yourself, and **Mark as reviewed** when the row needs
@@ -117,11 +118,13 @@ a formula are made safe. Possible duplicates are never exported unless you are v
 The budgets for one period at a time; the arrows next to the period go back and forward.
 
 - **Monthly budgets:** one row per category with its budget, what you spent, what is left and the
-  percentage used, most used first. Type a new amount and **Save**. Each spent amount opens the
-  matching transactions.
+  percentage used, most used first. Type a new amount; it saves when you press Enter or leave the
+  field. Each spent amount opens the matching transactions.
 - **Add budget** gives a category a monthly budget. A change applies from the period shown on;
   earlier periods keep their budgets.
-- **Suggest** proposes the average of your last three complete periods, rounded up to $5.
+- **Suggest** fills in the average of your last three complete periods, rounded up to $5. In a
+  budget row it saves like a typed amount, when you leave the field or press Enter; Esc puts
+  the old amount back.
 - **Rollover** (per category) carries what is left, or what you overspent, into the next period.
 - **Overall target:** one number for all your spending, compared with every category except those
   with an annual budget. Without one, the card adds up your category budgets and lists spending
@@ -221,9 +224,9 @@ One row per statement period of your card, checked against Amex to the cent.
   merged away or given another kind.
 
 **Plaid & Amex categories** decides where a new charge goes when no rule matched: each Plaid
-category (and each Amex CSV category) points to one of yours. Pick a category in **Goes to** and
-**Save**; **Not mapped** removes a choice, so the charge falls back to its group's category, then
-to Uncategorized. Some rows say "for credits": they are tried first for negative amounts, so cash
+category (and each Amex CSV category) points to one of yours. Pick a category in **Goes to**; it
+saves at once. **Not mapped** removes a choice, so the charge falls back to its group's category,
+then to Uncategorized. Some rows say "for credits": they are tried first for negative amounts, so cash
 back goes to Credits & Rewards while fees stay in Fees & Interest. A change applies to new
 transactions; past ones keep their category until you [re-apply rules](#rules), and the message
 after saving says how many would move.

@@ -105,11 +105,19 @@
   font-size: var(--fs-sm);
 }
 
-/* A suggested amount that isn't saved yet (budgets.js): Enter saves, Esc cancels. */
+/* A suggested amount that isn't saved yet (budgets.js): leaving the field or Enter saves it,
+   Esc cancels; the hint under it says so while it waits. */
 .inline-money .inline-control.is-suggested {
   border-style: dashed;
   border-color: var(--accent);
   background-color: var(--accent-soft);
+}
+
+.budget-hint {
+  margin: var(--sp-1) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  white-space: normal;
 }
 
 /* The overall target form: field and buttons side by side, stacked on phones. */

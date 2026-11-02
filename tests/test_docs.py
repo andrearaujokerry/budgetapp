@@ -450,6 +450,24 @@ def test_the_page_guide_covers_every_page_in_menu_order() -> None:
     assert all(f"**{group}:**" in text for group in groups)
 
 
+def test_the_guide_names_no_save_button_on_rows_that_save_on_change() -> None:
+    """A monthly budget row and a category mapping save when their value changes; their only
+    Save button is in <noscript>, so the guide must not tell the reader to click one."""
+    templates = REPO / "budgetapp" / "web" / "templates"
+    for name in ("budgets/_line_row.html", "categories/_mapping_group.html"):
+        visible = re.sub(
+            r"<noscript>.*?</noscript>", "", (templates / name).read_text(), flags=re.S
+        )
+        assert not re.search(r"ui\.button\(\s*[\"']Save[\"']|>Save<", visible), (
+            f"{name} has a visible Save button: update the guide"
+        )
+    text = (REPO / "docs" / "using-the-app.md").read_text()
+    monthly = re.search(r"^- \*\*Monthly budgets:\*\*.*?(?=^- )", text, flags=re.M | re.S).group(0)
+    goes_to = re.search(r"[^.]*\*\*Goes to\*\*[^.;]*[.;]?[^.]*", text).group(0)
+    assert "**Save**" not in monthly
+    assert "**Save**" not in goes_to
+
+
 def test_paths_are_the_ones_the_code_uses() -> None:
     settings = load_settings("production")
     home = Path.home()
