@@ -65,6 +65,7 @@ from budgetapp.services.categorize import Categorizer
 from budgetapp.services.events import ImportOutcome
 from budgetapp.services.notify import Notifier, NullNotifier
 from budgetapp.services.reconcile import CsvSide, ReconcileResult, reference_posting_date
+from budgetapp.textutil import has_control_chars, strip_control_chars
 
 log = logging.getLogger(__name__)
 
@@ -204,10 +205,11 @@ def _nfc(text: str) -> str:
 
 
 def clean_text(value: str | None) -> str | None:
-    """Unicode NFC, whitespace runs collapsed (Amex pads descriptions); ``None`` when blank."""
+    """Unicode NFC, control characters dropped (PostgreSQL refuses NUL), whitespace runs collapsed
+    (Amex pads descriptions); ``None`` when blank."""
     if value is None:
         return None
-    text = " ".join(_nfc(value).split())
+    text = " ".join(_nfc(strip_control_chars(value)).split())
     return text or None
 
 
@@ -215,7 +217,7 @@ def clean_lines(value: str | None) -> str | None:
     """Like :func:`clean_text` but keeps one line per line of a multi-line cell."""
     if value is None:
         return None
-    lines = [" ".join(line.split()) for line in _nfc(value).splitlines()]
+    lines = [" ".join(line.split()) for line in _nfc(strip_control_chars(value)).splitlines()]
     text = "\n".join(line for line in lines if line)
     return text or None
 
@@ -384,6 +386,10 @@ def _parse_row(
         )
     if len(reference) > 64:
         return RowError(number, "The Reference is too long to be an Amex Reference.")
+    if has_control_chars(reference):
+        return RowError(
+            number, "The Reference has a control character, so it isn’t an Amex Reference."
+        )
     if reference in seen:
         return RowError(number, f"The same Reference as row {seen[reference]}.")
     statement_as = clean_text(cell("statement_as"))

@@ -480,6 +480,30 @@ class TestSave:
         assert world.rides.category_id == world.travel.id
         assert state(db, lyft) == (world.travel.id, "rule", world.rides.id)
 
+    @pytest.mark.parametrize("match_type", ["contains", "regex"])
+    def test_control_characters_are_dropped_from_the_text_fields(
+        self, client, db, world, match_type
+    ):
+        # PostgreSQL refuses NUL in text: these used to answer 500.
+        data = uber_form(
+            world,
+            name="Ri\x00des",
+            merchant_pattern="ub\x00er",
+            description_pattern="TR\x00IP\x1f",
+            match_type=match_type,
+        )
+        response = client.post("/rules", data=data)
+        assert response.status_code == 200 and toasts(response.text)[0].startswith("Rule saved.")
+        rule = db.scalars(select(Rule).where(Rule.name == "Rides")).one()
+        assert (rule.merchant_pattern, rule.description_pattern) == ("uber", "TRIP")
+        data.update(name="Ri\x00des 2", merchant_pattern="u\x00ber")
+        response = client.post(f"/rules/{rule.id}", data=data)
+        assert response.status_code == 200 and toasts(response.text)[0].startswith("Rule updated.")
+        db.refresh(rule)
+        assert (rule.name, rule.merchant_pattern) == ("Rides 2", "uber")
+        preview = client.get("/rules/preview", params=data, headers=HTMX)
+        assert preview.status_code == 200 and preview.context["pv"]["state"] == "ready"
+
     def test_update_errors_come_back_on_the_edit_form(self, client, world):
         response = client.post(
             f"/rules/{world.rides.id}", data={"category_id": str(world.travel.id)}

@@ -156,6 +156,7 @@ budgetapp/
   models.py                 all SQLAlchemy models
   migrations/               Alembic environment and versions (shipped inside the package) (MNT-3)
   money.py                  Decimal helpers and formatting
+  textutil.py               control characters out of user text (PostgreSQL refuses NUL)
   periods.py                calendar months, statement cycles, years, days left
   plaid_gateway.py          PlaidGateway protocol, RealPlaidGateway, PlaidError
   services/
@@ -732,6 +733,10 @@ Security middleware (SEC-1, SEC-4):
   `Sec-Fetch-Dest: document`) passes; anything else gets 403. This blocks cross-site
   subresource loads of pages such as `/transactions?q=…` (XS-Search). Requests without Fetch
   Metadata (curl, old browsers) are not checked.
+- User text is cleaned of control characters (`textutil`, tab and newline kept) before it reaches
+  a query: transaction notes, tags and filters, category and rule names, rule patterns and every
+  text cell of an Amex CSV. Values that are identifiers (a CSV Reference, a lost-edit id) are
+  refused instead: a row error, or 404.
 - The new-rule form fills itself from the query string (`/rules/new?merchant_pattern=…`) only
   when `Sec-Fetch-Site` is absent, `same-origin` or `none`: a link from another site opens a
   blank form, so it can't make the preview run its pattern on every past transaction.

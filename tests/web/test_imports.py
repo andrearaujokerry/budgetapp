@@ -423,6 +423,21 @@ def test_a_held_row_pending_in_plaid_says_so_and_keep_asks_first(client, db):
     assert_clean(done)
 
 
+def test_control_characters_never_reach_the_database(client, db):
+    # PostgreSQL refuses NUL in text: the preview (Reference) or the import (Description) used to
+    # answer 500.
+    data = amex_csv(
+        amex_row("2025-08-01", "FV COF\x00FEE", "6.50"),
+        amex_row("2025-08-02", "FV TEA", "4.00", reference="3202521\x00400000099"),
+    )
+    token = preview_token(upload(client, data))
+    page = client.get(f"/import?preview={token}")
+    assert page.context["preview"].new == 1 and len(page.context["preview"].errors) == 1
+    done = client.post("/import/commit", data={"token": token}, follow_redirects=False)
+    assert done.status_code == 303
+    assert db.scalars(select(Transaction.name)).all() == ["FV COFFEE"]
+
+
 def test_html_in_descriptions_and_file_names_is_escaped(client, db):
     data = amex_csv(
         amex_row("2025-08-01", "<script>alert(1)</script>", "1.00", statement_as="<b>x</b>")

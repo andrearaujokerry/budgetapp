@@ -45,6 +45,7 @@ from budgetapp.services.categorize import (
     recategorize,
     rule_matches,
 )
+from budgetapp.textutil import strip_control_chars
 
 MATCH_TYPE_LABELS: dict[str, str] = {
     "contains": "Contains",
@@ -100,7 +101,7 @@ class RuleDraft:
 
         def text(name: str) -> str:
             value = form.get(name)
-            return value.strip() if isinstance(value, str) else ""
+            return strip_control_chars(value).strip() if isinstance(value, str) else ""
 
         return cls(
             name=text("name"),
@@ -192,7 +193,7 @@ def clean_rule(session: Session, draft: RuleDraft, *, current: Rule | None = Non
     An empty priority keeps the rule's current one, or puts a new rule last.
     """
     errors: dict[str, str] = {}
-    name = " ".join(draft.name.split()) or None
+    name = " ".join(strip_control_chars(draft.name).split()) or None
     if name is not None and len(name) > MAX_NAME_LENGTH:
         errors["name"] = f"Keep the name under {MAX_NAME_LENGTH} characters."
     category_id = _int_field(draft.category_id, "category_id", "Choose a category.", errors)

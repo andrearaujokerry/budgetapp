@@ -710,6 +710,12 @@ def test_dismissing_lost_edits(db, client):
     assert client.post("/connection/lost-edits/gone-1/dismiss").status_code == 404
 
 
+@pytest.mark.parametrize("tid", ["gone%00", "a%00b", "%1F"])
+def test_a_lost_edit_id_with_control_characters_is_a_404(client, tid):
+    # PostgreSQL refuses NUL in text: it used to answer 500.
+    assert client.post(f"/connection/lost-edits/{tid}/dismiss").status_code == 404
+
+
 def test_dismissing_without_javascript(db, client):
     card = make_account(db)
     make_tombstone(

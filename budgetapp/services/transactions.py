@@ -59,6 +59,7 @@ from budgetapp.models import (
 from budgetapp.money import ZERO, format_money, is_cents, parse_money_input, to_money
 from budgetapp.services import budgets, categorize, spending, userstate
 from budgetapp.services.rules import next_priority
+from budgetapp.textutil import strip_control_chars as clean_text
 
 PER_PAGE = 50
 MAX_PER_PAGE = 200
@@ -121,17 +122,8 @@ _STATE_CODE = re.compile(r"^[A-Z]{2}$")
 #: Amex pads the merchant part of a CSV Description before the city ("BLUE BOTTLE COFFEE     SAN
 #: FRANCISCO CA"); the first run of two or more spaces ends the merchant.
 _PADDING = re.compile(r"\s{2,}")
-#: C0 control characters and DEL, except tab and newline: invisible on the page, and PostgreSQL
-#: refuses NUL in text, so user text and URL parameters are cleaned of them first.
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 #: Whitespace runs as ``str.split`` sees them (SQL side of the merchant filter).
 _SQL_WHITESPACE = "[\\s\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+"
-
-
-def clean_text(value: Any) -> str:
-    """``value`` as text without control characters (tab and newline stay; CR LF becomes LF)."""
-    text = "" if value is None else str(value)
-    return _CONTROL_CHARS.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
 
 
 def parse_id(value: Any) -> int | None:

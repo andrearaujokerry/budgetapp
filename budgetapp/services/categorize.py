@@ -64,6 +64,7 @@ from budgetapp.models import (
 from budgetapp.money import to_money
 from budgetapp.services import userstate
 from budgetapp.services.userstate import UserState
+from budgetapp.textutil import strip_control_chars
 
 log = logging.getLogger(__name__)
 
@@ -587,7 +588,7 @@ def recategorize(
 def _clean_pattern(value: str | None) -> str | None:
     if value is None:
         return None
-    cleaned = value.strip()
+    cleaned = strip_control_chars(value).strip()
     return cleaned or None
 
 
@@ -719,7 +720,7 @@ def create_rule(
         account_id=account_id,
     )
     rule = Rule(
-        name=(name or "").strip() or None,
+        name=strip_control_chars(name).strip() or None,
         priority=priority,
         is_active=is_active,
         is_system=is_system,

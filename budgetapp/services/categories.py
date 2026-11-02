@@ -71,6 +71,7 @@ from budgetapp.services.categorize import (
     amex_category_keys,
     looks_like_fee,
 )
+from budgetapp.textutil import strip_control_chars
 
 #: How each kind is explained to the user (Categories page, pickers).
 KIND_LABELS: dict[str, str] = {
@@ -314,7 +315,7 @@ def suggest_color(session: Session) -> str:
 
 
 def _clean_name(value: str | None, errors: dict[str, str]) -> str:
-    name = " ".join((value or "").split())
+    name = " ".join(strip_control_chars(value).split())
     if not name:
         errors["name"] = "Enter a name."
     elif len(name) > MAX_NAME_LENGTH:

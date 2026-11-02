@@ -197,6 +197,17 @@ class TestAddAndEdit:
         assert response.status_code == 200
         assert uncategorized(db).name == "To sort" and uncategorized(db).kind == "expense"
 
+    def test_control_characters_are_dropped_from_names(self, client, db, world):
+        # PostgreSQL refuses NUL in text: it used to answer 500.
+        added = client.post("/categories", data={"name": "Bad\x00Na\x07me", "kind": "expense"})
+        assert added.status_code == 200 and toasts(added.text) == ["Added “BadName”."]
+        assert db.scalars(select(Category).where(Category.name == "BadName")).one()
+        data = {"name": "Pet\x00 care\x1b", "kind": "expense"}
+        saved = client.post(f"/categories/{world.pets.id}", data=data, headers=HTMX)
+        assert saved.status_code == 200 and toasts(saved.text) == ["Saved “Pet care”."]
+        db.refresh(world.pets)
+        assert world.pets.name == "Pet care"
+
     def test_bad_input_comes_back_with_messages(self, client, world):
         data = {"name": "", "kind": "savings", "color": "red", "icon": "x" * 40}
         response = client.post(f"/categories/{world.pets.id}", data=data, headers=HTMX)

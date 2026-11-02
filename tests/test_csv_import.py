@@ -478,6 +478,38 @@ class TestHostileFiles:
         ).errors
         assert error.reason.endswith("isn’t a date (expected M/D/YYYY).")
 
+    def test_control_characters_are_dropped_from_text(self):
+        # PostgreSQL refuses NUL in text (and in JSON): a NUL used to fail the import with a 500.
+        (row,) = csv_import.parse_file(
+            amex_csv(
+                amex_row(
+                    "2025-08-01",
+                    "PHILZ\x00 COF\x07FEE",
+                    "5.25",
+                    statement_as="PHILZ\x00",
+                    member="ALEX\x00 RIVERA",
+                    category="Restaurant\x00-Restaurant",
+                    **{"Extended Details": "a\x00b\r\nc\x1f", "Zip Code": "94\x00107"},
+                )
+            )
+        ).rows
+        assert (row.name, row.original_description, row.account_owner) == (
+            "PHILZ COFFEE",
+            "PHILZ",
+            "ALEX RIVERA",
+        )
+        assert row.external_category == "Restaurant-Restaurant"
+        assert row.location == {"extended_details": "ab\nc", "postal_code": "94107"}
+
+    def test_a_reference_with_control_characters_is_a_row_error(self):
+        parsed = csv_import.parse_file(
+            amex_csv(amex_row("2025-08-01", "PHILZ", "5.25", reference="32025214\x000000001"))
+        )
+        assert parsed.rows == ()
+        assert [e.reason for e in parsed.errors] == [
+            "The Reference has a control character, so it isn’t an Amex Reference."
+        ]
+
     @pytest.mark.parametrize("field", ["Description", "Appears On Your Statement As"])
     def test_a_description_no_amex_download_has_is_a_row_error(self, field):
         # Categorizing searches the description with patterns that are quadratic on such text
