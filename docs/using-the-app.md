@@ -80,8 +80,11 @@ Every charge, refund, credit and payment, newest first.
   amount range, card member, tag, and **Credits only**.
 - The address bar follows your filters, so a reload or a bookmark keeps them.
 - Above the list: how many transactions match, their **Charges**, **Credits & payments** and
-  **Net**. These are plain sums of the listed rows (a split charge counts in full under each
-  category it touches), so they can differ from budget figures.
+  **Net**, over every page of the list. Filtered by category, a split charge counts only its parts
+  in the chosen categories (its row still shows the whole charge and its split, and the summary
+  says how many split charges count only in part), so a list opened from a spent amount on the
+  Dashboard, Budgets or Trends adds up to that amount. Without a category filter they add up whole
+  amounts, card payments and credits included, so they differ from spending figures.
 - **Needs review** lists rows where something changed after you edited them (for example Plaid
   changed the amount of a split charge). **Possible duplicates** lists CSV rows held for review.
 

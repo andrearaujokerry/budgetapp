@@ -137,6 +137,51 @@ class TestListPage:
         assert "Whole Foods" in html and "WHOLEFDS MKT" in html
         clean(response)
 
+    def test_a_category_filter_sums_only_the_split_parts_in_it(self, client, db, card, cats):
+        """The row shows the whole split charge; the sums count only its part in the filtered
+        category, and the summary says so."""
+        hotel = make_transaction(
+            db, card, name="MARRIOTT", amount="628.15", date="2026-10-08", category=cats["shopping"]
+        )
+        make_split(db, hotel, cats["shopping"], "533.37")
+        make_split(db, hotel, cats["dining"], "94.78")
+        make_transaction(db, card, name="CAFE", amount="20.00", category=cats["dining"])
+
+        def summary(html: str) -> str:
+            match = re.search(r'<div class="txn-summary">.*?</dl>', html, re.S)
+            assert match is not None
+            return " ".join(Markup(re.sub(r"<[^>]+>", " ", match.group(0))).unescape().split())
+
+        def tip(html: str) -> str:
+            match = re.search(
+                r'class="txn-sums__tip"><span class="tip"[^>]*data-tooltip="([^"]+)"', html
+            )
+            assert match is not None
+            return Markup(match.group(1)).unescape()
+
+        dining = client.get(f"/transactions?category={cats['dining'].id}")
+        assert dining.context["page"].sums.net == Decimal("114.78")
+        text = summary(dining.text)
+        assert "2 transactions" in text and "Net $114.78" in text
+        assert "1 split charge counts only its part in this category" in text
+        assert "A split charge counts only its parts in the chosen categories" in tip(dining.text)
+        assert "$628.15" in dining.text and "Split into 2 parts" in dining.text  # the whole row
+        clean(dining)
+
+        both = client.get(
+            f"/transactions?category={cats['dining'].id}&category={cats['shopping'].id}"
+        )
+        text = summary(both.text)
+        assert "Net $648.15" in text and 'id="txn-split-note"' not in both.text
+
+        everything = client.get("/transactions")
+        text = summary(everything.text)
+        assert "Net $648.15" in text and 'id="txn-split-note"' not in everything.text
+        assert "Filter by category to count only a split charge's parts in it" in tip(
+            everything.text
+        )
+        assert "counts in full" not in everything.text
+
     def test_payment_refund_and_pending_rows_show_what_they_are(self, client, db, card, cats):
         payment = make_transaction(
             db,

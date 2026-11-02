@@ -46,13 +46,21 @@
 {%- endif %}
 </div>
 {%- else %}
+{#- Filtered by category, a split charge adds only its parts in those categories to the sums
+    (page.sums.partly_counted of them leave parts out); its row still shows the whole charge. -#}
+{%- set partly = page.sums.partly_counted -%}
 <div class="txn-summary">
-<p class="txn-summary__count"><strong>{{ '{:,}'.format(page.total_count) }}</strong> {{ 'transaction' if page.total_count == 1 else 'transactions' }}<span class="txn-summary__range"> · {{ page.dates.label }}{% if filt.show == 'duplicates' %} · not counted in any total{% endif %}</span></p>
+<p class="txn-summary__count"><strong>{{ '{:,}'.format(page.total_count) }}</strong> {{ 'transaction' if page.total_count == 1 else 'transactions' }}<span class="txn-summary__range"> · {{ page.dates.label }}{% if filt.show == 'duplicates' %} · not counted in any total{% endif %}</span>
+{%- if partly %}{% set one = filt.categories|length == 1 %}<span class="txn-summary__range" id="txn-split-note"> · {{ partly|pluralize('split charge') }} {{ 'counts only its' if partly == 1 else 'count only their' }} {{ 'part' if partly == 1 and one else 'parts' }} in {{ 'this category' if one else 'these categories' }}</span>{% endif %}</p>
 <dl class="txn-sums">
 <div class="txn-sums__item"><dt>Charges</dt><dd>{{ ui.money(page.sums.charges, tone='neutral') }}</dd></div>
 <div class="txn-sums__item"><dt>Credits &amp; payments</dt><dd>{{ ui.money(page.sums.credits) }}</dd></div>
 <div class="txn-sums__item"><dt>Net</dt><dd>{{ ui.money(page.sums.net, tone='neutral') }}</dd></div>
-<div class="txn-sums__tip">{{ ui.tip("Raw sums of the full amounts of every transaction listed, on all pages (not only this one). Charges are positive amounts; credits are refunds, statement credits and card payments. A split charge counts in full here. Spending by category is on Budgets and Trends.", pos="bottom-end") }}</div>
+{%- if filt.categories %}
+<div class="txn-sums__tip">{{ ui.tip("Sums of every transaction listed, on all pages (not only this one). Charges are positive amounts; credits are refunds, statement credits and card payments. A split charge counts only its parts in the chosen categories, as on Budgets and Trends; its row still shows the whole charge.", pos="bottom-end") }}</div>
+{%- else %}
+<div class="txn-sums__tip">{{ ui.tip("Sums of the full amounts of every transaction listed, on all pages (not only this one). Charges are positive amounts; credits are refunds, statement credits and card payments. Filter by category to count only a split charge's parts in it. Spending by category is on Budgets and Trends.", pos="bottom-end") }}</div>
+{%- endif %}
 </dl>
 <div class="txn-summary__actions">{{ ui.button("Export CSV", icon="download", size="sm", href=urls.export, download=true) }}</div>
 </div>

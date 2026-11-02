@@ -2,12 +2,14 @@
 
 * :class:`TransactionFilter` is parsed from (and written back to) the page's query parameters. It
   never raises: a value it cannot use is dropped and described in ``problems``.
-* :func:`search` returns one page of rows plus the count and the raw sums of every matching row.
+* :func:`search` returns one page of rows plus the count and the sums of every matching row.
   Suspected duplicates (``duplicate_status = 'suspect'``) are left out, as from every total in the
   app, unless the filter asks for them (``show=duplicates``).
 * The date shown, filtered and sorted on is ``COALESCE(authorized_date, date)`` (the spend date).
 * A category filter follows ``v_allocations``: a row whose splits add up to its amount matches
-  through its split categories, any other row through its own category.
+  through its split categories, any other row through its own category. The sums follow it too:
+  such a split charge adds only its parts in the chosen categories (its row still shows the whole
+  charge), so a list opened from a Spent figure adds up to that figure.
 * Edits (:func:`update`, :func:`reset_to_automatic`, :func:`set_splits`, :func:`clear_splits`,
   :func:`clear_review`, :func:`create_one_click_rule`) take the ledger lock first and never commit;
   the caller (a route) commits. Invalid input raises :class:`TransactionEditError` with a message
@@ -1031,12 +1033,18 @@ def get_row(
 
 @dataclass(frozen=True, slots=True)
 class Sums:
-    """Raw sums of the matching rows: charges (positive amounts), credits (negative amounts,
-    payments included) and their net."""
+    """Sums of the matching rows: charges (positive amounts), credits (negative amounts, payments
+    included) and their net.
+
+    Without a category filter every row counts its whole amount. With one, a split charge (parts
+    adding up to its amount) counts only its parts in the chosen categories, as ``v_allocations``
+    allocates it; ``partly_counted`` is how many listed split charges have parts left out.
+    """
 
     charges: Decimal
     credits: Decimal
     net: Decimal
+    partly_counted: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1070,7 +1078,9 @@ def search(
     today: dt.date | None = None,
     categories: Mapping[int, CategoryRef] | None = None,
 ) -> TransactionPage:
-    """One page of the rows matching ``filt``, with the count and raw sums of ALL matching rows.
+    """One page of the rows matching ``filt``, with the count and sums of ALL matching rows
+    (:class:`Sums`: under a category filter a split charge adds only its parts in those
+    categories).
 
     A page past the end shows the last page. ``sort``: ``-date`` (newest first, the default),
     ``date``, ``-amount`` (largest charge first) or ``amount``; ties by date then id.
@@ -1079,16 +1089,7 @@ def search(
     per_page = max(1, min(int(per_page), MAX_PER_PAGE))
     today = today or clock.today()
     conditions = filter_conditions(session, filt, today=today)
-    amount = Transaction.amount
-    totals = session.execute(
-        select(
-            func.count(Transaction.id),
-            func.coalesce(func.sum(case((amount > 0, amount), else_=0)), 0),
-            func.coalesce(func.sum(case((amount < 0, amount), else_=0)), 0),
-        ).where(*conditions)
-    ).one()
-    total_count = int(totals[0])
-    charges, credits = to_money(totals[1]), to_money(totals[2])
+    total_count, sums = _sums(session, conditions, resolve_category_ids(session, filt.categories))
     pages = max(1, -(-total_count // per_page))
     page = max(1, min(int(page), pages))
     rows = _rows(
@@ -1105,10 +1106,51 @@ def search(
         page=page,
         pages=pages,
         per_page=per_page,
-        sums=Sums(charges, credits, to_money(charges + credits)),
+        sums=sums,
         dates=resolve_dates(session, filt, today),
         sort=sort,
     )
+
+
+def _sums(
+    session: Session, conditions: Sequence[ColumnElement[bool]], category_ids: Sequence[int]
+) -> tuple[int, Sums]:
+    """The count and :class:`Sums` of the rows matching ``conditions``.
+
+    With ``category_ids`` (the category filter) each row adds what ``v_allocations`` puts in
+    those categories: a split charge whose parts add up to its amount only those parts, any other
+    row its whole amount (it matched through its own category).
+    """
+    amount: ColumnElement[Decimal] = Transaction.amount
+    counted: ColumnElement[Decimal] = amount
+    parts = None
+    if category_ids:
+        parts = (
+            select(
+                TransactionSplit.transaction_id.label("transaction_id"),
+                func.sum(TransactionSplit.amount).label("total"),
+                func.coalesce(
+                    func.sum(TransactionSplit.amount).filter(
+                        TransactionSplit.category_id.in_(category_ids)
+                    ),
+                    0,
+                ).label("chosen"),
+            )
+            .group_by(TransactionSplit.transaction_id)
+            .subquery("parts")
+        )
+        counted = case((parts.c.total == amount, parts.c.chosen), else_=amount)
+    query = select(
+        func.count(Transaction.id),
+        func.coalesce(func.sum(case((counted > 0, counted), else_=0)), 0),
+        func.coalesce(func.sum(case((counted < 0, counted), else_=0)), 0),
+        func.count().filter(counted != amount),
+    ).select_from(Transaction)
+    if parts is not None:
+        query = query.outerjoin(parts, parts.c.transaction_id == Transaction.id)
+    row = session.execute(query.where(*conditions)).one()
+    charges, credits = to_money(row[1]), to_money(row[2])
+    return int(row[0]), Sums(charges, credits, to_money(charges + credits), int(row[3]))
 
 
 @dataclass(frozen=True, slots=True)

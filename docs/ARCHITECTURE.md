@@ -450,6 +450,11 @@ category) subtract from it (TXN-3). Card payments (`kind = 'transfer'`) and cred
 and the budget alerts all call it. Trends always use calendar months by `spend_date`, with the
 same pending setting.
 
+The Transactions list's sums (Charges, Credits & payments, Net) add whole amounts, except under a
+category filter: then each row adds what `v_allocations` puts in the chosen categories, so a split
+charge counts only those parts (its row still shows the whole charge and its split). Every
+"spent" link (Budgets, Dashboard, Trends) therefore opens a list whose Net is the figure.
+
 ### Categorization precedence (CAT-2, TXN-3)
 For a new transaction:
 0. **Payments (fixed, not overridable by rules).** Card Payments when `amount < 0` and any of:

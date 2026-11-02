@@ -590,6 +590,62 @@ class TestSumsAndPages:
         dupes = run(db, F(show="duplicates"))
         assert dupes.sums == txns.Sums(Decimal("999.00"), Decimal("0.00"), Decimal("999.00"))
 
+    def test_a_category_filter_counts_only_a_split_charges_parts_in_it(self, db, card, cats):
+        """Filtered by category, a split charge adds only its parts in the chosen categories (as
+        ``v_allocations`` allocates it), so the Net equals that category's spending; its row
+        still shows the whole charge and its split. Unfiltered sums are unchanged."""
+        groceries, home, shopping = cats["groceries"], cats["home"], cats["shopping"]
+        costco = make_transaction(db, card, name="COSTCO", amount="100.00", category=shopping)
+        make_split(db, costco, groceries, "60.00")
+        make_split(db, costco, home, "40.00")
+        refund = make_transaction(db, card, name="REFUND", amount="-30.00", category=shopping)
+        make_split(db, refund, groceries, "-20.00")
+        make_split(db, refund, home, "-10.00")
+        make_transaction(db, card, name="PLAIN", amount="25.00", category=groceries)
+        odd = make_transaction(db, card, name="ODD", amount="80.00", category=shopping)
+        make_split(db, odd, groceries, "50.00")  # 50 + 29.99 ≠ 80: the whole row is Shopping
+        make_split(db, odd, home, "29.99")
+        make_transaction(db, card, name="PAYMENT", amount="-500.00", category=cats["payments"])
+
+        def sums(*categories):
+            return run(db, F(category=[str(c.id) for c in categories])).sums
+
+        assert sums(groceries) == txns.Sums(
+            Decimal("85.00"), Decimal("-20.00"), Decimal("65.00"), 2
+        )
+        assert sums(home) == txns.Sums(Decimal("40.00"), Decimal("-10.00"), Decimal("30.00"), 2)
+        assert sums(groceries, home) == txns.Sums(
+            Decimal("125.00"), Decimal("-30.00"), Decimal("95.00"), 0
+        )
+        assert sums(shopping) == txns.Sums(Decimal("80.00"), Decimal("0.00"), Decimal("80.00"), 0)
+        assert sums(shopping, groceries) == txns.Sums(
+            Decimal("165.00"), Decimal("-20.00"), Decimal("145.00"), 2
+        )
+        assert run(db).sums == txns.Sums(
+            Decimal("205.00"), Decimal("-530.00"), Decimal("-325.00"), 0
+        )
+
+        page = run(db, F(category=str(groceries.id)))
+        assert sorted(names(page)) == ["COSTCO", "PLAIN", "REFUND"]
+        row = next(r for r in page.rows if r.name == "COSTCO")
+        assert row.amount == Decimal("100.00") and row.is_split
+        assert [(s.category.id, s.amount) for s in row.splits] == [
+            (groceries.id, Decimal("60.00")),
+            (home.id, Decimal("40.00")),
+        ]
+        october = txns.budget_period(db, TODAY)
+        counted = spending.period_spending(db, october)
+        assert counted.amount_for(groceries.id) == page.sums.net
+        assert counted.amount_for(home.id) == sums(home).net
+
+    def test_the_uncategorized_token_counts_its_split_parts_too(self, db, card, cats):
+        txn = make_transaction(db, card, name="MIXED", amount="90.00", category=cats["shopping"])
+        make_split(db, txn, cats["uncategorized"], "15.00")
+        make_split(db, txn, cats["home"], "75.00")
+        page = run(db, F(category="uncategorized"))
+        assert names(page) == ["MIXED"]
+        assert page.sums == txns.Sums(Decimal("15.00"), Decimal("0.00"), Decimal("15.00"), 1)
+
     def test_no_rows(self, db):
         page = run(db, F(q="nothing"))
         assert (page.total_count, page.page, page.pages, page.rows) == (0, 1, 1, ())
