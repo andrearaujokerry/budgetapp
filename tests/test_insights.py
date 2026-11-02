@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pytest
 
-from budgetapp.periods import Period, month_period
+from budgetapp.periods import month_period
 from budgetapp.services import budgets, insights, spending
 from budgetapp.services.insights import Change, change, month_param
 from tests.factories import (
