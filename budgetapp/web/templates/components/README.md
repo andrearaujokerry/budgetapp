@@ -107,11 +107,11 @@ The web shell passes `env="demo"` when it serves a demo database (`serve --demo 
 | base | `conn.consent_warning` | bool (property) | consent banner |
 | base | `conn.items[*].consent_warning` | bool | which Items count for the consent banner |
 | base + partial | `conn.items[*].consent_days_left` | int (negative = expired) | banner tone and wording; partial: "Renew access" when any is < 0 |
-| base | `conn.items[*].consent_due_at` | aware datetime | banner date: `consent_due_at.astimezone().date()` then `|date_long` |
+| base | `conn.items[*].consent_due_at` | aware datetime | banner date: `consent_due_at.astimezone().date()` then `\|date_long` |
 | partial | `conn.label` | str | pill text fallback |
 | partial | `conn.syncing` | bool (property) | "Syncing…" pill, polling, disabled Sync now |
 | partial | `conn.stale` | bool (property) | amber "Synced 2 days ago" pill |
-| partial | `conn.last_sync_success_at` | aware datetime or `None` (property) | "Synced " + `|relative_time` |
+| partial | `conn.last_sync_success_at` | aware datetime or `None` (property) | "Synced " + `\|relative_time` |
 | partial | `conn.primary` | `ItemStatus` or `None` (property) | the worst Item (its fields below) |
 | partial | `conn.primary.institution_name` | str or `None` | healthy tooltip "American Express via Plaid" |
 | partial | `conn.primary.error_message`, `conn.primary.error_code` | str or `None` | error / reconnect tooltip |
