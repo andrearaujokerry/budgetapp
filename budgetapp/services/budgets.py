@@ -30,7 +30,7 @@ the more recent row wins (monthly on a tie).
 previous period's ``available − spent`` (negative after an overspend), chained back to the first
 period of an unbroken run of rollover periods, whose carry-in is 0. A flagged statement cycle
 (outside 25–35 days, usually a missing statement) ends the chain: the cycle after it starts a new
-one. It is computed on the fly, at most :data:`MAX_ROLLOVER_PERIODS` periods back.
+one. It is computed on the fly over the whole chain, however long (its spending is one query).
 
 **Overall target (BUD-3) and annual budgets (BUD-5).** The overall target (the ``overall`` monthly
 row) is compared with spending in every category without an active annual budget. Without a
@@ -105,8 +105,8 @@ WARN = "warn"
 OVER = "over"
 NONE = "none"
 
-#: Rollover chains and suggestions look at most this many periods back.
-MAX_ROLLOVER_PERIODS = 60
+#: Suggestions look at most this many periods back for complete ones.
+SUGGEST_LOOKBACK = 60
 #: "Suggest" averages this many complete periods.
 SUGGEST_PERIODS = 3
 #: Suggestions are rounded up to a multiple of this many dollars.
@@ -685,22 +685,25 @@ class _Context:
         budget amounts (empty without rollover or in a chain's first period).
 
         A flagged cycle ends the chain: what is left of a 61-day cycle (a missing statement)
-        compares one budget with two cycles of spending, so nothing carries out of it.
+        compares one budget with two cycles of spending, so nothing carries out of it. So does
+        a period that doesn't end the day before the next one starts, which happens only where
+        statement mode falls back to calendar months: more than 50 years before the card's first
+        known closing date, where no closing dates are generated (``periods.closing_dates``).
         """
         chain: list[tuple[Period, Decimal]] = []
         if not row.rollover:
             return chain
-        earlier = period
-        for _ in range(MAX_ROLLOVER_PERIODS):
-            earlier = self.previous(earlier)
-            if earlier.flagged:
-                break
+        later = period
+        while True:  # ends by the category's first budget row at the latest
+            earlier = self.previous(later)
+            if earlier.flagged or earlier.end != later.start - dt.timedelta(days=1):
+                return chain
             previous = self.versions.active(category_id, earlier.end)
             if previous is None or previous.period != MONTHLY or not previous.rollover:
-                break
+                return chain
             assert previous.amount is not None  # active rows always have one
             chain.append((earlier, previous.amount))
-        return chain
+            later = earlier
 
     def carry_in(self, category_id: int, period: Period, row: BudgetRow) -> Decimal:
         """BUD-4: what rolls into ``period``: the chain's ``available − spent``, oldest first."""
@@ -970,7 +973,7 @@ def suggestions(
         return Suggestions(())
     chosen: list[Period] = []
     earlier = anchor
-    for _ in range(MAX_ROLLOVER_PERIODS):
+    for _ in range(SUGGEST_LOOKBACK):
         if len(chosen) >= periods:
             break
         earlier = ctx.settings.previous(earlier)

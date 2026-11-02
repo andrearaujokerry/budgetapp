@@ -564,8 +564,8 @@ rows or completed Plaid's history, after every CSV import and after attaching a 
 
 ### Budget math (BUD-1..5)
 - `available = budget amount + carry-in` (carry-in only when `rollover`: the previous period's
-  `available − spent`, starting at 0 in the first rollover period; may be negative; a flagged
-  statement cycle ends the chain).
+  `available − spent`, chained back to the first rollover period however long ago, which starts
+  at 0; may be negative; a flagged statement cycle ends the chain).
 - `remaining = available − spent`; `percent_used = spent / available` (undefined when
   `available ≤ 0`).
 - **Overall target (BUD-3):** compared with spending in categories that have no active annual

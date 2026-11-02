@@ -809,10 +809,59 @@ class TestRollover:
         assert line(overview(db, SEP, today=TODAY), travel).carry_in == D("0.00")
         assert line(overview(db, OCT, today=TODAY), travel).carry_in == D("100.00")
 
-    def test_the_chain_is_bounded(self, db, cats):
+    def test_the_chain_runs_back_to_its_first_period(self, db, cats):
         make_budget(db, cats["home"], "10.00", effective_from=day("2010-01-01"), rollover=True)
         carry = line(overview(db, OCT, today=TODAY), cats["home"]).carry_in
-        assert carry == D("10.00") * budgets.MAX_ROLLOVER_PERIODS
+        assert carry == D("2010.00")  # Jan 2010 – Sep 2026: 201 months of $10
+
+    def test_a_chain_longer_than_five_years_keeps_its_oldest_leftovers(
+        self, db, cats, account, spend, freeze_today
+    ):
+        """Review finding: the chain stopped 60 periods back, so from the 61st rollover period
+        on the oldest leftovers dropped out (Budgets, Dashboard and alerts)."""
+        today = freeze_today("2026-11-15")
+        groceries = cats["groceries"]
+        first = budgets.period_for(db, day("2021-01-10"))  # set up as the Budgets page does
+        set_budget(db, groceries.id, D("100.00"), effective_from=first, today=today)
+        set_rollover(db, groceries.id, True, effective_from=first, today=today)
+        month = first
+        while month.end < today:
+            spend(groceries, "90.00", month.start + dt.timedelta(days=9))
+            month = budgets.next_period(db, month)
+        current = line(overview(db, budgets.current_period(db), today=today), groceries)
+        assert (current.carry_in, current.available) == (D("700.00"), D("800.00"))  # 70 × $10
+
+    def test_a_long_chain_in_statement_mode_restarts_after_a_flagged_cycle(
+        self, db, cats, account, spend, freeze_today
+    ):
+        today = freeze_today("2026-11-15")
+        home = cats["home"]
+        closing = day("2019-12-27")
+        while closing < today:
+            if closing != day("2020-03-27"):  # missing: Feb 28 – Apr 27, 2020 is flagged
+                make_statement(db, account, closing)
+            closing = (closing + dt.timedelta(days=31)).replace(day=27)
+        statement_mode(db, account, closing_day=27)
+        make_budget(db, home, "100.00", effective_from=day("2020-01-01"), rollover=True)
+        cycle = budgets.period_for(db, day("2020-01-10"))
+        while cycle.end < today:
+            spend(home, "90.00", cycle.start + dt.timedelta(days=9))
+            cycle = budgets.next_period(db, cycle)
+        current = budgets.current_period(db)
+        assert (current.start, current.end) == (day("2026-10-28"), day("2026-11-27"))
+        # Apr 28, 2020 – Oct 27, 2026: 78 cycles of $10; nothing from before the flagged one.
+        assert line(overview(db, current, today=today), home).carry_in == D("780.00")
+
+    def test_a_statement_chain_stops_where_no_closing_dates_are_generated(self, db, cats, account):
+        """Closing dates are generated 50 years back from the first statement; before that,
+        statement mode falls back to calendar months, which overlap the first generated cycle."""
+        make_statement(db, account, "2025-01-27")
+        statement_mode(db, account, closing_day=27)
+        make_budget(db, cats["home"], "10.00", effective_from=day("1950-01-01"), rollover=True)
+        assert budgets.period_for(db, day("1975-01-27")) == month_period(1975, 1)
+        current = budgets.current_period(db, today=TODAY)
+        # Jan 28, 1975 – Sep 27, 2026: 620 cycles of $10.
+        assert line(overview(db, current, today=TODAY), cats["home"]).carry_in == D("6200.00")
 
     def test_a_long_chain_reads_its_spending_in_one_query(self, db, cats, spend):
         """Review finding (PERF-1): each earlier period of a rollover chain was its own two

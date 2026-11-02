@@ -25,8 +25,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from sqlalchemy import Date, case, cast, func, select
-from sqlalchemy.dialects import postgresql
+from sqlalchemy import ARRAY, Date, case, cast, func, literal, select
 from sqlalchemy.orm import Session
 
 from budgetapp.models import Category, Transaction, get_app_settings, v_allocations
@@ -203,8 +202,9 @@ def periods_spending(
     """:func:`period_spending` of several budget periods, read in one query, keyed by
     ``(start, end)``. The periods must not overlap (budget periods never do).
 
-    Each allocation goes to the last period starting on or before its date (PostgreSQL's
-    ``width_bucket`` over the sorted starts), and only when it isn't after that period's end.
+    With the periods sorted, a day lies in period number ``started`` (1-based) when ``started``
+    periods have started on or before it and fewer have ended before it (PostgreSQL's
+    ``width_bucket`` counts both); otherwise it falls between two periods.
     """
     settings = get_app_settings(session)
     basis = basis_for_mode(settings.budget_period_mode)
@@ -216,17 +216,17 @@ def periods_spending(
     found: dict[int, list[CategorySpending]] = {}
     if ordered:
         day = basis_date(basis)
-        number = func.width_bucket(day, postgresql.array([p.start for p in ordered]))
-        ends = postgresql.array([p.end for p in ordered])
-        conditions = _filters(
-            ordered[0].start, ordered[-1].end, basis, include_pending, ("expense",)
-        )
+        starts = [p.start for p in ordered]
+        ends = [p.end + dt.timedelta(days=1) for p in ordered]  # the day after each period
+        started = func.width_bucket(day, literal(starts, ARRAY(Date)))
+        ended = func.width_bucket(day, literal(ends, ARRAY(Date)))
+        conditions = _filters(starts[0], ordered[-1].end, basis, include_pending, ("expense",))
         query = (
-            select(number.label("number"), *_category_columns())
+            select(started.label("number"), *_category_columns())
             .select_from(v_allocations)
             .join(Category, Category.id == v_allocations.c.category_id)
-            .where(*conditions, day <= ends[number])
-            .group_by(number, Category.id)
+            .where(*conditions, ended < started)
+            .group_by(started, Category.id)
         )
         for r in session.execute(query):
             found.setdefault(r.number, []).append(_category_spending(r))
