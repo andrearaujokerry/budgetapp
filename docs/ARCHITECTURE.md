@@ -130,6 +130,11 @@ Rules:
   a page with the same instruction. Run interactively, `doctor` reads every item of both
   environments so the user can click *Always Allow* (needed after each `brew upgrade` of
   Python).
+- A missing item (`MissingSecretError`) names the command that saves it
+  (`secrets.missing_secret_fix`): `./run setup --keys-only` for the Plaid keys, `./run setup` for
+  a database password (it creates the roles and their passwords), `./run doctor` otherwise. The
+  web app shows it on a "Setup isn't finished" page; the sync agent notifies once a day (marker
+  file: no sync runs, so no other alert can) and exits 1.
 - The production access token is written once and read back to verify; it is never
   rewritten. If the Keychain write fails after a successful exchange, the token goes to a
   0600 recovery file under `state/` and the app stops with instructions. `./run setup --env
@@ -832,7 +837,8 @@ that called it.
 - **Sync problems (ALR-2):** failures (Plaid or internal) once per Item, error code and day;
   reconnect needed once per occurrence (`reconnect:<item>:open` until a sync sees the Item
   healthy, then renamed, so the next occurrence alerts); stale data after 36 h once a day (folded
-  into a failure or reconnect alert sent in the same run); Keychain approval needed (marker file).
+  into a failure or reconnect alert sent in the same run); Keychain approval needed and a
+  Keychain item missing (marker files).
 - **Consent (SYNC-6):** renewal due within `consent_reminder_days`, once per due date; not while
   the Item needs reconnecting (update mode renews the consent too).
 - **Large charges (ALR-3):** only Plaid rows inserted by a sync for more than

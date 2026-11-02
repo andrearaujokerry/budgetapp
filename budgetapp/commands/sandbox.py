@@ -27,7 +27,7 @@ from budgetapp.commands.sync import (
     Runtime,
     describe_outcome,
     keychain_approval,
-    missing_plaid_keys,
+    missing_secret,
 )
 from budgetapp.config import Settings
 from budgetapp.logsetup import setup_logging
@@ -124,7 +124,7 @@ def _guarded(rt: Runtime, command: str, body: Any) -> int:
         rt.out("The Sandbox database is behind this code. Run: ./run migrate")
         return EXIT_FAILED
     except secrets.MissingSecretError as exc:
-        return missing_plaid_keys(rt, exc)
+        return missing_secret(rt, exc, unattended=False)
     except (linking.LinkError, sync_service.MissingAccessToken) as exc:
         rt.out(f"error: {exc}")
         return EXIT_FAILED

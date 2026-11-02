@@ -33,6 +33,7 @@ open, after **Sync now** or a change you make. Demo data never sends any.
 | **Consent renewal due** | "Renew your American Express connection" | the yearly Amex consent runs out within your reminder days (30 unless you change it) | once per due date; not while the connection needs reconnecting (reconnecting renews the consent too) |
 | **Large charge** | "$612.40 at Delta" | a new charge over the amount you set, or a pending charge that posts above it | once per charge; more than three in one sync arrive as one summary ("5 new charges over $500.00") |
 | **Keychain approval needed** | "Budget Tracker needs Keychain approval" | macOS asks before the background agents may read the app's Keychain items | once a day |
+| **Keychain item missing** | "Budget Tracker can't sync" | the sync agent can't find the database password or the Plaid keys in Keychain (setup isn't finished, or the login Keychain was reset); the message names the command that saves it: `./run setup` for the password, `./run setup --keys-only` for the keys | once a day |
 | **Backup failed or stale** | "Budget Tracker backup problem" | the nightly backup failed, or the newest backup is over 26 hours old | once a day |
 | **Upgrade needed** | "Budget Tracker needs an upgrade" | the sync agent finds the database needs an upgrade (for example after restoring an older backup); syncing waits until you run `./run live` | once a day |
 

@@ -252,7 +252,7 @@ What the middleware enforces on every request (`security.py`, ARCHITECTURE §9):
 | `db.SchemaMismatch` (the router-level schema guard) | 503 "Upgrade needed" with the command: `./run live` (production), `./run migrate` (Sandbox), `./run demo create NAME` (demo) |
 | `db.DatabaseUnavailable`, SQLAlchemy `OperationalError` | 503 "The database isn't responding" (`./run db start`); nothing was changed |
 | `secrets.KeychainApprovalNeeded` | 503 "Keychain approval needed" (`./run doctor --env production` in production) |
-| `secrets.MissingSecretError` (e.g. no Plaid keys yet) | 503 "Setup isn't finished" (`./run setup --keys-only` for Plaid keys) |
+| `secrets.MissingSecretError` (e.g. no Plaid keys yet) | 503 "Setup isn't finished" with `secrets.missing_secret_fix`'s command (`./run setup --keys-only` for Plaid keys, `./run setup` for a database password) |
 | `plaid_gateway.PlaidGatewayError` you did not handle | 502 page with Plaid's `display_message`; HTMX: an error toast, nothing swapped |
 | anything else | 500 "Something went wrong" (details only in the log, redacted) |
 

@@ -42,7 +42,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from budgetapp import clock
 from budgetapp.logsetup import register_secret
@@ -123,6 +123,31 @@ class MissingSecretError(SecretStoreError):
         if hint:
             message = f"{message} {hint}"
         super().__init__(message)
+
+
+class MissingSecretFix(NamedTuple):
+    """What to tell the user about a :class:`MissingSecretError` (:func:`missing_secret_fix`)."""
+
+    problem: str  # "The Plaid keys aren't saved yet."
+    action: str  # "Save them", followed by "with: <command>" or "in Terminal …"
+    command: str  # "./run setup --keys-only"
+
+
+def missing_secret_fix(account: str) -> MissingSecretFix:
+    """The fix for a missing Keychain item, for ``./run sync``, the Sandbox helpers and the web
+    app's "Setup isn't finished" page: the Plaid keys are saved by ``./run setup --keys-only``; a
+    database password only by ``./run setup`` (it creates the roles and their passwords)."""
+    if account == PLAID_CLIENT_ID or account.startswith("plaid.secret."):
+        return MissingSecretFix(
+            "The Plaid keys aren't saved yet.", "Save them", "./run setup --keys-only"
+        )
+    if account.startswith("db.password."):
+        return MissingSecretFix(
+            "The database password isn't in your Keychain.", "Create it", "./run setup"
+        )
+    return MissingSecretFix(
+        "A key the app needs is missing from your Keychain.", "Check", "./run doctor"
+    )
 
 
 class KeychainApprovalNeeded(SecretStoreError):
