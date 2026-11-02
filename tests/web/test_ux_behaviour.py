@@ -36,3 +36,22 @@ def test_leaving_a_suggested_amount_saves_it():
     assert "revert(" not in leave
     keys = listener(js, "keydown")
     assert '"Escape"' in keys and "revert(" in keys
+
+
+# --------------------------------------------------------------------------- app.js
+
+
+def function_body(text: str, name: str) -> str:
+    start = text.index(f"function {name}(")
+    return text[start : text.index("\n  }\n", start)]
+
+
+def test_a_form_returned_with_errors_shows_its_first_problem():
+    """After a 422 swap (e.g. Settings saved from its bottom Save button), focus moves to the
+    first invalid field, or the error banner, and it is scrolled into view."""
+    js = source("js/app.js")
+    settle = listener(js, "htmx:afterSettle")
+    assert "status === 422" in settle and "focusFormError(" in settle
+    body = function_body(js, "focusFormError")
+    assert '[aria-invalid="true"]' in body and '[role="alert"]' in body
+    assert ".focus(" in body and "scrollIntoView(" in body

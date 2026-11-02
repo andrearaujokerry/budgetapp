@@ -1052,12 +1052,31 @@
     });
   }
 
+  // A form that comes back with errors (422) may have been sent from far below them
+  // (Settings is longer than a screen): focus its first invalid field, or else its error
+  // banner, and scroll it into view unless it already is. True when something got focus.
+  function focusFormError(el) {
+    var field = el.matches('[aria-invalid="true"]') ? el : el.querySelector('[aria-invalid="true"]');
+    var target = field || el.querySelector('[role="alert"]');
+    if (!target || !visible(target)) return false;
+    if (!field && !target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+    target.focus({ preventScroll: true });
+    var top = parseFloat(getComputedStyle(root).scrollPaddingTop) || 0; // under the sticky bars
+    var r = target.getBoundingClientRect();
+    if (r.top < top || r.bottom > window.innerHeight) target.scrollIntoView({ block: "center" });
+    return true;
+  }
+
   // htmx fires afterSettle once per settled element; coalesce the page-wide work
   // into one pass. (setTimeout rather than requestAnimationFrame, which never
   // fires in hidden tabs.)
   var settleQueued = false;
   doc.addEventListener("htmx:afterSettle", function (evt) {
     var el = evt.target;
+    var xhr = evt.detail && evt.detail.xhr;
+    if (xhr && xhr.status === 422 && !xhr._errorShown && el && el.nodeType === 1) {
+      xhr._errorShown = focusFormError(el);
+    }
     if (el && el.nodeType === 1 && el.id !== "flash") flashSwapped(el);
     if (settleQueued) return;
     settleQueued = true;

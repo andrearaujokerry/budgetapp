@@ -561,7 +561,7 @@ nearby (the chart's call body is read by screen readers).
 | `.table-wrap` | gets `.is-fit` or `.is-scrollable` (+ `.is-scrolled` / `.is-scrolled-end`), see section 6 |
 | any HTMX request | `aria-busy="true"` on its target (dimmed to 60%) and a 2px progress bar at the top of the window; polling (`hx-trigger="every …"`) and elements with `data-quiet` stay silent |
 | HTMX 4xx/5xx (except 422) | not swapped; an error toast explains (403, 404, 409, 5xx); network failure → "Can't reach the app" toast. Never for polling or `data-quiet` requests |
-| HTMX 422 | **swapped**: return the re-rendered form with inline errors and status 422 |
+| HTMX 422 | **swapped**: return the re-rendered form with inline errors and status 422. Focus then moves to its first `aria-invalid="true"` field (else its `role="alert"` banner), scrolled into view if it isn't |
 | `details.mobile-nav` | the mobile menu closes on Escape, on a click outside and when a link is followed |
 
 htmx config (set in app.js): `allowEval=false`, `includeIndicatorStyles=false`,
