@@ -441,6 +441,17 @@ class TestPermissions:
     def test_private_folders(self, dr):
         assert dr.one(doctor.check_permissions).status == PASS
 
+    def test_a_huge_log_is_a_warning(self, dr, monkeypatch):
+        """Final review ops-7: a crash-looping agent can fill the disk with its log."""
+        monkeypatch.setattr(doctor, "LOG_WARN_BYTES", 1_000)
+        (dr.settings.logs_dir / "backup.log").write_text("ok\n")
+        assert dr.one(doctor.check_logs).status == PASS
+        web = dr.settings.logs_dir / "web.log"
+        web.write_text("Traceback (most recent call last):\n" * 100)
+        check = dr.one(doctor.check_logs)
+        assert check.status == WARN and check.title.startswith("web.log is ")
+        assert check.fix.startswith("tail -n 50 ") and str(web) in check.fix
+
     def test_a_readable_data_folder_fails_with_the_chmod(self, dr):
         os.chmod(dr.settings.pg_data_dir, 0o750)
         check = dr.one(doctor.check_permissions)
@@ -692,6 +703,14 @@ class TestMigrations:
         assert "at schema 0002_seed_defaults" in check.title
         assert prod.one(doctor.check_migrations).fix.startswith("./run live")
 
+    def test_a_database_from_newer_code_is_not_told_to_migrate(self, dr, db):
+        """Final review ops-6."""
+        db.execute(text("UPDATE alembic_version SET version_num = '0099_from_newer'"))
+        db.flush()
+        check = dr.one(doctor.check_migrations)
+        assert check.status == FAIL and "which this code doesn't know" in check.title
+        assert "./run migrate" not in check.fix and "./run restore" in check.fix
+
 
 # =========================================================================== Web app
 
@@ -908,18 +927,22 @@ class TestBackups:
         assert check.status == FAIL and "is 27 h old" in check.title
 
     def test_a_restore_copy_does_not_hide_stale_nightly_backups(self, prod, dr):
-        """A restore's copy of the replaced data says nothing about the nightly backups."""
+        """A restore's copy of the replaced data, or an upgrade's copy (final review ops-1), says
+        nothing about the nightly backups."""
         dump(prod.settings, 27)
         stamp = (NOW - dt.timedelta(hours=1)).strftime("%Y%m%dT%H%M%SZ")
         dump(prod.settings, 1, name=f"budgetapp-{stamp}-pre-restore.dump")
+        dump(prod.settings, 1, name=f"budgetapp-{stamp}-pre-upgrade.dump")
         check = prod.one(doctor.check_backups)
         assert check.status == FAIL and "is 27 h old" in check.title
         dump(dr.settings, 3)
         dump(dr.settings, 1, name=f"{dr.settings.db_name}-{stamp}-pre-restore.dump", mode=0o644)
+        dump(dr.settings, 1, name=f"{dr.settings.db_name}-{stamp}-pre-upgrade.dump")
         checks = [(c.status, c.title) for c in dr.run(doctor.check_backups)]
         assert checks[0] == (FAIL, "1 dump(s) are readable by others")  # copies are checked too
         assert checks[1][0] == PASS and checks[1][1].startswith("Newest verified backup 3 h ago")
-        assert "(1 kept in" in checks[1][1] and "plus 1 pre-restore copy(ies))" in checks[1][1]
+        assert "(1 kept in" in checks[1][1]
+        assert "plus 1 pre-restore and 1 pre-upgrade copy(ies))" in checks[1][1]
 
     def test_partial_and_foreign_files_do_not_count(self, prod):
         directory = Path(prod.settings.backups_dir)

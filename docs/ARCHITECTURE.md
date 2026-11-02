@@ -49,7 +49,9 @@ Paths — never inside the git checkout, never under `~/Desktop`, `~/Documents`,
 - `~/Library/Application Support/budgetapp/backups/<env>/` — nightly `pg_dump` files (REL-2)
 - `~/Library/Application Support/budgetapp/state/` — small marker files (alert de-duplication
   when the database or Keychain is unavailable, install stamp, recovery files)
-- `~/Library/Logs/budgetapp/` — app, sync, backup and postgres logs (never contain secrets)
+- `~/Library/Logs/budgetapp/` — app, sync, backup and postgres logs (never contain secrets). The
+  app's own logs rotate (5 MB, 3 kept); the backup agent trims any other log over 10 MB to its
+  newest 1 MB in place (launchd and PostgreSQL keep those files open with `O_APPEND`)
 
 All are created with mode `0700`; files written there are `0600`.
 
@@ -57,18 +59,25 @@ All are created with mode `0700`; files written there are `0600`.
 macOS privacy protection (TCC) blocks launchd-started processes from `~/Desktop`, where the
 repository lives. So production **always** runs the Application Support install:
 - `upgrade_install()` is the only way production code changes: refuse if the repository has
-  uncommitted changes → stop the web, sync and backup agents → take a backup →
-  `pip install -r requirements.txt` then `pip install --no-deps` from `git archive <commit>`
-  (never the working tree, never editable) → run migrations from the new install while holding
-  the sync lock → write the install stamp (that commit) → restart the agents.
+  uncommitted changes → stop the web, sync and backup agents → take a pre-upgrade dump (kept
+  apart from the 30 backups, newest 5) → `pip install -r requirements.txt -r
+  requirements-build.txt` then `pip install --no-deps --no-build-isolation` from
+  `git archive <commit>` (never the working tree, never editable; the pinned build tools mean
+  nothing is downloaded once the dependencies are installed, so upgrades work offline) → run
+  migrations from the new install while holding the sync lock → write the install stamp (that
+  commit) → restart the agents.
 - `./run live` calls `upgrade_install()` when the repository's commit differs from the stamp,
-  then opens the web agent (or serves from the install when no web agent is installed).
+  then opens the web agent (or serves from the install when no web agent is installed). When the
+  upgrade stops before it changed the install (uncommitted changes, an unreadable database, a
+  failed backup), `./run live` says why and opens the installed copy as it is.
 - A **schema guard** in `db.py` compares the database's Alembic revision with the code's
   head at every entry point. In production nothing migrates automatically: the web app shows
   an "upgrade needed" page and sync exits quietly with one de-duplicated notice. Sandbox
   `./run` migrates the sandbox database automatically. A database that cannot be reached is
   not a schema problem: the guard raises `DatabaseUnavailable` ("try later" / an error page),
-  never "upgrade needed".
+  never "upgrade needed". A database at a revision this code doesn't ship (newer code, another
+  branch, migrated it) raises `SchemaAhead`: `migrate_env` refuses it before Alembic runs, and
+  the messages say to check out that code or restore an older backup, never to migrate.
 - `./run setup` creates the production schema only while that database is still empty (the
   first setup); it never upgrades it afterwards, and `migrate --env production` refuses to run
   from a git checkout. Only `upgrade_install()` upgrades production.
@@ -148,6 +157,7 @@ Rules:
 run                         one command starts everything (MNT-1)
 pyproject.toml              hatchling build (installable package) + pytest/ruff config
 requirements.txt            pinned runtime deps; requirements-dev.txt adds test tools
+requirements-build.txt      pinned build tools (hatchling) for offline production installs
 alembic.ini                 dev convenience; points at budgetapp:migrations
 budgetapp/
   __main__.py, cli.py       `python -m budgetapp <command>`
@@ -808,14 +818,17 @@ Homebrew; every entry point waits for the database first:
 | --- | --- | --- |
 | `postgres` | at login, kept alive | stale-lock wrapper; `Umask 077`; `ExitTimeOut 120` |
 | `sync` | 00:15, 06:15, 12:15, 18:15 and at login | skips if synced in the last 5 h |
-| `backup` | 02:30 and at login | skips if the newest verified dump is under 20 h old |
+| `backup` | 02:30 and at login | skips if a verified dump was made since the last 02:30 |
 | `web` (optional) | at login, kept alive | serves the production app at http://127.0.0.1:8765 |
 
 **Backups (REL-2):** as the environment's role, `pg_dump --format=custom` into a temporary file
 (`umask 077`), verified with `pg_restore --list` and a full `pg_restore --file=/dev/null`, renamed
 into place, newest 30 kept; a "backup failed or stale" alert fires when the newest verified dump is
-over 26 hours old. **Restore** reads the dump's database name and refuses a dump from another
-environment, asks for a typed confirmation (the environment's name) and, for production, an
+over 26 hours old (the backup agent reports its own runs; the sync agent announces stale backups
+when the backup agent has not run for 26 hours either). The dump `upgrade_install()` takes first
+is named `…-pre-upgrade.dump` and kept apart (newest 5), like pre-restore dumps: neither counts
+toward the 30, "due" or "stale". **Restore** reads the dump's database name and refuses a dump
+from another environment, asks for a typed confirmation (the environment's name) and, for production, an
 explicit `--env production` on the command line, takes the sync locks (refusing while a sync
 runs) before it stops the web, sync and backup agents, takes a pre-restore dump (kept apart from
 the 30 backups, newest 5; `--without-safety-copy` skips it only when the current data can't be

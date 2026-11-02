@@ -79,6 +79,19 @@ class SchemaMismatch(Exception):
         )
 
 
+class SchemaAhead(SchemaMismatch):
+    """The database is at a revision this code doesn't ship: newer code (another branch or
+    checkout) migrated it. Migrating cannot help, so nothing does."""
+
+    def __init__(self, db_revision: str, code_revision: str | None) -> None:
+        super().__init__(db_revision, code_revision)
+        self.args = (
+            f"The database is at schema {db_revision}, which this code doesn't know: newer code "
+            "upgraded it. Check out that code again, or restore an older backup with "
+            "./run restore FILE.",
+        )
+
+
 class DatabaseUnavailable(Exception):
     """The database could not be reached or read (server down, refused, auth failure, missing).
 
@@ -370,6 +383,14 @@ def code_head() -> str:
     return head
 
 
+def known_revisions() -> set[str]:
+    """Every Alembic revision shipped with this code."""
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(alembic_config())
+    return {revision.revision for revision in script.walk_revisions()}
+
+
 def current_revision(bind: Engine | Connection) -> str | None:
     """The database's current Alembic revision (``None`` for an empty database)."""
     from alembic.runtime.migration import MigrationContext
@@ -403,10 +424,15 @@ def downgrade_migrations(bind: Engine | Connection, revision: str) -> None:
 
 
 def migrate_env(settings: Settings, revision: str = "head") -> tuple[str | None, str | None]:
-    """Migrate the environment's own database as its owner role; returns ``(before, after)``."""
+    """Migrate the environment's own database as its owner role; returns ``(before, after)``.
+
+    Raises :class:`SchemaAhead`, changing nothing, when newer code already migrated it.
+    """
     engine = make_engine(settings)
     try:
         before = current_revision(engine)
+        if before is not None and before not in known_revisions():
+            raise SchemaAhead(before, code_head())
         run_migrations(engine, revision)
         after = current_revision(engine)
     finally:
@@ -415,7 +441,8 @@ def migrate_env(settings: Settings, revision: str = "head") -> tuple[str | None,
 
 
 def schema_guard(engine: Engine) -> str:
-    """Raise :class:`SchemaMismatch` unless the database is exactly at the code's head revision.
+    """Raise :class:`SchemaMismatch` unless the database is exactly at the code's head revision
+    (:class:`SchemaAhead` when newer code migrated it).
 
     Every entry point calls this. In production nothing migrates automatically: the web app shows
     an "upgrade needed" page and sync exits quietly; sandbox ``./run`` migrates first.
@@ -434,6 +461,8 @@ def schema_guard(engine: Engine) -> str:
             f"{detail.splitlines()[0] if detail else 'no detail'}"
         ) from exc
     if current != head:
+        if current is not None and current not in known_revisions():
+            raise SchemaAhead(current, head)
         raise SchemaMismatch(current, head)
     return head
 

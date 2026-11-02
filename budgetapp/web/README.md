@@ -260,7 +260,7 @@ What the middleware enforces on every request (`security.py`, ARCHITECTURE §9):
 | --- | --- |
 | `raise HTTPException(404)` | the "Page not found" page (HTMX: an error toast) |
 | `raise HTTPException(409, "That budget changed. Reload and try again.")` | the notice page with your sentence (any 4xx; a string `detail` is shown, so write it for the user) |
-| `db.SchemaMismatch` (the router-level schema guard) | 503 "Upgrade needed" with the command: `./run live` (production), `./run migrate` (Sandbox), `./run demo create NAME` (demo) |
+| `db.SchemaMismatch` (the router-level schema guard) | 503 "Upgrade needed" with the command: `./run live` (production), `./run migrate` (Sandbox), `./run demo create NAME` (demo). Its subclass `db.SchemaAhead` (newer code migrated the Sandbox database) offers no command: the page says to check out that code or restore an older backup |
 | `db.DatabaseUnavailable`, SQLAlchemy `OperationalError` | 503 "The database isn't responding" (`./run db start`); nothing was changed |
 | `secrets.KeychainApprovalNeeded` | 503 "Keychain approval needed" (`./run doctor --env production` in production) |
 | `secrets.MissingSecretError` (e.g. no Plaid keys yet) | 503 "Setup isn't finished" with `secrets.missing_secret_fix`'s command (`./run setup --keys-only` for Plaid keys, `./run setup` for a database password) |

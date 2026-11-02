@@ -6,8 +6,9 @@ Sandbox unless you add `--env production`.
 ## Backups
 
 The backup agent backs up your real data every night at 02:30 and at each login, and skips a
-run when the newest backup is under 20 hours old (a Mac asleep at 02:30 catches up when it
-wakes). To back up by hand:
+run when a backup was already made since the last 02:30 (a Mac asleep at 02:30 catches up when it
+wakes). A backup made during the day, by hand or at login, never makes the next night's run
+skip, so backups stay about a day apart. To back up by hand:
 
 ```sh
 ./run backup --env production   # your real data
@@ -20,8 +21,12 @@ wakes). To back up by hand:
   named after the database and the time in UTC, for example
   `budgetapp-20261101T023012Z.dump`. Only you can read them.
 - The newest 30 are kept (`--keep N` changes that for a manual run).
+- Each upgrade of the live app (`./run live` or `./run install-agents` after new commits) first
+  saves a copy named `…-pre-upgrade.dump`. These copies are kept apart from the 30 backups (the
+  newest 5 stay), so upgrading, or retrying an upgrade, never pushes a nightly backup out.
 - If a backup fails, or the newest one is more than 26 hours old, you get a notification (once a
-  day) and `./run doctor --env production` reports it.
+  day) and `./run doctor --env production` reports it. The sync agent checks too, so you also hear
+  about it when the backup agent itself stops running.
 - Backups hold the database only. Your keys and the access token stay in Keychain; keep a copy of
   the token in your password manager ([Going live](going-live.md#keep-a-copy-of-the-access-token-recommended)).
 
@@ -84,7 +89,7 @@ they run the installed production copy with your real data, never the Sandbox:
 | --- | --- | --- | --- |
 | `local.budgetapp.postgres` | the database server | at login, kept running | `postgres.log` |
 | `local.budgetapp.sync` | `sync --env production --if-due --unattended` | 00:15, 06:15, 12:15, 18:15 and at login; skipped when the last successful sync is under 5 hours old | `sync.log` |
-| `local.budgetapp.backup` | `backup --env production --if-due --unattended` | 02:30 and at login; skipped when the newest backup is under 20 hours old | `backup.log` |
+| `local.budgetapp.backup` | `backup --env production --if-due --unattended` | 02:30 and at login; skipped when a backup was already made since the last 02:30 | `backup.log` |
 | `local.budgetapp.web` (with `--with-web`) | the production app at http://127.0.0.1:8765 | at login, kept running | `web.log` |
 
 - Their files are `~/Library/LaunchAgents/local.budgetapp.*.plist`; logs are in
@@ -113,7 +118,7 @@ FAILs.
 
 | Section | What it checks |
 | --- | --- |
-| This Mac | FileVault is on; no other macOS user accounts (the app has no login); app folders are private and outside Desktop, Documents, Downloads and iCloud |
+| This Mac | FileVault is on; no other macOS user accounts (the app has no login); app folders are private and outside Desktop, Documents, Downloads and iCloud; no log has grown huge |
 | Database | the server runs and accepts this environment's user; it listens only on this Mac; its socket and settings are private; the client and server versions match; no stale lock file; the database layout matches the code |
 | Web app | whether the app answers on its port, and only on this Mac |
 | Keychain | every key and password this environment needs is saved and readable |
@@ -156,6 +161,12 @@ before writing.
 | `sync-sandbox.log`, `sync-production.log` | `./run sync`, the sync agent and the Sandbox helpers |
 | `sync.log`, `backup.log`, `web.log` | the background agents' own output |
 
+Logs can't fill the disk. The app's own logs (`web-…` and `sync-…`) start a new file at 5 MB and
+keep the 3 before it (`web-production.log.1` and so on). Each night the backup agent cuts any
+other log over 10 MB (an agent that keeps failing and restarting writes one quickly) down to its
+newest 1 MB, and `./run doctor` warns about a log over 50 MB with the command that shows its last
+lines.
+
 ## Where everything lives
 
 | Path | What it is |
@@ -163,7 +174,7 @@ before writing.
 | `~/Desktop/budgetapp` | the code (git), with its Python environment in `.venv` |
 | `~/Library/Application Support/budgetapp/postgres` | the PostgreSQL 18 data (skipped by Time Machine) |
 | `~/Library/Application Support/budgetapp/run` | the database server's private socket folder |
-| `~/Library/Application Support/budgetapp/backups/production`, `…/sandbox` | verified backups and pre-restore safety copies |
+| `~/Library/Application Support/budgetapp/backups/production`, `…/sandbox` | verified backups, pre-restore safety copies and pre-upgrade copies |
 | `~/Library/Application Support/budgetapp/venv` | the installed production copy that `./run live` and the agents run |
 | `~/Library/Application Support/budgetapp/bin` | the small script the postgres agent starts |
 | `~/Library/Application Support/budgetapp/state` | small marker files (once-a-day notices, the install stamp) and, only if Keychain failed during a link, `recovery/` |
@@ -187,12 +198,13 @@ their fix.
 | --- | --- |
 | A page says **"The database isn't responding"**, or a command says the database isn't running | `./run db start`, then reload. `./run db status` shows the server's state; `postgres.log` says why it stopped. With the agents installed, `./run doctor --env production` checks the postgres agent |
 | **"Upgrade needed"** | Sandbox: `./run migrate` (or restart `./run`). Production: `./run live`, which backs up first. Demo: `./run demo create NAME` |
+| **"The Sandbox database was upgraded by a newer version of the app"**, or "which this code doesn't know: newer code upgraded it" from a command | Another branch or checkout with newer code migrated it, so `./run migrate` can't help: check out that code again, or restore an older Sandbox backup with `./run restore FILE` ([Restore a backup](#restore-a-backup)) |
 | **"Setup isn't finished"** | `./run setup --keys-only` for the Plaid keys, or `./run setup` for the database passwords |
 | **"Keychain approval needed"** | `./run doctor --env production` in Terminal, then **Always Allow** for each item |
 | **"127.0.0.1:8766 is already in use"** | The app already runs in another Terminal window: open the address, or stop that one with Ctrl-C |
 | **"PostgreSQL 18 not found"** | `brew install postgresql@18` |
 | **"Python 3.14 is required"** | `brew install python@3.14` |
-| **"The repository has uncommitted changes"** from `./run live` or `./run install-agents` | Production only runs committed code: commit or stash the changes, then try again |
+| **"The repository has uncommitted changes"** from `./run live` or `./run install-agents` | Production only runs committed code: commit or stash the changes, then try again. Until then `./run live` opens the installed copy as it is ("Not upgraded: …") |
 | **"Refusing to serve the PRODUCTION app from a git checkout"** or to migrate it | Use `./run live`, which runs and upgrades the installed copy |
 | `launchctl bootstrap … failed`, or the agents don't run | Allow the app's background items (listed as Python and sh, not "Budget Tracker") in System Settings → General → Login Items & Extensions → Allow in the Background, then `./run install-agents` again |
 | No notifications | `./run notify-test`, then allow Script Editor in System Settings → Notifications ([Alerts](alerts.md#turn-notifications-on-one-time)) |

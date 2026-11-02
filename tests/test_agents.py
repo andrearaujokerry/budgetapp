@@ -27,6 +27,7 @@ OLD_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
 #: What the fake ``git archive`` exports for COMMIT.
 TREE = {
     "requirements.txt": "fastapi==0.162.0\n",
+    "requirements-build.txt": "hatchling==1.33.0\n",
     "pyproject.toml": '[project]\nname = "budgetapp"\n',
     "budgetapp/__init__.py": '__version__ = "0.1.0"\n',
 }
@@ -607,8 +608,8 @@ class TestUpgrade:
         assert all("-e" not in argv and "--editable" not in argv for argv in pips)
         # Both pip steps read the exported commit, never the working tree.
         source = Path(pips[1][-1])
-        assert pips[0][-2:] == ["-r", str(source / "requirements.txt")]
-        assert pips[1][-3:-1] == ["--no-deps", "--force-reinstall"]
+        assert pips[0][-4:-2] == ["-r", str(source / "requirements.txt")]
+        assert pips[1][-4:-2] == ["--no-deps", "--force-reinstall"]
         assert source.name == "source" and layout.repo_dir not in (source, *source.parents)
         assert not source.exists()  # the temporary export is gone afterwards
         [(migrate, kwargs)] = [(a, k) for a, k in mac.calls if "migrate" in a]
@@ -619,6 +620,34 @@ class TestUpgrade:
         assert kwargs["cwd"] == str(layout.data_dir)
         venv = next(a for a, _ in mac.calls if "venv" in a)
         assert venv == ["/fake/python3.14", "-m", "venv", "--clear", str(layout.install_dir)]
+
+    def test_the_app_is_built_without_downloading_anything(self, prod, layout):
+        """Final review ops-5: pip built the app in an isolated environment that downloads
+        hatchling, so an upgrade (and so ./run live) never worked offline. The build tools are
+        pinned in requirements-build.txt, installed with the dependencies, and used in place."""
+        mac = Mac(layout)
+        upgrade(prod, layout, mac, FakeDb([]))
+        deps, app = [argv for argv, _ in mac.calls if "pip" in argv]
+        source = Path(app[-1])
+        assert deps[-2:] == ["-r", str(source / "requirements-build.txt")]
+        assert "--no-build-isolation" in app
+
+    def test_the_build_requirements_pin_what_pyproject_needs(self):
+        import tomllib
+
+        from packaging.requirements import Requirement
+
+        repo = Path(__file__).resolve().parents[1]
+        needed = tomllib.loads((repo / "pyproject.toml").read_text())["build-system"]["requires"]
+        lines = (repo / "requirements-build.txt").read_text().splitlines()
+        pinned = dict(
+            line.split("==", 1) for line in lines if line.strip() and not line.startswith("#")
+        )
+        assert all("==" not in v for v in pinned.values())
+        for spec in map(Requirement, needed):
+            assert spec.name in pinned, spec.name
+            assert spec.specifier.contains(pinned[spec.name]), spec
+        assert "requirements*.txt" in (repo / "pyproject.toml").read_text()  # in the sdist too
 
     def test_a_working_install_is_reused(self, prod, layout):
         events: list[str] = []
@@ -683,6 +712,33 @@ class TestUpgrade:
         assert events[-2:] == ["bootstrap sync", "bootstrap backup"]
         assert agents.read_stamp(layout).commit == OLD_COMMIT
         assert "migrate" not in events
+
+    def test_a_failed_backup_leaves_the_install_untouched(self, prod, layout):
+        """./run live then opens the installed copy as it is (final review ops-5)."""
+        install_plists(layout)
+        events: list[str] = []
+        mac = Mac(layout, loaded=("sync",), events=events)
+        fake_db = FakeDb(events)
+
+        def failing(settings):
+            raise agents.AgentError("The backup before the upgrade failed (disk full)")
+
+        fake_db.backup = failing
+        with pytest.raises(agents.UpgradeNotStarted, match="disk full"):
+            upgrade(prod, layout, mac, fake_db)
+        assert "venv" not in events and "pip -r" not in events and mac.loaded == {"sync"}
+
+    def test_refusals_before_anything_changes_are_upgrade_not_started(self, prod, layout):
+        assert issubclass(agents.DirtyTreeError, agents.UpgradeNotStarted)
+        with pytest.raises(agents.UpgradeNotStarted, match="doesn't know"):
+            upgrade(prod, layout, Mac(layout), FakeDb([], revision="9999_from_the_future"))
+        with pytest.raises(agents.UpgradeNotStarted, match="can't be read"):
+            upgrade(prod, layout, Mac(layout), FakeDb([], error=OSError("connection refused")))
+        mac = Mac(layout)
+        mac.fail_pip = True
+        with pytest.raises(agents.AgentError, match="pip could not install") as raised:
+            upgrade(prod, layout, mac, FakeDb([]))
+        assert not isinstance(raised.value, agents.UpgradeNotStarted)
 
     def test_restart_false_leaves_agents_stopped(self, prod, layout):
         install_plists(layout)
@@ -1113,11 +1169,51 @@ class TestLaunchProduction:
         )
         assert code == 0
 
-    def test_a_dirty_tree_stops_an_upgrade_with_a_message(self, prod, installed):
+    def test_a_dirty_tree_still_opens_the_installed_copy(self, prod, installed):
+        """Final review ops-5: uncommitted work in the checkout (common while building the app)
+        made ./run live exit 1 without opening the install, which still matches the database."""
         agents.write_stamp(installed, OLD_COMMIT, "3.14.2")
         mac = Mac(installed, status=" M budgetapp/cli.py\0")
-        code, _, said = self.launch(prod, installed, mac, upgrade=agents.upgrade_install)
+        started = []
+
+        def popen(argv, **kwargs):
+            started.append(argv)
+            return Child(code=0)
+
+        code, _, said = self.launch(
+            prod, installed, mac, upgrade=agents.upgrade_install, popen=popen
+        )
+        assert code == 0 and started[0][0] == str(installed.venv_python)
+        assert any(line.startswith("Not upgraded: The repository has uncommitted") for line in said)
+        assert "Opening the installed copy (commit fedcba987654) as it is." in said
+        assert agents.read_stamp(installed).commit == OLD_COMMIT
+
+    def test_a_dirty_tree_opens_the_web_agent_as_it_is(self, prod, installed):
+        agents.write_stamp(installed, OLD_COMMIT, "3.14.2")
+        install_plists(installed, ["web"])
+        mac = Mac(installed, loaded=("web",), status=" M budgetapp/cli.py\0")
+        code, opened, said = self.launch(prod, installed, mac, upgrade=agents.upgrade_install)
+        assert code == 0 and opened == ["http://127.0.0.1:8765"]
+        assert mac.launchd_verbs() == ["kickstart web"]
+
+    def test_a_dirty_tree_without_an_install_is_an_error(self, prod, layout):
+        mac = Mac(layout, status=" M budgetapp/cli.py\0")
+        code, _, said = self.launch(prod, layout, mac, upgrade=agents.upgrade_install)
         assert code == 1 and "uncommitted changes" in said[-1]
+
+    def test_a_failed_pip_install_never_falls_back(self, prod, installed):
+        """pip may have changed the install half-way: nothing is served from it."""
+        agents.write_stamp(installed, OLD_COMMIT, "3.14.2")
+        mac = Mac(installed)
+        mac.fail_pip = True
+        fake_db = FakeDb(mac.events)
+
+        def upgrade_install(settings, **kwargs):
+            kwargs.update(backup=fake_db.backup, lock=fake_db.lock)
+            return agents.upgrade_install(settings, **kwargs)
+
+        code, _, said = self.launch(prod, installed, mac, upgrade=upgrade_install)
+        assert code == 1 and "pip could not install" in said[-1]
 
     def test_without_a_web_agent_it_serves_from_the_install(self, prod, installed):
         started = []

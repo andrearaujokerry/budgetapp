@@ -129,6 +129,20 @@ class _Disposable:
         pass
 
 
+def test_a_database_from_newer_code_is_an_error_not_a_traceback(capsys, monkeypatch):
+    """Final review ops-6: Alembic's CommandError escaped cli.main as a traceback."""
+    from budgetapp import db
+
+    def ahead(settings, revision="head"):
+        raise db.SchemaAhead("0099_from_newer", db.code_head())
+
+    monkeypatch.setattr(migrate_command, "migrate_env", ahead)
+    assert cli.main(["migrate"]) == 1
+    err = capsys.readouterr().err
+    assert "error: The database is at schema 0099_from_newer" in err
+    assert "Traceback" not in err and "./run migrate" not in err
+
+
 def test_migrate_refuses_production_from_a_checkout(capsys, monkeypatch):
     monkeypatch.setattr(
         migrate_command, "migrate_env", lambda *a: pytest.fail("migrated production")

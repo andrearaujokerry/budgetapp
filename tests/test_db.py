@@ -13,14 +13,17 @@ from budgetapp.db import (
     LOCK_NS_GLOBAL,
     LOCK_NS_SYNC,
     DatabaseUnavailable,
+    SchemaAhead,
     SchemaMismatch,
     admin_connect,
     code_head,
+    current_revision,
     database_url,
     is_ready,
     ledger_lock,
     link_lock,
     make_engine,
+    migrate_env,
     run_migrations,
     schema_guard,
     sync_lock,
@@ -244,6 +247,28 @@ class TestSchemaGuard:
             assert old.value.db_revision == "0001_initial"
             assert old.value.code_revision == code_head()
             assert "Upgrade needed" in str(old.value)
+        finally:
+            engine.dispose()
+            drop_scratch_database(settings, name)
+
+    def test_a_database_from_newer_code_is_explained_and_never_migrated(self, settings):
+        """Final review ops-6: a Sandbox database migrated by newer code (another branch) made
+        ./run and ./run migrate crash with Alembic's "Can't locate revision" traceback, and the
+        web page said to run ./run migrate."""
+        name = f"{settings.db_name}_ahead"
+        create_scratch_database(settings, name)
+        engine = make_engine(settings, dbname=name)
+        try:
+            run_migrations(engine)
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE alembic_version SET version_num = '0099_from_newer'"))
+            with pytest.raises(SchemaAhead) as guard:
+                schema_guard(engine)
+            assert isinstance(guard.value, SchemaMismatch)
+            assert guard.value.db_revision == "0099_from_newer"
+            with pytest.raises(SchemaAhead, match="doesn't know: newer code upgraded it"):
+                migrate_env(settings.replace(db_name=name))
+            assert current_revision(engine) == "0099_from_newer"
         finally:
             engine.dispose()
             drop_scratch_database(settings, name)

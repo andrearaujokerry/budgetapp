@@ -556,7 +556,7 @@ def test_backup_numbers() -> None:
     text = text_of(REPO / "docs" / "maintenance.md")
     assert f"newest {backup.DEFAULT_KEEP} are kept" in text
     assert f"newest {backup.PRE_RESTORE_KEEP} safety copies" in text
-    assert f"under {int(backup.DUE_AFTER.total_seconds() // 3600)} hours" in text
+    assert "skipped when a backup was already made since the last 02:30" in text
     assert f"more than {int(backup.STALE_AFTER.total_seconds() // 3600)} hours old" in text
     assert backup.PRE_RESTORE in text
     stamp = re.search(r"budgetapp-(\d{8}T\d{6}Z)\.dump", text)

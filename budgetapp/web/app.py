@@ -38,7 +38,7 @@ from starlette.responses import PlainTextResponse, Response
 
 from budgetapp import __version__, secrets
 from budgetapp.config import Settings, load_settings
-from budgetapp.db import DatabaseUnavailable, SchemaMismatch
+from budgetapp.db import DatabaseUnavailable, SchemaAhead, SchemaMismatch
 from budgetapp.plaid_gateway import PlaidGatewayError, PlaidTransportError, RealPlaidGateway
 from budgetapp.secrets import KeychainApprovalNeeded, MissingSecretError, SecretStore
 from budgetapp.services.notify import Notifier, get_notifier
@@ -169,6 +169,13 @@ def _schema_mismatch(request: Request, exc: SchemaMismatch) -> Response:
     elif demo_name:
         message = "This demo database was made by another version of the app. Recreate it:"
         command = f"./run demo create {demo_name}"
+    elif isinstance(exc, SchemaAhead):  # migrating can't help: never offer ./run migrate
+        message = (
+            "The Sandbox database was upgraded by a newer version of the app (another branch or "
+            "checkout). Check out that code again, or restore an older Sandbox backup with "
+            "./run restore FILE, then reload."
+        )
+        command = None
     else:
         message = "The Sandbox database is behind this code. Run this in Terminal, then reload:"
         command = "./run migrate"

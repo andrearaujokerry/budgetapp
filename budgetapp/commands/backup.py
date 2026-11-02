@@ -2,9 +2,10 @@
 
 ``./run backup`` dumps this environment's database (``--env production`` for real data) into
 ``~/Library/Application Support/budgetapp/backups/<env>/``, verifies the dump and keeps the newest
-30. The nightly launchd agent runs ``backup --env production --if-due --unattended``: it waits up
-to two minutes for the database, never shows a Keychain dialog, and notifies once a day when a
-backup fails or the newest one is over 26 hours old.
+30. The nightly launchd agent runs ``backup --env production --if-due --unattended`` at 02:30 and at
+login, skipping when a backup was already made since the last 02:30: it waits up to two minutes for
+the database, never shows a Keychain dialog, and notifies once a day when a backup fails or the
+newest one is over 26 hours old. It also trims oversized logs (``logsetup.trim_logs``).
 
 ``./run restore FILE`` replaces this environment's database with a backup of that same database.
 It shows what it will do and asks you to type the environment's name; production needs an
@@ -29,6 +30,7 @@ from budgetapp import clock, secrets
 from budgetapp.commands import add_command
 from budgetapp.config import ConfigError, Settings
 from budgetapp.db import wait_for_db
+from budgetapp.logsetup import trim_logs
 from budgetapp.services import agents
 from budgetapp.services import backup as backups
 from budgetapp.services.notify import get_notifier
@@ -48,10 +50,15 @@ def register(subparsers: Any) -> None:
         description=__doc__,
     )
     backup.add_argument(
-        "--if-due", action="store_true", help="skip when the newest verified dump is recent"
+        "--if-due",
+        action="store_true",
+        help="skip when a verified backup was made since the last nightly run time (02:30)",
     )
     backup.add_argument(
-        "--min-age-hours", type=float, default=20.0, help="with --if-due: hours (default 20)"
+        "--min-age-hours",
+        type=float,
+        default=None,
+        help="with --if-due: skip only when the newest backup is younger than this many hours",
     )
     backup.add_argument("--keep", type=int, default=30, help="dumps to keep (default 30)")
     backup.add_argument(
@@ -132,6 +139,12 @@ def run_backup(args: argparse.Namespace, settings: Settings) -> int:
         return 2
     if unattended:
         secrets.enable_unattended_mode()
+        try:  # the sync agent's check of the backups reads it (backups.alert_if_backups_stopped)
+            backups.note_agent_run(settings)
+        except OSError as exc:
+            _say(unattended, f"warning: could not note this run ({exc}).", error=True)
+        for path in trim_logs(settings.logs_dir):  # before the wait: postgres may crash-loop
+            _say(unattended, f"Trimmed {path.name} to its newest lines.")
     try:
         ready = wait_for_db(settings, timeout=agents.DB_WAIT if unattended else 15)
     except ConfigError as exc:  # PostgresNotFound: the PostgreSQL 18 programs are missing
@@ -153,13 +166,9 @@ def run_backup(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _backup_now(args: argparse.Namespace, settings: Settings, unattended: bool) -> int:
+    min_age = None if args.min_age_hours is None else dt.timedelta(hours=args.min_age_hours)
     try:
-        result = backups.run_backup(
-            settings,
-            keep=args.keep,
-            if_due=args.if_due,
-            min_age=dt.timedelta(hours=args.min_age_hours),
-        )
+        result = backups.run_backup(settings, keep=args.keep, if_due=args.if_due, min_age=min_age)
     except secrets.KeychainApprovalNeeded as exc:
         _say(unattended, f"error: {exc}", error=True)
         if unattended:
@@ -169,11 +178,12 @@ def _backup_now(args: argparse.Namespace, settings: Settings, unattended: bool) 
         return _failed(settings, unattended, exc)  # ConfigError: PostgresNotFound
     if not result.created:
         assert result.newest is not None
-        _say(
-            unattended,
-            f"Skipped: the newest backup ({result.newest.name}) is "
-            f"{_age(result.newest.age())} old, under {args.min_age_hours:g} h.",
-        )
+        newest = f"the newest backup ({result.newest.name}) is {_age(result.newest.age())} old"
+        if min_age is None:
+            slot = backups.due_after().astimezone()
+            _say(unattended, f"Skipped: {newest}, made since the backup due {slot:%a %H:%M}.")
+        else:
+            _say(unattended, f"Skipped: {newest}, under {args.min_age_hours:g} h.")
         return 0
     assert result.path is not None
     _say(

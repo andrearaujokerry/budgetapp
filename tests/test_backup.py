@@ -11,10 +11,11 @@ from pathlib import Path
 
 import pytest
 
+from budgetapp import clock
 from budgetapp import secrets as app_secrets
 from budgetapp.commands import backup as backup_command
 from budgetapp.config import load_settings
-from budgetapp.services import backup
+from budgetapp.services import agents, backup
 from budgetapp.services.notify import RecordingNotifier
 
 UTC = dt.UTC
@@ -29,14 +30,20 @@ def bk(settings, test_database, tmp_path):
     )
 
 
+def local(*args: int) -> dt.datetime:
+    """An aware datetime at this Mac's local wall-clock time (the agents' schedule is local)."""
+    return dt.datetime(*args).astimezone()
+
+
 def stamp(when: dt.datetime) -> str:
     return when.astimezone(UTC).strftime(backup.TIMESTAMP_FORMAT)
 
 
-def fake_dump(settings, when: dt.datetime, *, pre=False, mode=0o600, db=None) -> Path:
+def fake_dump(settings, when: dt.datetime, *, pre=False, kind="", mode=0o600, db=None) -> Path:
     """A file with a final dump name (for listing/rotation tests; not a real dump)."""
     directory = backup.ensure_backup_dir(settings)
-    suffix = "-pre-restore" if pre else ""
+    kind = backup.PRE_RESTORE if pre else kind
+    suffix = f"-{kind}" if kind else ""
     path = directory / f"{db or settings.db_name}-{stamp(when)}{suffix}.dump"
     path.write_bytes(b"PGDMP")
     os.chmod(path, mode)
@@ -85,7 +92,7 @@ class TestRealBackup:
         result = backup.run_backup(bk)
         assert result.created and result.path is not None
         parsed = backup.parse_backup_name(result.path)
-        assert parsed is not None and parsed[0] == bk.db_name and parsed[3] is False
+        assert parsed is not None and parsed[0] == bk.db_name and parsed[3] == ""
         assert result.path.stat().st_mode & 0o777 == 0o600
         assert result.path.parent.stat().st_mode & 0o777 == 0o700
         assert result.info.database == bk.db_name
@@ -146,14 +153,40 @@ class TestRealBackup:
             backup.run_backup(missing)
         assert list(bk.backups_dir.iterdir()) == []
 
-    def test_if_due_skips_a_recent_backup(self, bk):
-        first = backup.run_backup(bk, now=NOW)
-        skipped = backup.run_backup(bk, if_due=True, now=NOW + dt.timedelta(hours=19))
+    def test_pre_upgrade_copies_never_rotate_out_nightly_backups(self, bk):
+        """Final review ops-1: each upgrade (and each retry of a failing one) took an ordinary
+        backup, so the 30 kept were "the 30 newest dumps of any kind" and every upgrade attempt
+        deleted one nightly restore point."""
+        nightly = [fake_dump(bk, NOW - dt.timedelta(days=d)) for d in range(30)]
+        made = []
+        for minute in (0, 5, 10):  # three ./run live attempts, two of them failing later on
+            with clock.frozen(now=NOW + dt.timedelta(hours=8, minutes=minute)):
+                made.append(agents._default_backup(bk))
+        assert [b.path for b in backup.list_backups(bk, kind="")] == nightly
+        copies = backup.list_backups(bk, kind=backup.PRE_UPGRADE)
+        assert [b.path for b in copies] == made[::-1]
+        assert all(p.name.endswith("-pre-upgrade.dump") for p in made)
+        assert backup.newest_backup(bk).path == nightly[0]
+
+    def test_pre_upgrade_copies_keep_their_newest_5(self, bk):
+        old = [fake_dump(bk, NOW - dt.timedelta(days=d), kind=backup.PRE_UPGRADE) for d in range(6)]
+        nightly = fake_dump(bk, NOW - dt.timedelta(days=40))
+        result = backup.run_backup(bk, kind=backup.PRE_UPGRADE, now=NOW + dt.timedelta(hours=1))
+        kept = [b.path for b in backup.list_backups(bk, kind=backup.PRE_UPGRADE)]
+        assert kept == [result.path, *old[:4]] and result.kept == backup.PRE_UPGRADE_KEEP
+        assert set(result.removed) == set(old[4:]) and nightly.exists()
+
+    def test_if_due_follows_the_nightly_schedule(self, bk):
+        first = backup.run_backup(bk, now=local(2026, 11, 10, 2, 30))
+        skipped = backup.run_backup(bk, if_due=True, now=local(2026, 11, 10, 21, 0))  # a login
         assert skipped.status == "skipped" and skipped.newest.path == first.path
-        due = backup.run_backup(bk, if_due=True, now=NOW + dt.timedelta(hours=20, minutes=1))
+        due = backup.run_backup(bk, if_due=True, now=local(2026, 11, 11, 2, 30))
         assert due.created and due.path != first.path
-        assert backup.is_due(bk, now=NOW + dt.timedelta(hours=40, minutes=2))
-        assert not backup.is_due(bk, now=NOW + dt.timedelta(hours=21))
+        assert not backup.is_due(bk, now=local(2026, 11, 12, 2, 29))
+        assert backup.is_due(bk, now=local(2026, 11, 12, 2, 30))
+        # --min-age-hours still overrides the schedule
+        assert backup.is_due(bk, min_age=dt.timedelta(hours=1), now=local(2026, 11, 11, 4, 0))
+        assert not backup.is_due(bk, min_age=dt.timedelta(hours=3), now=local(2026, 11, 11, 4, 0))
 
 
 # --------------------------------------------------------------------------- unit
@@ -163,14 +196,33 @@ class TestListing:
     def test_only_final_dumps_of_this_database_count(self, bk):
         good = fake_dump(bk, NOW)
         pre = fake_dump(bk, NOW + dt.timedelta(hours=1), pre=True)
+        upgrade = fake_dump(bk, NOW + dt.timedelta(hours=3), kind=backup.PRE_UPGRADE)
         fake_dump(bk, NOW + dt.timedelta(hours=2), db="budgetapp_sandbox")
         (bk.backups_dir / f".{bk.db_name}-{stamp(NOW)}.partial").write_bytes(b"x")
         (bk.backups_dir / "notes.txt").write_text("hi")
         (bk.backups_dir / f"{bk.db_name}-garbage.dump").write_bytes(b"x")
         found = backup.list_backups(bk)
-        assert [b.path for b in found] == [pre, good]
-        assert found[0].pre_restore and not found[1].pre_restore
-        assert found[1].created_at == NOW
+        assert [b.path for b in found] == [upgrade, pre, good]
+        assert [b.kind for b in found] == [backup.PRE_UPGRADE, backup.PRE_RESTORE, ""]
+        assert found[1].pre_restore and not found[0].pre_restore and not found[2].pre_restore
+        assert found[2].created_at == NOW
+        assert backup.parse_backup_name(upgrade)[3] == backup.PRE_UPGRADE
+
+    def test_a_daytime_backup_does_not_skip_the_next_nightly_run(self, bk):
+        """Final review ops-2: a backup at 09:00 (a login after the Mac was off, or a manual one)
+        was under 20 h old at 02:30, so that night was skipped and the next backup came ~42 h
+        after the last, with doctor failing "26 h old" in between."""
+        fake_dump(bk, local(2026, 11, 10, 9, 0))
+        assert not backup.is_due(bk, now=local(2026, 11, 10, 14, 0))  # a later login that day
+        assert backup.is_due(bk, now=local(2026, 11, 11, 2, 30))
+        assert backup.due_after(local(2026, 11, 11, 2, 30)) == local(2026, 11, 11, 2, 30)
+        assert backup.due_after(local(2026, 11, 11, 1, 0)) == local(2026, 11, 10, 2, 30)
+
+    def test_a_backup_since_the_last_nightly_time_makes_a_login_run_skip(self, bk):
+        fake_dump(bk, local(2026, 11, 10, 8, 0))  # the Mac was off at 02:30: caught up at login
+        assert not backup.is_due(bk, now=local(2026, 11, 10, 10, 0))
+        fake_dump(bk, local(2026, 11, 11, 3, 0), kind=backup.PRE_UPGRADE)  # copies don't count
+        assert backup.is_due(bk, now=local(2026, 11, 11, 9, 0))
 
     def test_an_absent_folder_has_no_backups(self, bk):
         assert backup.list_backups(bk) == [] and backup.newest_backup(bk) is None
@@ -182,8 +234,8 @@ class TestListing:
         removed = backup.rotate(bk, keep=2)
         assert removed == [backups[1], backups[0]]  # 2 backups stay; the copies don't count
         assert all(path.exists() for path in [*backups[2:], *copies])
-        assert [b.path for b in backup.list_backups(bk, pre_restore=False)] == backups[:1:-1]
-        assert [b.path for b in backup.list_backups(bk, pre_restore=True)] == copies[::-1]
+        assert [b.path for b in backup.list_backups(bk, kind="")] == backups[:1:-1]
+        assert [b.path for b in backup.list_backups(bk, kind=backup.PRE_RESTORE)] == copies[::-1]
         with pytest.raises(ValueError):
             backup.rotate(bk, keep=0)
 
@@ -200,6 +252,7 @@ class TestListing:
         them (and holds the data the restore replaced)."""
         nightly = fake_dump(bk, NOW - dt.timedelta(hours=30))
         fake_dump(bk, NOW - dt.timedelta(hours=1), pre=True)
+        fake_dump(bk, NOW - dt.timedelta(hours=2), kind=backup.PRE_UPGRADE)
         assert backup.newest_backup(bk).path == nightly
         assert backup.is_due(bk, now=NOW)
         assert backup.backup_health(bk, now=NOW) == (True, backup.newest_backup(bk))
@@ -218,10 +271,11 @@ class TestListing:
 
     def test_fix_permissions(self, bk):
         path = fake_dump(bk, NOW, mode=0o644)
+        copy = fake_dump(bk, NOW, kind=backup.PRE_UPGRADE, mode=0o644)
         os.chmod(bk.backups_dir, 0o755)
         changed = backup.fix_permissions(bk)
-        assert set(changed) == {bk.backups_dir, path}
-        assert path.stat().st_mode & 0o777 == 0o600
+        assert set(changed) == {bk.backups_dir, path, copy}
+        assert path.stat().st_mode & 0o777 == 0o600 and copy.stat().st_mode & 0o777 == 0o600
 
     def test_the_dump_header(self):
         info = backup.parse_dump_header(listing("budgetapp"))
@@ -301,6 +355,31 @@ class TestAlerts:
         assert backup.notify_backup_problem(bk, notifier, "next day", today=day.replace(day=30))
         assert [n.message for n in notifier.sent] == ["failed", "next day"]
 
+    def test_the_sync_agent_announces_stale_backups_once_a_day(self, bk):
+        """Final review ops-2: only the backup agent ever checked freshness, so backups that
+        stopped because that agent no longer runs were never announced."""
+        notifier = RecordingNotifier()
+        fake_dump(bk, NOW - dt.timedelta(hours=30))
+        assert backup.alert_if_backups_stopped(bk, notifier, now=NOW) is True
+        assert backup.alert_if_backups_stopped(bk, notifier, now=NOW) is False  # once a day
+        assert len(notifier.sent) == 1 and "30 hours old" in notifier.sent[0].message
+
+    def test_the_sync_agent_leaves_a_running_backup_agent_to_report(self, bk):
+        """The backup agent reports its own failures; right after a wake both agents start
+        together, and the backup it is making must not be announced as missing."""
+        notifier = RecordingNotifier()
+        fake_dump(bk, NOW - dt.timedelta(hours=50))
+        backup.note_agent_run(bk, now=NOW - dt.timedelta(minutes=1))
+        assert backup.alert_if_backups_stopped(bk, notifier, now=NOW) is False
+        backup.note_agent_run(bk, now=NOW - dt.timedelta(hours=27))
+        assert backup.alert_if_backups_stopped(bk, notifier, now=NOW) is True
+        fresh = load_settings(
+            "test", backups_dir=bk.backups_dir.parent / "fresh", state_dir=bk.state_dir / "x"
+        )
+        fake_dump(fresh, NOW - dt.timedelta(hours=2))
+        assert backup.alert_if_backups_stopped(fresh, notifier, now=NOW) is False
+        assert len(notifier.sent) == 1
+
     def test_stale_means_none_or_over_26_hours(self, bk):
         assert backup.backup_health(bk, now=NOW) == (True, None)
         path = fake_dump(bk, NOW - dt.timedelta(hours=25))
@@ -315,7 +394,7 @@ class TestAlerts:
 
 
 def args(**overrides):
-    values = {"if_due": False, "min_age_hours": 20.0, "keep": 30, "unattended": False}
+    values = {"if_due": False, "min_age_hours": None, "keep": 30, "unattended": False}
     values.update(overrides)
     return argparse.Namespace(**values)
 
@@ -394,3 +473,71 @@ class TestBackupCommand:
 
     def test_keep_must_be_positive(self, bk):
         assert backup_command.run_backup(args(keep=0), bk) == 2
+
+    def test_an_unattended_run_notes_that_the_agent_ran(self, bk, notifier, monkeypatch):
+        monkeypatch.setattr(backup_command, "wait_for_db", lambda settings, timeout: False)
+        assert backup.agent_last_run(bk) is None
+        backup_command.run_backup(args(), bk)
+        assert backup.agent_last_run(bk) is None  # by hand: not the agent
+        with clock.frozen(now=NOW):
+            backup_command.run_backup(args(unattended=True), bk)
+        assert backup.agent_last_run(bk) == NOW
+
+    def test_an_unattended_run_trims_oversize_logs(self, bk, notifier, monkeypatch):
+        """Final review ops-7: nothing capped the logs launchd and PostgreSQL write; a crash loop
+        appends a traceback every 30 s. The backup agent trims them, even with the database down
+        (a postgres crash loop is exactly that)."""
+        trimmed = []
+        monkeypatch.setattr(
+            backup_command, "trim_logs", lambda folder: trimmed.append(folder) or []
+        )
+        monkeypatch.setattr(backup_command, "wait_for_db", lambda settings, timeout: False)
+        backup_command.run_backup(args(), bk)
+        assert trimmed == []  # by hand: not the agent's job
+        backup_command.run_backup(args(unattended=True), bk)
+        assert trimmed == [bk.logs_dir]
+
+    def test_the_skip_message_names_the_schedule(self, bk, capsys):
+        backup.run_backup(bk)
+        assert backup_command.run_backup(args(if_due=True, min_age_hours=None), bk) == 0
+        assert "since the backup due" in capsys.readouterr().out
+
+
+class TestSyncAgentChecksBackups:
+    """The sync agent (four times a day) checks that backups still happen (final review ops-2)."""
+
+    @pytest.fixture
+    def wired(self, monkeypatch):
+        from budgetapp.commands import sync as sync_command
+
+        calls = []
+
+        class FakeRuntime:
+            def __init__(self, settings):
+                self.notifier = RecordingNotifier()
+
+            def close(self):
+                calls.append("closed")
+
+        monkeypatch.setattr(sync_command, "Runtime", FakeRuntime)
+        monkeypatch.setattr(sync_command, "setup_logging", lambda *a, **k: None)
+        monkeypatch.setattr(sync_command, "sync_command", lambda a, rt: calls.append("sync") or 0)
+        monkeypatch.setattr(
+            sync_command.backups,
+            "alert_if_backups_stopped",
+            lambda settings, notifier: calls.append(("check", settings.env)),
+        )
+        return sync_command, calls
+
+    def test_after_an_unattended_production_sync(self, wired, tmp_path):
+        sync_command, calls = wired
+        prod = load_settings("production", data_dir=tmp_path / "data", logs_dir=tmp_path / "l")
+        assert sync_command.run(argparse.Namespace(unattended=True), prod) == 0
+        assert calls == ["sync", ("check", "production"), "closed"]
+
+    def test_never_by_hand_or_outside_production(self, wired, bk, tmp_path):
+        sync_command, calls = wired
+        prod = load_settings("production", data_dir=tmp_path / "data", logs_dir=tmp_path / "l")
+        sync_command.run(argparse.Namespace(unattended=False), prod)
+        sync_command.run(argparse.Namespace(unattended=True), bk)
+        assert calls == ["sync", "closed", "sync", "closed"]

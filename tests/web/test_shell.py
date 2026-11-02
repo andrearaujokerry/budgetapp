@@ -113,6 +113,7 @@ def no_conn(request: Request) -> Response:
 
 FAILURES = {
     "schema": lambda: SchemaMismatch("0002_seed_defaults", "0003_f1_verification_fixes"),
+    "schema-ahead": lambda: app_db.SchemaAhead("0099_from_newer", "0003_f1_verification_fixes"),
     "keychain": lambda: KeychainApprovalNeeded("db.password.budgetapp_live", -25308),
     "plaid-keys": lambda: MissingSecretError("plaid.client_id"),
     "db-password": lambda: MissingSecretError("db.password.budgetapp_dev"),
@@ -643,6 +644,15 @@ def test_a_demo_with_an_old_schema_is_recreated(probe_app, make_client):
     probe_app.state.demo_name = "shell"
     page = make_client(probe_app).get("/_probe/fail/schema")
     assert page.context["command"] == "./run demo create shell" and "env-bar--demo" in page.text
+
+
+def test_a_database_from_newer_code_never_offers_migrate(probe_client):
+    """Final review ops-6: the page said the Sandbox database was behind and offered
+    ./run migrate, which then crashed."""
+    page = probe_client.get("/_probe/fail/schema-ahead")
+    assert page.status_code == 503 and page.context["command"] is None
+    assert "newer version of the app" in page.context["message"]
+    assert "./run migrate" not in page.text
 
 
 def test_bad_parameters_get_a_400_page_not_json(probe_client):

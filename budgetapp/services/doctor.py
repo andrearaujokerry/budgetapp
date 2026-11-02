@@ -22,6 +22,7 @@ import os
 import plistlib
 import re
 import subprocess
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -350,6 +351,30 @@ def check_paths(ctx: DoctorContext) -> Iterable[Check]:
                 fix=f"Move the folder out of ~/{folder_name} (e.g. ~/Developer), or turn off "
                 "Desktop & Documents in System Settings → Apple Account → iCloud → iCloud Drive.",
             )
+
+
+#: A log this big means something keeps failing (the backup agent trims them nightly).
+LOG_WARN_BYTES = 50 * 2**20
+
+
+def check_logs(ctx: DoctorContext) -> Iterable[Check]:
+    section = "This Mac"
+    folder = ctx.settings.logs_dir
+    try:
+        sizes = {path: path.stat().st_size for path in folder.glob("*.log*") if path.is_file()}
+    except OSError:
+        sizes = {}
+    huge = [p for p, size in sizes.items() if size > LOG_WARN_BYTES]
+    for path in sorted(huge, key=sizes.__getitem__, reverse=True):
+        yield Check(
+            section,
+            WARN,
+            f"{path.name} is {sizes[path] / 2**20:.0f} MB: something keeps writing to it",
+            detail=str(path),
+            fix=f"tail -n 50 {_quote(path)} shows what; the backup agent trims logs nightly",
+        )
+    if not huge:
+        yield Check(section, PASS, f"Logs are under {LOG_WARN_BYTES // 2**20} MB each")
 
 
 def check_permissions(ctx: DoctorContext) -> Iterable[Check]:
@@ -705,13 +730,22 @@ def check_migrations(ctx: DoctorContext) -> Iterable[Check]:
     if not reachable:
         yield Check(section, INFO, "Schema check skipped: no database connection")
         return
-    from budgetapp.db import code_head, current_revision
+    from budgetapp.db import code_head, current_revision, known_revisions
 
     with ctx.session() as session:
         current = current_revision(session.connection())
     head = code_head()
     if current == head:
         yield Check(section, PASS, f"The {ctx.settings.env} schema is current ({head})")
+        return
+    if current is not None and current not in known_revisions():
+        yield Check(
+            section,
+            FAIL,
+            f"The {ctx.settings.env} database is at schema {current}, which this code doesn't "
+            "know (newer code upgraded it)",
+            fix="check out that code again, or restore an older backup: ./run restore FILE",
+        )
         return
     if ctx.settings.is_production:
         fix = "./run live (or ./run install-agents): it backs up, then upgrades"
@@ -1101,7 +1135,7 @@ def check_backups(ctx: DoctorContext) -> Iterable[Check]:
                 detail=str(directory),
                 fix=f"chmod 700 {_quote(directory)}",
             )
-    found = backups.list_backups(s)  # every dump, pre-restore copies included
+    found = backups.list_backups(s)  # every dump, pre-restore and pre-upgrade copies included
     loose = [b for b in found if (_mode(b.path) or 0) & 0o077]
     if loose:
         yield Check(
@@ -1110,9 +1144,8 @@ def check_backups(ctx: DoctorContext) -> Iterable[Check]:
             f"{len(loose)} dump(s) are readable by others",
             fix=f"chmod 600 {_quote(directory)}/*.dump",
         )
-    # Freshness is about the nightly backups: a restore's copy of replaced data doesn't count.
-    regular = [b for b in found if not b.pre_restore]
-    copies = len(found) - len(regular)
+    # Freshness is about the nightly backups: the copies restores and upgrades take don't count.
+    regular = [b for b in found if not b.kind]
     newest = regular[0] if regular else None
     if newest is None:
         yield Check(
@@ -1133,7 +1166,9 @@ def check_backups(ctx: DoctorContext) -> Iterable[Check]:
             fix=f"./run backup --env {s.env}; then read {s.logs_dir / 'backup.log'}",
         )
     else:
-        extra = f", plus {copies} pre-restore copy(ies)" if copies else ""
+        copies = Counter(b.kind for b in found if b.kind)
+        counts = " and ".join(f"{copies[kind]} {kind}" for kind in sorted(copies))
+        extra = f", plus {counts} copy(ies)" if counts else ""
         yield Check(
             section,
             PASS,
@@ -1378,6 +1413,7 @@ CHECKS: tuple[Callable[[DoctorContext], Iterable[Check]], ...] = (
     check_other_users,
     check_paths,
     check_permissions,
+    check_logs,
     check_postgres_running,
     check_database,
     check_postgres_settings,

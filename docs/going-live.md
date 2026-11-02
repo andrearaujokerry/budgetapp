@@ -77,7 +77,7 @@ agents") that keep it running:
 | --- | --- |
 | `postgres` | at login, kept running: the database server |
 | `sync` | at 00:15, 06:15, 12:15 and 18:15, and at login; skipped when the last successful sync is under 5 hours old |
-| `backup` | at 02:30 and at login; skipped when the newest verified backup is under 20 hours old |
+| `backup` | at 02:30 and at login; skipped when a verified backup was already made since the last 02:30 |
 | `web` (only with `--with-web`) | at login, kept running: the production app at http://127.0.0.1:8765 |
 
 macOS runs a scheduled job it missed while the Mac was asleep as soon as it wakes. Plaid itself
@@ -221,9 +221,16 @@ matching Plaid charge. If it can't tell which card they belong to, the Connectio
 
 Production never runs code straight from this folder. When the code changes (new commits), the
 next `./run live` notices and upgrades the installed copy first: it backs up the production
-database, installs the new commit, upgrades the database while no sync can run, and restarts the
-agents. `./run install-agents` does the same. If the folder has changes that aren't committed, the
-upgrade stops and asks you to commit or stash them.
+database (a `…-pre-upgrade.dump` copy, kept apart from the nightly backups), installs the new
+commit, upgrades the database while no sync can run, and restarts the agents.
+`./run install-agents` does the same. Once the packages are installed an upgrade downloads
+nothing, so it also works offline (only a commit that changes `requirements.txt` needs the
+internet once).
+
+If the upgrade can't start, `./run live` says why ("Not upgraded: …") and opens the installed
+copy as it is: for example when the folder has changes that aren't committed (commit or stash
+them, then run `./run live` again to upgrade), or when the backup before the upgrade fails.
+`./run install-agents` stops instead.
 
 Until then, the old installed copy keeps running. If the live app ever shows **"Upgrade
 needed"**, run `./run live` in Terminal and reload the page.
