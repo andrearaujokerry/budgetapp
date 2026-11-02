@@ -6,8 +6,9 @@ Sandbox unless you add `--env production`.
 ## Backups
 
 The backup agent backs up your real data every night at 02:30 and at each login, and skips a
-run when the newest backup is under 20 hours old (a Mac asleep at 02:30 catches up when it
-wakes). To back up by hand:
+run when a backup was already made since the last 02:30 (a Mac asleep at 02:30 catches up when it
+wakes). A backup made during the day, by hand or at login, never makes the next night's run
+skip, so backups stay about a day apart. To back up by hand:
 
 ```sh
 ./run backup --env production   # your real data
@@ -24,7 +25,8 @@ wakes). To back up by hand:
   saves a copy named `…-pre-upgrade.dump`. These copies are kept apart from the 30 backups (the
   newest 5 stay), so upgrading, or retrying an upgrade, never pushes a nightly backup out.
 - If a backup fails, or the newest one is more than 26 hours old, you get a notification (once a
-  day) and `./run doctor --env production` reports it.
+  day) and `./run doctor --env production` reports it. The sync agent checks too, so you also hear
+  about it when the backup agent itself stops running.
 - Backups hold the database only. Your keys and the access token stay in Keychain; keep a copy of
   the token in your password manager ([Going live](going-live.md#keep-a-copy-of-the-access-token-recommended)).
 
@@ -87,7 +89,7 @@ they run the installed production copy with your real data, never the Sandbox:
 | --- | --- | --- | --- |
 | `local.budgetapp.postgres` | the database server | at login, kept running | `postgres.log` |
 | `local.budgetapp.sync` | `sync --env production --if-due --unattended` | 00:15, 06:15, 12:15, 18:15 and at login; skipped when the last successful sync is under 5 hours old | `sync.log` |
-| `local.budgetapp.backup` | `backup --env production --if-due --unattended` | 02:30 and at login; skipped when the newest backup is under 20 hours old | `backup.log` |
+| `local.budgetapp.backup` | `backup --env production --if-due --unattended` | 02:30 and at login; skipped when a backup was already made since the last 02:30 | `backup.log` |
 | `local.budgetapp.web` (with `--with-web`) | the production app at http://127.0.0.1:8765 | at login, kept running | `web.log` |
 
 - Their files are `~/Library/LaunchAgents/local.budgetapp.*.plist`; logs are in

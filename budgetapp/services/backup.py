@@ -6,9 +6,12 @@ the test environment uses its peer-mapped socket role), ``pg_dump --format=custo
 temporary file (``umask 077``), which is verified with ``pg_restore --list`` and a full
 ``pg_restore --file=/dev/null`` read (``--list`` alone accepts a truncated dump), then renamed into
 place. Only verified dumps ever carry the final name ``<db>-<UTC timestamp>.dump``; the newest 30
-are kept. The folder is 0700 and every dump 0600. ``--if-due`` skips when the newest verified dump
-is under 20 hours old. A failed backup, or a newest dump older than 26 hours, notifies once a day
-(a marker file: the database may be the thing that is down).
+are kept. The folder is 0700 and every dump 0600. ``--if-due`` follows the agent's schedule: it
+skips when a verified backup was made since the last nightly time (02:30 local), so a backup made
+during the day never makes the next night's run skip. A failed backup, or a newest dump older than
+26 hours, notifies once a day (a marker file: the database may be the thing that is down). The
+backup agent reports its own failures; the sync agent, four times a day, announces stale backups
+when the backup agent itself has stopped running (:func:`alert_if_backups_stopped`).
 
 The copies a restore takes of the data it replaces (``<db>-<timestamp>-pre-restore.dump``) are a
 separate set: they never count toward the 30 nightly/manual backups, nor toward "due" or "stale",
@@ -71,7 +74,6 @@ DEFAULT_KEEP = 30
 PRE_RESTORE_KEEP = 5
 #: Copies taken before production upgrades (another separate set).
 PRE_UPGRADE_KEEP = 5
-DUE_AFTER = dt.timedelta(hours=20)
 STALE_AFTER = dt.timedelta(hours=26)
 #: A temporary file older than this is left over from a killed run and is removed.
 PARTIAL_MAX_AGE = dt.timedelta(hours=6)
@@ -91,6 +93,8 @@ DUMP_NAME = re.compile(
 #: The end of a complete ``pg_restore --file`` script.
 SCRIPT_COMPLETE = "-- PostgreSQL database dump complete"
 MARKER_KEY = "backup-problem-{env}"
+#: ``<state>/markers/<this>``: its modification time is the backup agent's last run.
+AGENT_RUN_MARKER = "backup-agent-ran-{env}"
 CHILD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -193,12 +197,31 @@ def newest_backup(settings: Settings) -> Backup | None:
     return backups[0] if backups else None
 
 
+def due_after(now: dt.datetime | None = None) -> dt.datetime:
+    """The backup agent's latest nightly time (02:30 local) at or before ``now``."""
+    from budgetapp.services.agents import BACKUP_SCHEDULE
+
+    local = (now or clock.now()).astimezone()
+    hour, minute = BACKUP_SCHEDULE
+    slot = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return slot if slot <= local else slot - dt.timedelta(days=1)
+
+
 def is_due(
-    settings: Settings, *, min_age: dt.timedelta = DUE_AFTER, now: dt.datetime | None = None
+    settings: Settings, *, min_age: dt.timedelta | None = None, now: dt.datetime | None = None
 ) -> bool:
-    """True when there is no verified backup younger than ``min_age`` (default 20 h)."""
+    """True when no verified backup was made since the last nightly time (:func:`due_after`),
+    or, with ``min_age`` (``--min-age-hours``), when none is younger than that.
+
+    A backup made during the day (at login after the Mac was off, by hand) therefore never makes
+    the next night's run skip: backups stay under about 24 hours apart.
+    """
     newest = newest_backup(settings)
-    return newest is None or newest.age(now) >= min_age
+    if newest is None:
+        return True
+    if min_age is not None:
+        return newest.age(now) >= min_age
+    return newest.created_at < due_after(now)
 
 
 def ensure_backup_dir(settings: Settings) -> Path:
@@ -478,7 +501,7 @@ def run_backup(
     *,
     keep: int = DEFAULT_KEEP,
     if_due: bool = False,
-    min_age: dt.timedelta = DUE_AFTER,
+    min_age: dt.timedelta | None = None,
     kind: str = "",
     runner: Runner = subprocess.run,
     store: secrets.SecretStore | None = None,
@@ -489,7 +512,8 @@ def run_backup(
     A backup (``kind=""``) then rotates the backups (newest ``keep`` stay). A :data:`PRE_RESTORE`
     copy deletes nothing: it is taken while a restore may be reading the oldest backup, and the
     restore prunes its own copies once it has succeeded. A :data:`PRE_UPGRADE` copy keeps the
-    newest :data:`PRE_UPGRADE_KEEP` of its own set. ``if_due`` applies to backups only.
+    newest :data:`PRE_UPGRADE_KEEP` of its own set. ``if_due`` (see :func:`is_due`) applies to
+    backups only.
 
     Raises :class:`BackupError` when the dump or its verification fails; the temporary file is
     removed, so nothing unverified ever carries a final name.
@@ -500,10 +524,9 @@ def run_backup(
         raise ValueError(f"unknown dump kind {kind!r}")
     now = now or clock.now()
     directory = ensure_backup_dir(settings)
-    if if_due and not kind:
+    if if_due and not kind and not is_due(settings, min_age=min_age, now=now):
         newest = newest_backup(settings)
-        if newest is not None and newest.age(now) < min_age:
-            return BackupResult("skipped", newest=newest, kept=len(list_backups(settings)))
+        return BackupResult("skipped", newest=newest, kept=len(list_backups(settings)))
     _remove_stale_partials(directory, now)
     pg_dump = settings.require_pg_bin("pg_dump")
     connection = pg_connection(settings, store=store)
@@ -590,6 +613,49 @@ def notify_backup_problem(
     if not result.ok:
         log.warning("backup notification failed: %s", result.error)
     return result.ok
+
+
+def _agent_marker(settings: Settings) -> Path:
+    return Path(settings.state_dir) / "markers" / AGENT_RUN_MARKER.format(env=settings.env)
+
+
+def note_agent_run(settings: Settings, *, now: dt.datetime | None = None) -> None:
+    """Record that the backup agent ran (``backup --unattended``), whatever it then did."""
+    path = _agent_marker(settings)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
+    when = (now or clock.now()).timestamp()
+    os.utime(path, (when, when))
+
+
+def agent_last_run(settings: Settings) -> dt.datetime | None:
+    """When the backup agent last ran, or ``None`` if it never has."""
+    try:
+        return dt.datetime.fromtimestamp(_agent_marker(settings).stat().st_mtime, dt.UTC)
+    except OSError:
+        return None
+
+
+def alert_if_backups_stopped(
+    settings: Settings, notifier: Notifier, *, now: dt.datetime | None = None
+) -> bool:
+    """For the sync agent: announce stale backups (once a day) when the backup agent has not run
+    for :data:`STALE_AFTER` either, so it cannot announce them itself (it is unloaded or not
+    allowed to run). While it runs it reports its own failures, and right after a wake, when both
+    agents start together, the backup it is making is not reported missing.
+
+    Returns ``True`` when a notification was handed to macOS. Never raises for a file problem.
+    """
+    now = now or clock.now()
+    try:
+        stale, newest = backup_health(settings, now=now)
+        ran = agent_last_run(settings)
+        if not stale or (ran is not None and now - ran <= STALE_AFTER):
+            return False
+        return notify_backup_problem(settings, notifier, stale_message(settings, newest, now))
+    except OSError as exc:
+        log.warning("could not check the backups: %s", exc)
+        return False
 
 
 def stale_message(settings: Settings, newest: Backup | None, now: dt.datetime | None = None) -> str:

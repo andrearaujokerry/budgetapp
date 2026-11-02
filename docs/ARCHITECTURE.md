@@ -778,15 +778,17 @@ Homebrew; every entry point waits for the database first:
 | --- | --- | --- |
 | `postgres` | at login, kept alive | stale-lock wrapper; `Umask 077`; `ExitTimeOut 120` |
 | `sync` | 00:15, 06:15, 12:15, 18:15 and at login | skips if synced in the last 5 h |
-| `backup` | 02:30 and at login | skips if the newest verified dump is under 20 h old |
+| `backup` | 02:30 and at login | skips if a verified dump was made since the last 02:30 |
 | `web` (optional) | at login, kept alive | serves the production app at http://127.0.0.1:8765 |
 
 **Backups (REL-2):** as the environment's role, `pg_dump --format=custom` into a temporary file
 (`umask 077`), verified with `pg_restore --list` and a full `pg_restore --file=/dev/null`, renamed
 into place, newest 30 kept; a "backup failed or stale" alert fires when the newest verified dump is
-over 26 hours old. The dump `upgrade_install()` takes first is named `…-pre-upgrade.dump` and kept
-apart (newest 5), like pre-restore dumps: neither counts toward the 30, "due" or "stale". **Restore** reads the dump's database name and refuses a dump from another
-environment, asks for a typed confirmation (the environment's name) and, for production, an
+over 26 hours old (the backup agent reports its own runs; the sync agent announces stale backups
+when the backup agent has not run for 26 hours either). The dump `upgrade_install()` takes first
+is named `…-pre-upgrade.dump` and kept apart (newest 5), like pre-restore dumps: neither counts
+toward the 30, "due" or "stale". **Restore** reads the dump's database name and refuses a dump
+from another environment, asks for a typed confirmation (the environment's name) and, for production, an
 explicit `--env production` on the command line, takes the sync locks (refusing while a sync
 runs) before it stops the web, sync and backup agents, takes a pre-restore dump (kept apart from
 the 30 backups, newest 5; `--without-safety-copy` skips it only when the current data can't be

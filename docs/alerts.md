@@ -61,7 +61,9 @@ Details:
   click **Always Allow** for each item (usually after a `brew upgrade` of Python). The sync and
   backup agents simply try again later.
 - **Backup failed or stale** says to run `./run doctor --env production`;
-  [Backups](maintenance.md#backups) has the details.
+  [Backups](maintenance.md#backups) has the details. The backup agent sends it when a backup
+  fails; the sync agent sends it when backups have stopped because the backup agent no longer
+  runs.
 
 ## Choose what you get
 

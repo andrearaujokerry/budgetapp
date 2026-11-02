@@ -8,7 +8,8 @@
   needs the user's approval the command notifies once a day (a marker file: the database password
   may be the item that failed) and exits 75. A database that isn't up yet ends the run quietly
   (exit 75, no alert): the next scheduled run tries again. A production database that needs an
-  upgrade is announced once a day, also with exit 75.
+  upgrade is announced once a day, also with exit 75. In production it also checks that backups
+  still happen, and announces stale ones when the backup agent has stopped running.
 * Exit status: 0 when every Item synced (or was skipped or not due), 1 when a sync failed (the
   failure is recorded on the Item and shown on the Connection page), 2 for a usage error, 75 for
   "try again later".
@@ -36,6 +37,7 @@ from budgetapp.config import Settings
 from budgetapp.logsetup import setup_logging
 from budgetapp.models import PlaidItem
 from budgetapp.plaid_gateway import PlaidGateway, RealPlaidGateway
+from budgetapp.services import backup as backups
 from budgetapp.services import sync as sync_service
 from budgetapp.services.events import SyncOutcome
 from budgetapp.services.notify import Notifier, get_notifier
@@ -296,4 +298,6 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
     try:
         return sync_command(args, rt)
     finally:
+        if settings.is_production and getattr(args, "unattended", False):
+            backups.alert_if_backups_stopped(settings, rt.notifier)  # the backup agent stopped?
         rt.close()

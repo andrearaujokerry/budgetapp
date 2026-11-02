@@ -84,7 +84,7 @@ Runner = Callable[..., subprocess.CompletedProcess]
 DESCRIPTIONS = {
     "postgres": "the database server, at login and kept running",
     "sync": "sync at 00:15, 06:15, 12:15, 18:15 and at login (skipped if synced in the last 5 h)",
-    "backup": "backup at 02:30 and at login (skipped if the newest backup is under 20 h old)",
+    "backup": "backup at 02:30 and at login (skipped if one was made since the last 02:30)",
     "web": "the production web app at http://127.0.0.1:8765, at login and kept running",
 }
 
