@@ -107,11 +107,7 @@ def run_start(args: argparse.Namespace, settings: Settings) -> int:
         return 2
     if settings.is_production:
         print(LIVE_BANNER.format(db=settings.db_name, url=settings.app_url), flush=True)
-        try:
-            return int(agents.launch_production(settings) or 0)
-        except NotImplementedError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
+        return int(agents.launch_production(settings) or 0)
     print("Starting Budget Tracker (Sandbox)", flush=True)
     print(f"  PostgreSQL: {pgcluster.start(settings)}", flush=True)
     if not wait_for_db(settings, timeout=60):

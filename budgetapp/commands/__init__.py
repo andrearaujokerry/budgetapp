@@ -11,7 +11,6 @@ import argparse
 from collections.abc import Callable
 from typing import Any
 
-NOT_BUILT = "This command isn't built yet."
 Handler = Callable[[argparse.Namespace, Any], int]
 
 
@@ -49,9 +48,3 @@ def add_command(
     )
     parser.set_defaults(handler=handler, accepts_extra=accepts_extra)
     return parser
-
-
-def not_built(args: argparse.Namespace, settings: Any) -> int:
-    """Handler for commands a later package implements."""
-    print(NOT_BUILT)
-    return 2

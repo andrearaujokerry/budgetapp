@@ -16,8 +16,8 @@ component live at `/dev/ui-kit`. ARCHITECTURE §9 has the security design.
 
 Checklist for a page package:
 
-- [ ] Replace `routes/<page>.py` and `templates/<page>/index.html` wholesale; keep the name
-      `router` and the page's GET route at its nav `href`.
+- [ ] One module `routes/<page>.py` with `router = APIRouter()` and the page's GET route at its
+      nav `href`; the full page is `templates/<page>/index.html`.
 - [ ] Routes are `def` (not `async def`), thin, and call services; services never commit.
 - [ ] Every response goes through `render()` (or `redirect()` after a change).
 - [ ] Mutations are `POST`; the route calls `session.commit()` after a successful change.
@@ -88,8 +88,8 @@ def delete_rule(request: Request, rule_id: int, session: SessionDep) -> Response
   `budgets`, `trends`, `recurring`, `statements`, `categories`, `rules`, `imports`, `connection`,
   `settings` (a detail page uses its parent's key), or `None`. A typo raises `ValueError`.
 - **Routers.** `routes/__init__.py` lists `ALL_ROUTERS` in nav order; `create_app()` includes
-  each with the schema guard. Keep all of a page's routes in its own module. A new module (not
-  replacing a placeholder) must be added to `ALL_ROUTERS`, which is a shared-file change.
+  each with the schema guard. Keep all of a page's routes in its own module. A new module must
+  be added to `ALL_ROUTERS`, which is a shared-file change.
 
 ## 2. `render()` and the layout context
 

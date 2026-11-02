@@ -155,15 +155,6 @@ def test_live_prints_the_banner_and_hands_over(capsys, monkeypatch):
     assert "http://127.0.0.1:8765" in out
 
 
-def test_live_explains_what_is_not_built_yet(capsys, monkeypatch):
-    def not_yet(_settings):
-        raise NotImplementedError("Starting the production app isn't built yet (OPS adds it).")
-
-    monkeypatch.setattr(serve.agents, "launch_production", not_yet)
-    assert serve.run_start(argparse.Namespace(no_browser=False), load_settings("production")) == 2
-    assert "error: Starting the production app isn't built yet" in capsys.readouterr().err
-
-
 # --------------------------------------------------------------------------- serve
 
 

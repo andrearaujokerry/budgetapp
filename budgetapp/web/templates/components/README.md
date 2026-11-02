@@ -173,7 +173,7 @@ rendered with a fresh `conn`:
 ### 2.5 Error pages
 
 - Every error page's title is its only `<h1>` (`empty_state(..., heading=1)`); 500 and the
-  generic notice page use the `warn` icon tone, so an error never looks like "Coming soon".
+  generic notice page use the `warn` icon tone, so an error never looks like an empty list.
 - `errors/404.html`, `errors/500.html`: extend base; no extra context. Never pass exception text.
 - `errors/error.html`: other statuses (400/403/503, "Upgrade needed", "Keychain approval needed").
   Optional context: `status_code`, `title`, `message`, `command` (shown as copyable code, e.g.

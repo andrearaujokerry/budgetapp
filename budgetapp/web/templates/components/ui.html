@@ -365,7 +365,7 @@ var(--chart-other)
     heading  1-6 renders the title as that heading (an error page's title is
              its only <h1>); default a <p>, for an empty card inside a page.
     tone     icon colour: "warn" | "over" | "info" | "ok" (default: the accent);
-             error pages use warn so they never look like "Coming soon". -#}
+             error pages use warn so they never look like an empty list. -#}
 {%- macro empty_state(title, message=none, icon="list", action_href=none, action_label=none, compact=false, heading=none, tone=none) -%}
 {%- set t = _tone(tone, 'empty')|trim -%}
 {%- if heading is not none and (heading is boolean or heading not in [1, 2, 3, 4, 5, 6]) -%}

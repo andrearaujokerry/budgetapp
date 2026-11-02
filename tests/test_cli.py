@@ -4,9 +4,9 @@ import pytest
 
 from budgetapp import cli
 from budgetapp import secrets as sec
-from budgetapp.commands import NOT_BUILT, setup
 from budgetapp.commands import db as db_command
 from budgetapp.commands import migrate as migrate_command
+from budgetapp.commands import setup
 from budgetapp.commands import test as test_command
 from budgetapp.config import ConfigError, load_settings
 from budgetapp.plaid_gateway import PlaidError
@@ -32,13 +32,6 @@ ALL_COMMANDS = {
     "notify-test",
     "test",
 }
-STUBS = {  # start/serve are built (tests/web/test_serve.py), demo too (tests/test_demo.py)
-    "backup": ["--if-due", "--keep", "30", "--unattended"],
-    "restore": ["backup.dump", "--force-disconnect"],
-    "doctor": [],
-    "install-agents": ["--with-web", "--dry-run"],
-    "uninstall-agents": ["--dry-run"],
-}
 
 
 def test_help_lists_every_command(capsys):
@@ -52,20 +45,6 @@ def test_help_lists_every_command(capsys):
         a for a in cli.build_parser()._actions if isinstance(a, argparse._SubParsersAction)
     )
     assert set(subparsers.choices) == ALL_COMMANDS
-
-
-@pytest.mark.parametrize(("command", "options"), STUBS.items())
-def test_stubs_print_not_built_and_return_2(capsys, command, options):
-    from budgetapp.commands import not_built
-
-    try:  # a command its feature package has built is tested there (its options may differ)
-        handler = cli.build_parser().parse_known_args([command, *options])[0].handler
-    except SystemExit:
-        handler = None
-    if handler is not not_built:
-        pytest.skip("built by its feature package")
-    assert cli.main([command, *options]) == 2
-    assert capsys.readouterr().out.strip() == NOT_BUILT
 
 
 def test_env_is_accepted_before_or_after_the_command():

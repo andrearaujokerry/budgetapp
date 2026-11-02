@@ -3,9 +3,9 @@
 Templates render with ``StrictUndefined`` under pytest, so every page here also proves that
 ``base.html`` and the sync partial read only fields that exist on the real objects.
 
-Feature packages replace the placeholder pages, so probe routes here render only templates the
-shell owns (``errors/*``, ``components/*``, ``dev/ui_kit.html``), and the real pages are checked
-only for what every page must keep: it renders with an empty database, inside the full layout.
+Probe routes here render only templates the shell owns (``errors/*``, ``components/*``,
+``dev/ui_kit.html``); the pages, which their feature packages test, are checked only for what every
+page must keep: it renders with an empty database, inside the full layout.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ from budgetapp.web.app import STATIC_DIR
 from budgetapp.web.deps import FormDep, GatewayDep, NotifierDep, SessionDep, SettingsDep
 from budgetapp.web.flash import flash, flash_oob, is_local_path, redirect
 from budgetapp.web.routes import ALL_ROUTERS
-from budgetapp.web.routes import connection as connection_routes
 from budgetapp.web.templating import (
     NAV_ITEMS,
     date_long,
@@ -221,7 +220,7 @@ def test_routers_follow_the_nav_order():
 
 @pytest.mark.parametrize("item", NAV_ITEMS, ids=lambda item: item["key"])
 def test_every_nav_page_renders_with_the_layout(sandbox_client, item):
-    """Every page, placeholder or built: 200 on an empty database, inside the full layout."""
+    """Every page: 200 on an empty database, inside the full layout."""
     response = sandbox_client.get(item["href"])
     assert response.status_code == 200
     assert response.headers["content-type"] == "text/html; charset=utf-8"
@@ -237,20 +236,6 @@ def test_every_nav_page_renders_with_the_layout(sandbox_client, item):
     assert '<script src="/static/vendor/htmx.min.js" defer></script>' in html
     assert '<script src="/static/js/app.js" defer></script>' in html
     assert csp_problems(html, rendered=True) == []  # macro-built attributes included
-
-
-PLACEHOLDER = "Placeholder from the web shell"
-
-
-@pytest.mark.parametrize("item", NAV_ITEMS, ids=lambda item: item["key"])
-def test_placeholder_pages_say_coming_soon(client, item):
-    template = templates.env.loader.get_source(templates.env, f"{item['key']}/index.html")[0]
-    if PLACEHOLDER not in template:
-        pytest.skip("built by its feature package")
-    response = client.get(item["href"])
-    assert response.template.name == f"{item['key']}/index.html"
-    assert f'<h1 class="page-header__title">{item["label"]}</h1>' in response.text
-    assert "Coming soon" in response.text
 
 
 def test_render_adds_the_layout_context(probe_client):
@@ -473,29 +458,6 @@ def test_htmx_gets_the_partial_with_an_out_of_band_toast(probe_client, db, at_no
     assert '<div hx-swap-oob="beforeend:#flash">' in body
     assert toast_texts(body) == ["Sync started"]
     assert "HX-Request" in response.headers["vary"]
-
-
-@pytest.fixture
-def sync_placeholder():
-    """The placeholder's toast text, as it appears in HTML."""
-    if not hasattr(connection_routes, "NOT_BUILT"):
-        pytest.skip("routes/connection.py is built by the SYNC package")
-    return str(Markup.escape(connection_routes.NOT_BUILT))
-
-
-def test_sync_now_answers_until_sync_is_built(client, db, at_now, sync_placeholder):
-    """The top-bar button on every page posts here: never a 404 ("That item no longer exists")."""
-    make_item(db, last_sync_success_at=NOW - dt.timedelta(hours=3))
-    response = client.post("/connection/sync", headers=HTMX)
-    assert response.status_code == 200
-    assert response.template.name == "components/sync_status.html"
-    assert pill(response.text) == ("healthy", "Synced 3 h ago")
-    assert toast_texts(response.text) == [sync_placeholder]
-    plain = client.post("/connection/sync", follow_redirects=False)  # no JS: the form posts
-    assert plain.status_code == 303 and plain.headers["location"] == "/connection"
-    assert toast_texts(client.get("/connection").text) == [sync_placeholder]
-    polled = client.get("/connection/sync-status", headers=HTMX)
-    assert polled.status_code == 200 and pill(polled.text)[0] == "healthy"
 
 
 # --------------------------------------------------------------------------- flash messages
