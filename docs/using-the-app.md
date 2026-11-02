@@ -48,7 +48,8 @@ it open those pages.
 
 - **The tiles at the top:** **Spent** against your overall target (or your budgets added up, or
   "in all categories" before you set any), **Remaining** (with about how much a day that leaves),
-  **Days left**, and **Compared with** the previous period: what you have spent so far against
+  **Days left**, and **Compared with** the previous period: all your spending so far (categories
+  with an annual budget included, like the pace chart, so it can be more than **Spent**) against
   what you had spent by the same day then.
 - **Budgets:** your six most-used monthly budgets with what is left; **All budgets** opens the
   Budgets page.

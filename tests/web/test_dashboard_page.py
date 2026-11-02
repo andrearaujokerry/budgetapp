@@ -138,7 +138,7 @@ class TestEmpty:
         tiles = kpis(page)
         assert "Spent $0 in all categories" in tiles
         assert "Days left 30 of 30 · ends Nov 30" in tiles
-        assert "Compared with October $0 $0 so far, $0 by Oct 1" in tiles
+        assert "Compared with October $0 all spending: $0 so far, $0 by Oct 1" in tiles
         config = chart_config(page)
         assert config["data"]["labels"][:2] == ["Start", "Nov 1"]
         this, last = config["data"]["datasets"]
@@ -434,6 +434,21 @@ def test_recurring_charges_still_to_come_this_period(client, cat, spend):
     assert "About $15.49 still to come before Oct 31." in upcoming
 
 
+def test_the_compare_tile_says_it_counts_all_spending(client, db, cat, spend):
+    """Review finding: next to "Spent" (the overall target's spending, annual budgets left out),
+    "Compared with" counted all spending without saying so."""
+    groceries, travel = cat("Groceries"), cat("Travel")
+    make_budget(db, None, "3800.00", effective_from=day("2026-01-01"))
+    make_budget(db, travel, "6000.00", effective_from=day("2026-01-01"), period="annual")
+    spend(groceries, "100.00", "2026-09-05")
+    spend(groceries, "200.00", "2026-10-05")
+    spend(travel, "900.00", "2026-10-06")
+    page = client.get("/").text
+    assert "Spent $200 of $3,800 target" in text_of(block(page, "kpi-spent"))
+    compare = text_of(block(page, "kpi-compare"))
+    assert "Compared with September +$1,000 all spending: $1,100 so far, $100 by Sep 15" in compare
+
+
 def test_pace_chart_compares_with_the_same_day_last_month(client, cat, spend):
     spend(cat("Home"), "100.00", "2026-09-01")
     spend(cat("Home"), "200.00", "2026-09-20")
@@ -447,6 +462,6 @@ def test_pace_chart_compares_with_the_same_day_last_month(client, cat, spend):
     assert last["data"][15] == "100.00" and last["data"][20] == "300.00"
     assert last["data"][31] is None  # September has 30 days
     kpi = text_of(block(page, "kpi-compare"))
-    assert "Compared with September −$70 $30 so far, $100 by Sep 15" in kpi
+    assert "Compared with September −$70 all spending: $30 so far, $100 by Sep 15" in kpi
     described = text_of(block(page, "dash-pace-chart-desc"))
     assert "September: $100.00 by Sep 15, 2026, $300.00 in all." in described
