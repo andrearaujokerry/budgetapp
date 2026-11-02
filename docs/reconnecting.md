@@ -1,5 +1,9 @@
 # Reconnecting and renewing
 
+<!-- RECHECK(ALR): the Mac notifications mentioned under "How you notice" and "Renew the yearly
+     consent" are the ALR package's (being built while this was written; described from
+     ARCHITECTURE §11). Check them after the merge. -->
+
 Your Amex is linked once ([Going live](going-live.md)). After that, every repair happens **on the
 same connection**: Plaid reopens it in a short window and you sign in to Amex again. A repair
 never uses another of your 10 Plaid connections, and your transactions, categories, notes and
@@ -19,7 +23,6 @@ the sign-in, you withdrew the app's access in your Amex account, or the yearly c
 - the top bar says **Reconnect needed** (red);
 - every page shows "Your Amex connection needs attention. Syncing is paused until you sign in to
   Amex again through Plaid. Your existing data is safe.";
-<!-- RECHECK(ALR): alert wording and timing come from ARCHITECTURE §11; check after the ALR merge. -->
 - a Mac notification, if sync problem alerts are on ([Alerts and notifications](alerts.md));
 - `./run doctor --env production` reports "American Express needs you to reconnect".
 
@@ -46,7 +49,6 @@ syncing stops until you renew it.
 - **Reminders start 30 days before** (change the number under Settings → Alerts → Consent
   renewal reminder): every page shows "Renew your Amex connection by *date* (*N* days left).",
   and a Mac notification arrives once for each due date.
-  <!-- RECHECK(ALR): the consent notification is ALR's; check after the merge. -->
 - **To renew:** Connection → **Renew consent** (or **Renew now** in the banner). Plaid's window
   opens for the same connection; sign in to Amex and confirm. The page then says "Access is
   renewed until *date*."
