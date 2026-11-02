@@ -1,9 +1,5 @@
 # Reconnecting and renewing
 
-<!-- RECHECK(ALR): the Mac notifications mentioned under "How you notice" and "Renew the yearly
-     consent" are the ALR package's (being built while this was written; described from
-     ARCHITECTURE §11). Check them after the merge. -->
-
 Your Amex is linked once ([Going live](going-live.md)). After that, every repair happens **on the
 same connection**: Plaid reopens it in a short window and you sign in to Amex again. A repair
 never uses another of your 10 Plaid connections, and your transactions, categories, notes and
@@ -52,7 +48,8 @@ syncing stops until you renew it.
   last confirmed)".
 - **Reminders start 30 days before** (change the number under Settings → Alerts → Consent
   renewal reminder): every page shows "Renew your Amex connection by *date* (*N* days left).",
-  and a Mac notification arrives once for each due date.
+  and a Mac notification arrives once for each due date, even with sync problem alerts off (but
+  not while the connection needs reconnecting: reconnecting renews the consent too).
 - **To renew:** Connection → **Renew consent** (or **Renew now** in the banner). Plaid's window
   opens for the same connection; sign in to Amex and confirm. The page then says "Access is
   renewed until *date*."

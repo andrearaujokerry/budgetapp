@@ -641,12 +641,12 @@ def test_the_doctor_sample_reads_like_doctor() -> None:
             assert status_line.group(1) in doctor.STATUSES
 
 
-def test_recheck_markers_name_a_wave_two_package() -> None:
-    """Sections written before DASH and ALR merged are marked for the integrator; GOLIVE marks
-    what can only be seen on the Mac once the agents are installed."""
+def test_recheck_markers_name_what_is_still_unchecked() -> None:
+    """Only GOLIVE is left: what can only be seen on the Mac once the agents are installed. The
+    DASH and ALR sections were checked against the merged code (wave-2 integration)."""
     for path in USER_DOCS:
         for marker in re.findall(r"<!-- RECHECK\((\w+)\)", path.read_text()):
-            assert marker in ("DASH", "ALR", "GOLIVE"), (_id(path), marker)
+            assert marker == "GOLIVE", (_id(path), marker)
 
 
 # --------------------------------------------------------------------------- on-screen words
@@ -676,17 +676,9 @@ NOT_APP_WORDS = {
     "⋯ menu": "transactions/_row.html: the 'more' icon button",
     "5 new charges over $500.00": "ALR's f'{n} new charges over {limit}', an example",
 }
-#: Labels of pages still being built by a wave-2 package (RECHECK markers), so not in this
-#: tree yet. The integrator deletes these entries once DASH is merged.
-WAVE_TWO_WORDS = {
-    "All budgets": "DASH: dashboard/_budgets.html",
-    "Days left": "DASH: dashboard/_kpis.html",
-    "Compared with": "DASH: dashboard/_kpis.html",
-    "Import a CSV file": "DASH: dashboard/_empty.html",
-    "Through": "DASH: trends/index.html",
-    "Monthly average": "DASH: trends/_results.html",
-    "Every month": "DASH: trends/_grid.html",
-}
+#: Labels of pages a package is still building (RECHECK markers), so not in this tree yet. Empty
+#: since DASH merged: every label the guides quote is checked against the app.
+WAVE_TWO_WORDS: dict[str, str] = {}
 
 
 def normalise(text: str) -> str:
