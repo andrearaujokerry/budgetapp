@@ -78,8 +78,9 @@ Every charge, refund, credit and payment, newest first.
 - Click the **category** in a row to change it. A category you set yourself is never changed
   again by rules or syncs (until you choose **Reset to automatic**).
 - The **⋯ menu** of a row (or the transaction's own page) has **Details**, **Notes and tags**,
-  **Split**, **Always categorize like this**, **Reset to automatic** and, when the row needs
-  review, **Mark as reviewed**.
+  **Split** and **Always categorize like this** (neither for card payments), **Reset to
+  automatic** once you have set the category yourself, and **Mark as reviewed** when the row needs
+  review.
 - **Split** spreads one charge over several categories. The parts must add up exactly to the
   amount; a pending charge can't be split until it posts.
 - **Always categorize like this** makes a rule from the transaction, with a preview of the past
