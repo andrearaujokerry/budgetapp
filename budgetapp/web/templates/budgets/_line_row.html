@@ -10,7 +10,7 @@
 <tr id="line-{{ cid }}">
 <td class="col-grow">
 <span class="table__primary">{{ ui.category_badge(category) }}</span>
-{%- if line %}{{ bud.carry_note(line, labels) }}{{ bud.phone_status(line.spent, line.percent_used, line.status, line.remaining) }}{% else %}<span class="table__secondary">No budget from {{ labels.period }} on</span>{% endif %}
+{%- if line %}{{ bud.carry_note(line, labels) }}{{ bud.split_note(ov, cid) }}{{ bud.phone_status(line.spent, line.percent_used, line.status, line.remaining) }}{% else %}<span class="table__secondary">No budget from {{ labels.period }} on</span>{% endif %}
 </td>
 <td class="num budget-table__amount">
 <form class="budget-form" method="post" action="/budgets/category/{{ cid }}" hx-post="/budgets/category/{{ cid }}" hx-trigger="change, submit" hx-sync="this:drop" hx-target="closest tr" hx-swap="outerHTML">
@@ -19,7 +19,7 @@
 </form>
 {{- bud.field_error('budget-' ~ cid ~ '-error', err) }}
 </td>
-<td class="num"><a class="budget-spent" id="spent-{{ cid }}" href="{{ spent_href(cid) }}" aria-label="{{ ui.money_text(spent) }} spent on {{ category.name }}: see the transactions">{{ ui.money(spent) }}</a></td>
+<td class="num"><a class="budget-spent" id="spent-{{ cid }}" href="{{ spent_href(cid, *ov.spent_dates(cid)) }}" aria-label="{{ ui.money_text(spent) }} spent on {{ category.name }}: see the transactions">{{ ui.money(spent) }}</a></td>
 <td class="num">{% if line %}{{ ui.money(line.remaining, tone='over' if line.remaining < 0 else 'neutral') }}{% else %}{{ ui.money(none) }}{% endif %}</td>
 <td class="budget-table__meter col-optional-sm">{% if line %}{{ bud.meter(line.percent_used, line.status, line.pace_percent, category.name ~ ' budget', line.remaining) }}{% else %}{{ ui.progress(none, name=category.name ~ ' budget', size='sm') }}{% endif %}</td>
 <td class="center">

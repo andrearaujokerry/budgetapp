@@ -447,8 +447,10 @@ period". It reads `app_settings`: the date basis (posting date in statement mode
 `kind = 'expense'`, per category. Charges add; refunds (negative amounts in an expense
 category) subtract from it (TXN-3). Card payments (`kind = 'transfer'`) and credits/rewards
 (`kind = 'income'`) never count. The Budgets page, every "this period" widget on the dashboard,
-and the budget alerts all call it. Trends always use calendar months by `spend_date`, with the
-same pending setting.
+and the budget alerts all call it. `spending.periods_spending(session, periods)` is the same
+function for several periods read in one query (a rollover chain's earlier periods);
+`period_spending` is it for one period. Trends always use calendar months by `spend_date`, with
+the same pending setting.
 
 The Transactions list's sums (Charges, Credits & payments, Net) add whole amounts, except under a
 category filter: then each row adds what `v_allocations` puts in the chosen categories, so a split
@@ -562,8 +564,8 @@ rows or completed Plaid's history, after every CSV import and after attaching a 
 
 ### Budget math (BUD-1..5)
 - `available = budget amount + carry-in` (carry-in only when `rollover`: the previous period's
-  `available − spent`, starting at 0 in the first rollover period; may be negative; a flagged
-  statement cycle ends the chain).
+  `available − spent`, chained back to the first rollover period however long ago, which starts
+  at 0; may be negative; a flagged statement cycle ends the chain).
 - `remaining = available − spent`; `percent_used = spent / available` (undefined when
   `available ≤ 0`).
 - **Overall target (BUD-3):** compared with spending in categories that have no active annual
@@ -572,6 +574,12 @@ rows or completed Plaid's history, after every CSV import and after attaching a 
 - **Annual budgets (BUD-5):** calendar year; year-to-date spending uses the same basis rule as
   `period_spending`; shown with a pace line (`amount × elapsed days / days in year`) in a
   separate Annual section, never inside monthly totals.
+- **A statement cycle across Dec 31:** each year's days of a category count by its budget on that
+  year's last day in the cycle (Dec 31, or the cycle's end), the day each year's annual tally is
+  taken. Late-December spending of a category whose annual budget starts in January is spending
+  without a budget (in the overall target); late-December spending that the old year's annual
+  budget counts stays out of a monthly budget set in the cycle (and out of its rollover). Each
+  row's "spent" link covers the same days.
 - "Suggest from last 3 months" = mean of the last 3 complete periods (ended, wholly inside the
   history, not flagged), rounded up to $5.
 - `days_left` counts today: `(period.end − today).days + 1`.

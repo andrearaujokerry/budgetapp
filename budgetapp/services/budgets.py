@@ -2,8 +2,9 @@
 
 The one place that says how much budget there is and how much of it is used: the Budgets page,
 the dashboard (DASH) and the budget alerts (ALR) all call it. Spending comes only from
-:func:`budgetapp.services.spending.period_spending` (ARCHITECTURE §6), so the mode's date basis
-and the pending setting apply to every number here.
+:func:`budgetapp.services.spending.period_spending` (ARCHITECTURE §6; a rollover chain's periods
+are read together with ``periods_spending``), so the mode's date basis and the pending setting
+apply to every number here.
 
 **Periods (BUD-2).** :func:`current_period` / :func:`period_for` follow
 ``app_settings.budget_period_mode``: calendar months, or the statement cycles of the card named by
@@ -29,14 +30,15 @@ the more recent row wins (monthly on a tie).
 previous period's ``available − spent`` (negative after an overspend), chained back to the first
 period of an unbroken run of rollover periods, whose carry-in is 0. A flagged statement cycle
 (outside 25–35 days, usually a missing statement) ends the chain: the cycle after it starts a new
-one. It is computed on the fly, at most :data:`MAX_ROLLOVER_PERIODS` periods back.
+one. It is computed on the fly over the whole chain, however long (its spending is one query).
 
 **Overall target (BUD-3) and annual budgets (BUD-5).** The overall target (the ``overall`` monthly
 row) is compared with spending in every category without an active annual budget. Without a
 target, the period's budget is the sum of the monthly category budgets (their available amounts)
 against spending in those categories; unbudgeted spending is reported separately. Annual budgets
 cover the calendar year, with year-to-date spending on the same date basis, and never count in
-monthly totals.
+monthly totals. In a statement cycle across Dec 31, each year's days count by the budget in force
+on that year's last day in the cycle, so every dollar is in exactly one figure.
 
 **Status.** ``ok`` below 80 %, ``warn`` from 80 % up to 100 %, ``over`` once spending passes the
 available amount (``remaining < 0``), ``none`` without a budget. ``percent_used`` is
@@ -86,7 +88,12 @@ from budgetapp.models import (
 from budgetapp.money import CENT, MAX_AMOUNT, ZERO, is_cents, parse_money_input, to_money
 from budgetapp.periods import Period
 from budgetapp.services import statements
-from budgetapp.services.spending import PeriodSpending, basis_date, basis_for_mode, period_spending
+from budgetapp.services.spending import (
+    PeriodSpending,
+    basis_date,
+    basis_for_mode,
+    periods_spending,
+)
 
 MONTHLY = "monthly"
 ANNUAL = "annual"
@@ -99,8 +106,8 @@ WARN = "warn"
 OVER = "over"
 NONE = "none"
 
-#: Rollover chains and suggestions look at most this many periods back.
-MAX_ROLLOVER_PERIODS = 60
+#: Suggestions look at most this many periods back for complete ones.
+SUGGEST_LOOKBACK = 60
 #: "Suggest" averages this many complete periods.
 SUGGEST_PERIODS = 3
 #: Suggestions are rounded up to a multiple of this many dollars.
@@ -320,8 +327,15 @@ class BudgetOverview:
     used first; over budget without a percentage counts as most), then name. ``unbudgeted``:
     visible categories with spending but no budget, largest first. ``overall`` and ``totals``
     include hidden categories. Annual budgets are reported by :func:`annual_overview` instead;
-    ``annual_category_ids`` lists the categories whose spending they cover in this period.
+    ``annual_category_ids`` lists the categories whose budget is annual at the period's end.
     ``spending`` is the period's :func:`period_spending` result (every expense category).
+
+    Across Dec 31 (a statement cycle), each calendar year's days of a category count by its
+    budget on that year's last day in the period, as :func:`annual_overviews` tallies them
+    (``_Context.year_parts``): late-December spending of a category whose annual budget starts in
+    January has no budget (unbudgeted, so in the overall target), and late-December spending that
+    the old year's annual budget counts is left out of a new monthly budget. ``monthly_dates``
+    holds the days such a category's line or unbudgeted row covers (:meth:`spent_dates`).
 
     ``notice``: statement mode can't be used (no card or no closing date), so periods are
     calendar months. ``cycle_notice``: the period is a flagged statement cycle (outside 25–35
@@ -344,10 +358,19 @@ class BudgetOverview:
     settings: PeriodSettings
     spending: PeriodSpending
     cycle_notice: str | None = None
+    monthly_dates: Mapping[int, tuple[dt.date, dt.date]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     @property
     def is_current(self) -> bool:
         return self.period.contains(self.today)
+
+    def spent_dates(self, category_id: int) -> tuple[dt.date, dt.date]:
+        """``(first, last)``: the days a category's line or unbudgeted row counts (its "spent"
+        link): the period, or in a cycle across Dec 31 that an annual budget counts one year of,
+        the other year's days (``monthly_dates``)."""
+        return self.monthly_dates.get(category_id, (self.period.start, self.period.end))
 
     @property
     def is_past(self) -> bool:
@@ -361,6 +384,12 @@ class BudgetOverview:
         for line in self.lines:
             if line.category.id == category_id:
                 return line
+        return None
+
+    def unbudgeted_for(self, category_id: int) -> UnbudgetedLine | None:
+        for entry in self.unbudgeted:
+            if entry.category.id == category_id:
+                return entry
         return None
 
 
@@ -642,14 +671,25 @@ class _Context:
         self.versions = _load_versions(session)
         self.categories = _expense_categories(session)
         self._spending: dict[tuple[dt.date, dt.date], PeriodSpending] = {}
+        self._previous: dict[Period, Period] = {}
         self._history: dt.date | None = None
         self._history_loaded = False
 
     def spending(self, period: Period) -> PeriodSpending:
-        key = (period.start, period.end)
-        if key not in self._spending:
-            self._spending[key] = period_spending(self.session, period)
-        return self._spending[key]
+        self.prefetch((period,))
+        return self._spending[(period.start, period.end)]
+
+    def prefetch(self, periods: Iterable[Period]) -> None:
+        """Read the spending of the (non-overlapping) periods not read yet, in one query."""
+        missing = [p for p in periods if (p.start, p.end) not in self._spending]
+        if missing:
+            self._spending.update(periods_spending(self.session, missing))
+
+    def previous(self, period: Period) -> Period:
+        """The period before ``period`` (cached: every rollover chain steps through the same)."""
+        if period not in self._previous:
+            self._previous[period] = self.settings.previous(period)
+        return self._previous[period]
 
     def history_start(self) -> dt.date | None:
         """The earliest date with any allocation, on the budget mode's date basis."""
@@ -661,43 +701,77 @@ class _Context:
             self._history_loaded = True
         return self._history
 
-    def spent(self, period: Period, category_id: int) -> Decimal:
-        history = self.history_start()
-        if history is None or period.end < history:
-            return ZERO
-        return self.spending(period).amount_for(category_id)
-
-    def carry_in(self, category_id: int, period: Period, row: BudgetRow) -> Decimal:
-        """BUD-4: what rolls into ``period`` (0 without rollover or in a chain's first period).
+    def rollover_chain(
+        self, category_id: int, period: Period, row: BudgetRow
+    ) -> list[tuple[Period, Decimal]]:
+        """The earlier periods whose leftovers roll into ``period``, newest first, with their
+        budget amounts (empty without rollover or in a chain's first period).
 
         A flagged cycle ends the chain: what is left of a 61-day cycle (a missing statement)
-        compares one budget with two cycles of spending, so nothing carries out of it.
+        compares one budget with two cycles of spending, so nothing carries out of it. So does
+        a period that doesn't end the day before the next one starts, which happens only where
+        statement mode falls back to calendar months: more than 50 years before the card's first
+        known closing date, where no closing dates are generated (``periods.closing_dates``).
         """
-        if not row.rollover:
-            return ZERO
         chain: list[tuple[Period, Decimal]] = []
-        earlier = period
-        for _ in range(MAX_ROLLOVER_PERIODS):
-            earlier = self.settings.previous(earlier)
-            if earlier.flagged:
-                break
+        if not row.rollover:
+            return chain
+        later = period
+        while True:  # ends by the category's first budget row at the latest
+            earlier = self.previous(later)
+            if earlier.flagged or earlier.end != later.start - dt.timedelta(days=1):
+                return chain
             previous = self.versions.active(category_id, earlier.end)
             if previous is None or previous.period != MONTHLY or not previous.rollover:
-                break
+                return chain
             assert previous.amount is not None  # active rows always have one
             chain.append((earlier, previous.amount))
+            later = earlier
+
+    def carry_in(self, category_id: int, period: Period, row: BudgetRow) -> Decimal:
+        """BUD-4: what rolls into ``period``: the chain's ``available − spent``, oldest first."""
+        chain = self.rollover_chain(category_id, period, row)
+        self.prefetch(earlier for earlier, _ in chain)
         carry = ZERO
         for earlier, amount in reversed(chain):
-            carry = amount + carry - self.spent(earlier, category_id)
+            spent = self.spending(earlier).amount_for(category_id)
+            carry = amount + carry - (spent - self.annual_spent(category_id, earlier))
         return carry
+
+    def is_annual(self, category_id: int, on: dt.date) -> bool:
+        """Whether the category's active budget on ``on`` is annual."""
+        row = self.versions.active(category_id, on)
+        return row is not None and row.period == ANNUAL
 
     def annual_ids(self, on: dt.date) -> frozenset[int]:
         """Categories whose active budget on ``on`` is annual."""
-        return frozenset(
-            cid
-            for cid in self.categories
-            if (row := self.versions.active(cid, on)) is not None and row.period == ANNUAL
-        )
+        return frozenset(cid for cid in self.categories if self.is_annual(cid, on))
+
+    def year_parts(self, category_id: int, period: Period) -> tuple[list[Period], list[Period]]:
+        """``(annual, monthly)``: the parts of ``period`` in each calendar year it touches, by
+        whether the category's budget on the part's last day is annual (BUD-5).
+
+        That is the day :func:`annual_overviews` tallies each year as of, so in a statement cycle
+        across Dec 31 the late-December days belong to the old year's annual budget only when it
+        was in force on Dec 31, and the January days to the new year's only when it is in force at
+        the cycle's end. A period inside one year is one part.
+        """
+        annual: list[Period] = []
+        monthly: list[Period] = []
+        for year in range(period.start.year, period.end.year + 1):
+            start = max(period.start, dt.date(year, 1, 1))
+            part = Period(start, min(period.end, dt.date(year, 12, 31)))
+            (annual if self.is_annual(category_id, part.end) else monthly).append(part)
+        return annual, monthly
+
+    def annual_spent(self, category_id: int, period: Period) -> Decimal:
+        """The part of the category's spending in ``period`` that annual budgets count (see
+        :meth:`year_parts`); the rest is monthly spending, a monthly line's or unbudgeted."""
+        annual, monthly = self.year_parts(category_id, period)
+        if not monthly:
+            return self.spending(period).amount_for(category_id)
+        self.prefetch(annual)
+        return sum((self.spending(part).amount_for(category_id) for part in annual), ZERO)
 
 
 # --------------------------------------------------------------------------- overview
@@ -719,28 +793,41 @@ def overview(session: Session, period: Period, *, today: dt.date | None = None) 
     spending = ctx.spending(period)
     pace = pace_percent(period, today)
     on = period.end
+    # Every rollover chain's spending in one query (PERF-1), before the lines are folded.
+    ctx.prefetch(
+        earlier
+        for category in ctx.categories.values()
+        if (row := ctx.versions.active(category.id, on)) is not None and row.period == MONTHLY
+        for earlier, _ in ctx.rollover_chain(category.id, period, row)
+    )
 
     lines: list[BudgetLine] = []
     unbudgeted: list[UnbudgetedLine] = []
     annual_ids: set[int] = set()
+    monthly_dates: dict[int, tuple[dt.date, dt.date]] = {}
     budgeted = budgeted_spent = unbudgeted_spent = annual_spent = hidden_spent = ZERO
     unbudgeted_hidden_spent = ZERO
     has_monthly = rolls_over = False
     for category in ctx.categories.values():
-        spent = spending.amount_for(category.id)
         if category.is_hidden:
-            hidden_spent += spent
+            hidden_spent += spending.amount_for(category.id)
+        # Across Dec 31 an annual budget may count only one year's days (ctx.year_parts).
+        in_annual = ctx.annual_spent(category.id, period)
+        annual_spent += in_annual
+        spent = spending.amount_for(category.id) - in_annual
+        annual_parts, monthly_parts = ctx.year_parts(category.id, period)
+        if annual_parts and monthly_parts:
+            monthly_dates[category.id] = (monthly_parts[0].start, monthly_parts[-1].end)
         row = ctx.versions.active(category.id, on)
+        if row is not None and row.period == ANNUAL:
+            annual_ids.add(category.id)
+            row = None  # what it doesn't count (days before it, across Dec 31) has no budget
         if row is None:
             unbudgeted_spent += spent
             if category.is_hidden:
                 unbudgeted_hidden_spent += spent
             elif spent != 0:
                 unbudgeted.append(UnbudgetedLine(category, spent))
-            continue
-        if row.period == ANNUAL:
-            annual_ids.add(category.id)
-            annual_spent += spent
             continue
         assert row.amount is not None
         carry = ctx.carry_in(category.id, period, row)
@@ -819,6 +906,7 @@ def overview(session: Session, period: Period, *, today: dt.date | None = None) 
         settings=ctx.settings,
         spending=spending,
         cycle_notice=notice_flagged_cycle(period, rollover=rolls_over) if flagged else None,
+        monthly_dates=MappingProxyType(monthly_dates),
     )
 
 
@@ -902,8 +990,9 @@ def annual_overviews(
 
     Each is as of the period's end, or Dec 31 for a year that ends inside the period, so a
     statement cycle that crosses the year end (Dec 28 – Jan 27) gives the old year's full
-    Jan 1 – Dec 31 tally (late-December spending in annual categories is in no monthly figure,
-    so it must show here) and the new year to the cycle's end. The last one is always as of
+    Jan 1 – Dec 31 tally (late-December spending that the old year's annual budgets count is in
+    no monthly figure: :func:`overview` splits the cycle the same way) and the new year to the
+    cycle's end. The last one is always as of
     ``period.end``: the rows an edit made in ``period`` writes are in force there (an earlier
     year's tally shows them only when :func:`edit_day` falls in that year).
     """
@@ -943,7 +1032,7 @@ def suggestions(
         return Suggestions(())
     chosen: list[Period] = []
     earlier = anchor
-    for _ in range(MAX_ROLLOVER_PERIODS):
+    for _ in range(SUGGEST_LOOKBACK):
         if len(chosen) >= periods:
             break
         earlier = ctx.settings.previous(earlier)
@@ -953,6 +1042,7 @@ def suggestions(
             chosen.append(earlier)
     if not chosen:
         return Suggestions(())
+    ctx.prefetch(chosen)
     annual = ctx.annual_ids(anchor.end)
     totals: dict[int, Decimal] = {}
     overall = ZERO

@@ -1,6 +1,7 @@
 {#- The headline tiles: spent against budget and remaining (the Budgets page's overall card:
     ov.overall), days left, and all spending so far against the same day of the previous
-    period (d.pace). -#}
+    period (d.pace, like the pace chart: annual-budget categories included, so the tile says
+    "all spending" next to a Spent figure that may leave them out). -#}
 {%- import "components/ui.html" as ui -%}
 {%- set o = ov.overall -%}
 {%- set p = d.pace -%}
@@ -25,7 +26,7 @@
 {{ ui.stat('Days left', (ov.days_left|string), sub='of ' ~ ov.period.days ~ ' · ' ~ words.ends, icon='calendar', id='kpi-days') }}
 {%- set ch = p.change %}
 {%- if ch is not none %}
-{%- set compare_sub = ui.money_text(p.spent, cents=false) ~ ' so far, ' ~ ui.money_text(p.previous_spent, cents=false) ~ ' by ' ~ (p.previous_through|date_short) ~ (' (history starts mid-' ~ words.unit ~ ')' if p.previous_partial else '') %}
+{%- set compare_sub = 'all spending: ' ~ ui.money_text(p.spent, cents=false) ~ ' so far, ' ~ ui.money_text(p.previous_spent, cents=false) ~ ' by ' ~ (p.previous_through|date_short) ~ (' (history starts mid-' ~ words.unit ~ ')' if p.previous_partial else '') %}
 {{ ui.stat('Compared with ' ~ words.previous, ui.money(ch.amount, signed=true, cents=false, tone='neutral'), sub=compare_sub, icon=('arrow-up' if ch.amount > 0 else ('arrow-down' if ch.amount < 0 else 'minus')), id='kpi-compare') }}
 {%- else %}
 {{ ui.stat('Compared with ' ~ words.previous, ui.money(none), sub='no spending history before this ' ~ words.unit, icon='clock', id='kpi-compare') }}

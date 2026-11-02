@@ -8,7 +8,7 @@ import re
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from budgetapp.models import Budget
 from budgetapp.periods import month_period, year_period
@@ -809,10 +809,87 @@ class TestRollover:
         assert line(overview(db, SEP, today=TODAY), travel).carry_in == D("0.00")
         assert line(overview(db, OCT, today=TODAY), travel).carry_in == D("100.00")
 
-    def test_the_chain_is_bounded(self, db, cats):
+    def test_the_chain_runs_back_to_its_first_period(self, db, cats):
         make_budget(db, cats["home"], "10.00", effective_from=day("2010-01-01"), rollover=True)
         carry = line(overview(db, OCT, today=TODAY), cats["home"]).carry_in
-        assert carry == D("10.00") * budgets.MAX_ROLLOVER_PERIODS
+        assert carry == D("2010.00")  # Jan 2010 – Sep 2026: 201 months of $10
+
+    def test_a_chain_longer_than_five_years_keeps_its_oldest_leftovers(
+        self, db, cats, account, spend, freeze_today
+    ):
+        """Review finding: the chain stopped 60 periods back, so from the 61st rollover period
+        on the oldest leftovers dropped out (Budgets, Dashboard and alerts)."""
+        today = freeze_today("2026-11-15")
+        groceries = cats["groceries"]
+        first = budgets.period_for(db, day("2021-01-10"))  # set up as the Budgets page does
+        set_budget(db, groceries.id, D("100.00"), effective_from=first, today=today)
+        set_rollover(db, groceries.id, True, effective_from=first, today=today)
+        month = first
+        while month.end < today:
+            spend(groceries, "90.00", month.start + dt.timedelta(days=9))
+            month = budgets.next_period(db, month)
+        current = line(overview(db, budgets.current_period(db), today=today), groceries)
+        assert (current.carry_in, current.available) == (D("700.00"), D("800.00"))  # 70 × $10
+
+    def test_a_long_chain_in_statement_mode_restarts_after_a_flagged_cycle(
+        self, db, cats, account, spend, freeze_today
+    ):
+        today = freeze_today("2026-11-15")
+        home = cats["home"]
+        closing = day("2019-12-27")
+        while closing < today:
+            if closing != day("2020-03-27"):  # missing: Feb 28 – Apr 27, 2020 is flagged
+                make_statement(db, account, closing)
+            closing = (closing + dt.timedelta(days=31)).replace(day=27)
+        statement_mode(db, account, closing_day=27)
+        make_budget(db, home, "100.00", effective_from=day("2020-01-01"), rollover=True)
+        cycle = budgets.period_for(db, day("2020-01-10"))
+        while cycle.end < today:
+            spend(home, "90.00", cycle.start + dt.timedelta(days=9))
+            cycle = budgets.next_period(db, cycle)
+        current = budgets.current_period(db)
+        assert (current.start, current.end) == (day("2026-10-28"), day("2026-11-27"))
+        # Apr 28, 2020 – Oct 27, 2026: 78 cycles of $10; nothing from before the flagged one.
+        assert line(overview(db, current, today=today), home).carry_in == D("780.00")
+
+    def test_a_statement_chain_stops_where_no_closing_dates_are_generated(self, db, cats, account):
+        """Closing dates are generated 50 years back from the first statement; before that,
+        statement mode falls back to calendar months, which overlap the first generated cycle."""
+        make_statement(db, account, "2025-01-27")
+        statement_mode(db, account, closing_day=27)
+        make_budget(db, cats["home"], "10.00", effective_from=day("1950-01-01"), rollover=True)
+        assert budgets.period_for(db, day("1975-01-27")) == month_period(1975, 1)
+        current = budgets.current_period(db, today=TODAY)
+        # Jan 28, 1975 – Sep 27, 2026: 620 cycles of $10.
+        assert line(overview(db, current, today=TODAY), cats["home"]).carry_in == D("6200.00")
+
+    def test_a_long_chain_reads_its_spending_in_one_query(self, db, cats, spend):
+        """Review finding (PERF-1): each earlier period of a rollover chain was its own two
+        queries, so the Dashboard and Budgets pages slowed down as the chains grew."""
+        start = day("2023-11-01")
+        for category in (cats["groceries"], cats["dining"], cats["home"]):
+            make_budget(db, category, "100.00", effective_from=start, rollover=True)
+        month = month_period(2023, 11)
+        while month.start < OCT.start:
+            spend(cats["groceries"], "90.00", month.start + dt.timedelta(days=9))
+            month = budgets.next_period(db, month)
+        statements: list[str] = []
+
+        def count(conn, cursor, statement, *args):
+            statements.append(statement)
+
+        connection = db.connection()
+        event.listen(connection, "before_cursor_execute", count)
+        try:
+            short = line(overview(db, month_period(2023, 12), today=TODAY), cats["groceries"])
+            short_count, statements[:] = len(statements), []
+            long = line(overview(db, OCT, today=TODAY), cats["groceries"])
+            long_count = len(statements)
+        finally:
+            event.remove(connection, "before_cursor_execute", count)
+        assert (short.carry_in, long.carry_in) == (D("10.00"), D("350.00"))  # 1 and 35 periods
+        assert line(overview(db, OCT, today=TODAY), cats["home"]).carry_in == D("3500.00")
+        assert long_count <= short_count, statements
 
     def test_rollover_in_statement_mode_steps_through_cycles(self, db, cats, account, spend):
         statement_mode(db, account, "2026-08-27", "2026-09-27", closing_day=27)
@@ -999,6 +1076,72 @@ class TestAnnual:
         assert (only.year, only.as_of, only.spent_total) == (2026, day("2026-12-27"), D("1000.00"))
         (only,) = budgets.annual_overviews(db, month_period(2026, 12), today=today)
         assert (only.year, only.as_of) == (2026, day("2026-12-31"))
+
+    @pytest.fixture
+    def year_end(self, db, cats, account, spend):
+        """Statement cycle Dec 28, 2026 – Jan 27, 2027 with an overall target; Gifts $25 on
+        Dec 29 and $10 on Jan 10."""
+        make_budget(db, None, "3000.00", effective_from=day("2026-01-01"))
+        spend(cats["gifts"], "25.00", "2026-12-29")
+        spend(cats["gifts"], "10.00", "2027-01-10")
+        statement_mode(db, account, "2026-11-27", "2026-12-27", closing_day=27)
+        cycle = budgets.period_for(db, day("2027-01-05"))
+        assert (cycle.start, cycle.end) == (day("2026-12-28"), day("2027-01-27"))
+        return cycle
+
+    def tallies(self, db, cycle, today):
+        return {
+            a.year: {entry.category.name: entry.spent for entry in a.lines}
+            for a in budgets.annual_overviews(db, cycle, today=today)
+        }
+
+    def test_an_annual_budget_from_january_leaves_late_december_in_the_target(
+        self, db, cats, year_end
+    ):
+        """Review finding: a cycle across Dec 31 was classified on its last day, so Dec 29 went
+        to Gifts' 2027 annual budget, whose tally starts on Jan 1: it was in no figure."""
+        gifts, today = cats["gifts"], day("2027-02-15")
+        set_budget(db, gifts.id, D("800.00"), effective_from=year_end, period=ANNUAL)
+        result = overview(db, year_end, today=today)
+        assert (result.overall.spent, result.totals.annual_spent) == (D("25.00"), D("10.00"))
+        assert [(u.category.name, u.spent) for u in result.unbudgeted] == [
+            ("Gifts & Donations", D("25.00"))
+        ]
+        assert result.totals.unbudgeted_spent == D("25.00")
+        assert gifts.id in result.annual_category_ids
+        assert result.spent_dates(gifts.id) == (day("2026-12-28"), day("2026-12-31"))
+        assert self.tallies(db, year_end, today) == {2026: {}, 2027: {"Gifts & Donations": 10}}
+
+    def test_a_monthly_budget_from_january_leaves_late_december_to_the_annual_one(
+        self, db, cats, year_end
+    ):
+        """The reverse: Dec 29 is in 2026's annual tally, so the monthly line (and its rollover)
+        counts only January."""
+        gifts, today = cats["gifts"], day("2027-02-15")
+        make_budget(db, gifts, "800.00", effective_from=day("2026-01-01"), period=ANNUAL)
+        set_budget(db, gifts.id, D("100.00"), effective_from=year_end)
+        set_rollover(db, gifts.id, True, effective_from=year_end)
+        result = overview(db, year_end, today=today)
+        gifts_line = line(result, gifts)
+        assert (gifts_line.spent, gifts_line.remaining) == (D("10.00"), D("90.00"))
+        assert (result.totals.annual_spent, result.overall.spent) == (D("25.00"), D("10.00"))
+        assert result.totals.spent == D("35.00") and result.unbudgeted == ()
+        assert gifts.id not in result.annual_category_ids
+        assert result.spent_dates(gifts.id) == (day("2027-01-01"), day("2027-01-27"))
+        assert self.tallies(db, year_end, today) == {2026: {"Gifts & Donations": 25}, 2027: {}}
+        following = overview(db, budgets.next_period(db, year_end), today=today)
+        assert line(following, gifts).carry_in == D("90.00")
+
+    def test_one_type_on_both_sides_of_the_year_end_splits_nothing(self, db, cats, year_end):
+        gifts, today = cats["gifts"], day("2027-02-15")
+        make_budget(db, gifts, "800.00", effective_from=day("2026-01-01"), period=ANNUAL)
+        result = overview(db, year_end, today=today)
+        assert (result.totals.annual_spent, result.overall.spent) == (D("35.00"), D("0.00"))
+        assert result.spent_dates(gifts.id) == (year_end.start, year_end.end)
+        assert self.tallies(db, year_end, today) == {
+            2026: {"Gifts & Donations": 25},
+            2027: {"Gifts & Donations": 10},
+        }
 
     def test_over_an_annual_budget(self, db, cats, spend):
         make_budget(db, cats["gifts"], "100.00", period=ANNUAL)
