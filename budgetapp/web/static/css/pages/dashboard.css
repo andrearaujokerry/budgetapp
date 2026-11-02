@@ -1,0 +1,145 @@
+/* Dashboard (INS-1): rows of a budget or category (name left, figure right), the ranked bars of
+   the top categories and small notes. Tiles, cards, meters and tables come from app.css. */
+
+.dash-grid {
+  align-items: start;
+}
+
+.dash-list,
+.rank-list {
+  display: grid;
+  gap: var(--sp-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rank-list {
+  gap: var(--sp-3);
+}
+
+.dash-budget,
+.rank-list__row {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* A row: the category (or merchant) on the left, its figure on the right. The name truncates;
+   the figure never does, so amounts stay readable on a phone. */
+.dash-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.dash-row__name {
+  min-width: 0;
+}
+
+.dash-row__name .cat__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+a.dash-row__name:hover .cat__name {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.dash-row__value {
+  display: inline-flex;
+  flex: none;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rank-list__pct {
+  min-width: 2.75rem;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+/* Ranked bars: one hue, scaled to the largest category. */
+.rank-list__bar {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--track);
+}
+
+.rank-list__bar > span {
+  display: block;
+  width: calc(var(--value) * 1%);
+  min-width: 2px;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--chart-accent);
+}
+
+.rank-list__bar--rest > span {
+  background: var(--chart-other);
+}
+
+.dash-budget__none {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.dash-budget .budget-carry {
+  display: block;
+  font-size: var(--fs-xs);
+}
+
+.dash-budget .budget-carry .icon {
+  margin-right: 2px;
+  vertical-align: -2px;
+}
+
+.dash-note {
+  margin: 0;
+}
+
+.dash-more {
+  margin: 0;
+  padding: var(--sp-2) 20px var(--sp-3);
+}
+
+.dash-link {
+  color: inherit;
+}
+
+.dash-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.dash-total {
+  flex: 1;
+}
+
+@media (max-width: 599px) {
+  .dash-more {
+    padding-inline: 16px;
+  }
+
+  /* Phones: the four headline tiles sit two by two, like the Budgets page's. */
+  .dash-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (forced-colors: active) {
+  .rank-list__bar > span {
+    background: CanvasText;
+  }
+}

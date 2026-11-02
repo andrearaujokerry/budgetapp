@@ -1,0 +1,35 @@
+{#- Top categories this period (period_spending, hidden categories included and marked):
+    ranked bars scaled to the largest, one hue; the dot carries the category's colour. The
+    remainder row makes the list add up to the period's total. -#}
+{%- import "components/ui.html" as ui -%}
+{%- set top = d.top_categories -%}
+{%- set largest = top.rows[0].amount if top.rows else 0 -%}
+{%- set footer %}<div class="split text-sm dash-total"><span class="muted">All spending</span><span class="strong">{{ ui.money(top.total) }}</span></div>{% endset -%}
+{% call ui.card('Top categories', subtitle=words.this ~ ' · share of all spending', footer=footer if top.rows else none, id='dash-categories') %}
+{%- if top.rows %}
+<ol class="rank-list" id="dash-category-list">
+{%- for row in top.rows %}
+<li class="rank-list__row" id="dash-cat-{{ row.category.id }}">
+<div class="dash-row">
+{{ ui.category_badge(row.category, href=spent_href(row.category.id), class='dash-row__name') }}
+<span class="dash-row__value">{{ ui.money(row.amount) }}{% if row.percent is not none %}<span class="rank-list__pct">{{ row.percent|pct }}</span>{% endif %}</span>
+</div>
+<div class="rank-list__bar" aria-hidden="true"><span style="--value: {{ '%.2f'|format((row.amount / largest * 100)|float) }}"></span></div>
+</li>
+{%- endfor %}
+{%- if top.rest_count %}
+<li class="rank-list__row rank-list__row--rest" id="dash-cat-rest">
+<div class="dash-row">
+<span class="dash-row__name muted">{{ top.rest_count|pluralize('more category', 'more categories') }}</span>
+<span class="dash-row__value">{{ ui.money(top.rest_amount) }}</span>
+</div>
+{%- if top.rest_amount > 0 %}
+<div class="rank-list__bar rank-list__bar--rest" aria-hidden="true"><span style="--value: {{ '%.2f'|format(([top.rest_amount / largest * 100, 100]|min)|float) }}"></span></div>
+{%- endif %}
+</li>
+{%- endif %}
+</ol>
+{%- else %}
+{{ ui.empty_state('No spending yet this ' ~ words.unit, 'Charges you make from ' ~ (ov.period.start|date_long) ~ ' on are listed here by category.', icon='tag', compact=true) }}
+{%- endif %}
+{% endcall %}

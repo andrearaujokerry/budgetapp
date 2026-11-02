@@ -1,0 +1,149 @@
+/* Trends (INS-2): the change cells, the category heading and the month grid (sticky category
+   column, the month in progress tinted). Everything else comes from app.css. */
+
+.trends-results > * + * {
+  margin-top: 24px;
+}
+
+.trends-results > div:empty {
+  display: none;
+}
+
+.trends-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2) var(--sp-4);
+}
+
+.trends-heading .section__title {
+  margin: 0;
+  font-size: var(--fs-xl);
+}
+
+.trends-heading .cat__dot {
+  width: 12px;
+  height: 12px;
+}
+
+.trends-link,
+.trends-amount {
+  color: inherit;
+}
+
+.trends-amount {
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+
+.trends-link:hover .cat__name,
+.trends-amount:hover {
+  text-decoration: underline;
+  text-decoration-color: currentColor;
+  text-underline-offset: 3px;
+}
+
+/* A change: the signed amount with its arrow, the percentage under it. */
+.trend-change {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.trend-change .icon {
+  flex: none;
+}
+
+.trend-change--up .icon {
+  color: var(--over-text);
+}
+
+.trend-change--down .icon,
+.trend-change--gone .icon {
+  color: var(--ok-text);
+}
+
+.trend-change__note {
+  font-variant-numeric: tabular-nums;
+}
+
+.trends-table th .table__secondary {
+  font-weight: 400;
+}
+
+.trends-footnote {
+  margin: var(--sp-3) 0 0;
+}
+
+/* The month grid: the category column stays in view while the months scroll sideways. */
+.trends-grid {
+  min-width: max-content;
+}
+
+.trends-grid th,
+.trends-grid td {
+  white-space: nowrap;
+}
+
+.trends-grid .trends-grid__name {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  max-width: 13rem;
+  background: var(--surface);
+  text-align: left;
+  font-weight: var(--fw-medium);
+}
+
+.trends-grid thead .trends-grid__name {
+  z-index: 2;
+}
+
+.trends-grid tfoot .trends-grid__name {
+  background: var(--surface-sunken);
+}
+
+.trends-grid .trends-grid__name .cat {
+  max-width: 12rem;
+}
+
+.trends-grid .trends-grid__name .cat__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trends-grid abbr {
+  text-decoration: none;
+}
+
+.trends-grid__current {
+  background: var(--surface-sunken);
+}
+
+.trends-grid__sum {
+  border-right: 1px solid var(--border);
+}
+
+.trends-zero {
+  color: var(--text-muted);
+}
+
+.trend-mark {
+  margin-left: 1px;
+  color: var(--text-muted);
+}
+
+@media (max-width: 599px) {
+  #trends-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .trends-grid .trends-grid__name,
+  .trends-grid .trends-grid__name .cat {
+    max-width: 8.5rem;
+  }
+}
