@@ -93,6 +93,11 @@
   vertical-align: -2px;
 }
 
+/* The note of a cycle across Dec 31 (bud.split_note) is a sentence: it wraps instead. */
+.budget-split {
+  white-space: normal;
+}
+
 .budget-meter-note {
   display: inline-flex;
   align-items: center;
