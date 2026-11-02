@@ -114,9 +114,9 @@ response (`Cache-Control: no-store`, `Vary: HX-Request`). Your keys win over the
 (plain strings are escaped). `headers`: extra response headers, e.g.
 `{"HX-Trigger": "dialog:close"}`.
 
-`error_page(request, status, title, message=None, *, command=None, icon="alert", refresh=False)`
-renders the generic notice page (`errors/error.html`: the title is the page's only `<h1>`) for
-the rare case a route wants one; usually raise `HTTPException` instead (section 7).
+`error_page(request, status, title, message=None, *, command=None, icon="alert", refresh=False,
+headers=None)` renders the generic notice page (`errors/error.html`: the title is the page's only
+`<h1>`) for the rare case a route wants one; usually raise `HTTPException` instead (section 7).
 
 The layout shows the reconnect and consent banners on every page except the Connection page
 (`active_nav="connection"`), which must show those states and their actions itself.
@@ -364,8 +364,9 @@ def test_saving_redirects_with_a_toast(client):
   `./run start --no-browser` skips the browser.
 - `./run serve`: only the server (no migration). `-v` shows requests in the terminal; the log
   is `~/Library/Logs/budgetapp/web-sandbox.log`. Ctrl-C stops it.
-- `./run live` (`start --env production`): production, from the installed copy only (the OPS
-  package builds it). `serve --env production` refuses to run from the git checkout.
+- `./run live` (`start --env production`): production, from the installed copy only
+  (`./run install-agents` or `./run live` itself builds it). `serve --env production` refuses
+  to run from the git checkout.
 - **Realistic data:** `./run demo create <id>` then `./run serve --demo <id> --port <port>`
   (default 8800; your package's port is in PLAN.md). It serves the demo database
   `budgetapp_test_demo_<id>` with the orange "Demo data" bar, no Keychain and no network: Plaid
