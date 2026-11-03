@@ -38,12 +38,16 @@ list](maintenance.md#troubleshooting).
 - [ ] Your Plaid team is on the Trial plan, and the Dashboard shows a Production secret.
 - [ ] In Plaid's Dashboard, these three things are done. The Connection page lists them again,
       with links, right before you link:
-  1. **A Data Transparency use case is selected**: Dashboard → Link → Customization → Data
-     Transparency Messaging. In production, Plaid's window doesn't open without one.
-  2. **The App and Company profiles are complete**: Dashboard → Compliance Center, the App
-     Profile and Company Profile tabs.
+  1. **A Data Transparency use case is selected**: Dashboard → Link
+     (https://dashboard.plaid.com/link/data-transparency-v5). In the Link customization named
+     "default" (the one the app uses), open its Data Transparency section, select the use case
+     closest to budgeting, and save. In production, Plaid's window doesn't open without one.
+  2. **The App and Company profiles are complete**: Dashboard → Settings → Compliance Center, the
+     App Profile and Company Profile tabs
+     (https://dashboard.plaid.com/settings/company/compliance?tab=companyProfile). Most of it was
+     filled in when you signed up for the Trial plan.
   3. **American Express shows as enabled for OAuth**: the Dashboard's US OAuth institutions page
-     (https://dashboard.plaid.com/activity/status/oauth-institutions).
+     (https://dashboard.plaid.com/settings/compliance/us-oauth-institutions).
 
 ## 1. Save the Production secret
 

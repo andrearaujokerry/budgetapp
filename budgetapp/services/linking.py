@@ -91,21 +91,22 @@ CHECKLIST: tuple[tuple[str, str, str, str], ...] = (
     (
         "use_case",
         "A Data Transparency use case is selected",
-        "Dashboard → Link → Customization → Data Transparency Messaging. In production Link "
-        "doesn't open without one.",
-        "https://dashboard.plaid.com/",
+        "Dashboard → Link: in the Link customization named “default”, open Data Transparency "
+        "and select a use case, then save. In production Link doesn't open without one.",
+        "https://dashboard.plaid.com/link/data-transparency-v5",
     ),
     (
         "profiles",
         "The App and Company profiles are complete",
-        "Dashboard → Compliance Center: fill in the App Profile and Company Profile tabs.",
-        "https://dashboard.plaid.com/",
+        "Dashboard → Settings → Compliance Center: fill in the App Profile and Company Profile "
+        "tabs.",
+        "https://dashboard.plaid.com/settings/company/compliance?tab=companyProfile",
     ),
     (
         "amex_oauth",
         "American Express shows as enabled for OAuth",
         "Dashboard → US OAuth institutions: American Express must say enabled.",
-        "https://dashboard.plaid.com/activity/status/oauth-institutions",
+        "https://dashboard.plaid.com/settings/compliance/us-oauth-institutions",
     ),
 )
 
