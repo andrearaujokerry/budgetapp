@@ -616,7 +616,8 @@ def test_the_link_checklist_is_the_apps() -> None:
     text = text_of(REPO / "docs" / "going-live.md")
     for _key, label, _detail, _href in linking.CHECKLIST:
         assert label in text, label
-    assert "https://dashboard.plaid.com/activity/status/oauth-institutions" in text
+    for _key, _label, _detail, href in linking.CHECKLIST:
+        assert href in text, href
     assert "This uses 1 of your 10 Plaid connections, permanently." in text
 
 
