@@ -117,11 +117,10 @@ def test_production_shows_the_checklist_and_confirms_the_one_time_link(prod_clie
     assert "This uses 1 of your 10 Plaid connections." in words
     for label in (
         "A Data Transparency use case is selected",
-        "The App and Company profiles are complete",
-        "American Express shows as enabled for OAuth",
+        "Plaid gives your team access to American Express",
     ):
         assert words.count(label) == 2  # the checklist card and the confirm dialog's boxes
-    assert html.count('href="https://dashboard.plaid.com/') == 3
+    assert html.count('href="https://dashboard.plaid.com/') == 2
     assert 'hx-get="/connection/preflight" hx-trigger="load"' in html
     assert 'data-dialog-open="confirm-link"' in html  # the page's button opens the dialog …
     dialog = html[html.index('<dialog id="confirm-link"') :]

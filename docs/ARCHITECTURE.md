@@ -684,8 +684,8 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   restored database), the Connection page offers "Re-attach existing connection" (rebuild the row
   from `/item/get` and `/accounts/get`, sync from a null cursor, reconcile) — never a new link.
 - **Pre-flight.** Before the first production link the Connection page shows Plaid's checklist
-  (Data Transparency use case selected, App and Company profiles complete, American Express
-  enabled on the dashboard's US OAuth institutions page) and
+  (a Data Transparency use case selected; American Express access, which the Trial plan grants
+  automatically: the Dashboard's OAuth institutions tab says no action is needed) and
   `search_institutions('American Express', ['liabilities'])`. A Link attempt that fails these
   checks creates no access token and uses no connection.
 - **Exchange.** In production a public token is not exchanged while any trace of a connection

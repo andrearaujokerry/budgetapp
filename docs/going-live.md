@@ -36,18 +36,17 @@ list](maintenance.md#troubleshooting).
 - [ ] The Sandbox app links a test bank and syncs it, and a second sync adds nothing.
 - [ ] FileVault is on.
 - [ ] Your Plaid team is on the Trial plan, and the Dashboard shows a Production secret.
-- [ ] In Plaid's Dashboard, these three things are done. The Connection page lists them again,
+- [ ] In Plaid's Dashboard, these two things are done. The Connection page lists them again,
       with links, right before you link:
-  1. **A Data Transparency use case is selected**: Dashboard → Link
-     (https://dashboard.plaid.com/link/data-transparency-v5). In the Link customization named
-     "default" (the one the app uses), open its Data Transparency section, select the use case
-     closest to budgeting, and save. In production, Plaid's window doesn't open without one.
-  2. **The App and Company profiles are complete**: Dashboard → Settings → Compliance Center, the
-     App Profile and Company Profile tabs
-     (https://dashboard.plaid.com/settings/company/compliance?tab=companyProfile). Most of it was
-     filled in when you signed up for the Trial plan.
-  3. **American Express shows as enabled for OAuth**: the Dashboard's US OAuth institutions page
-     (https://dashboard.plaid.com/settings/compliance/us-oauth-institutions).
+  1. **A Data Transparency use case is selected**: Customize → Link, the Data Transparency
+     Messaging section (https://dashboard.plaid.com/link/data-transparency-v5). If no use case is
+     selected, pick the one closest to budgeting and save. Without one, Plaid's window fails in
+     production ("something went wrong") before you pick a bank. That creates no connection, so if
+     you can't find the setting, trying the link costs nothing.
+  2. **Plaid gives your team access to American Express**: Institutions → OAuth institutions
+     (https://dashboard.plaid.com/activity/status?tab=oauth). On the Trial plan it says "No action
+     is needed to access banks through Plaid's free trial." On a paid plan, American Express must
+     show as enabled there, and Plaid also asks for the App and Company profiles under Settings.
 
 ## 1. Save the Production secret
 
