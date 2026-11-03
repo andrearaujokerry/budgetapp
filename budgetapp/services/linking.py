@@ -86,27 +86,24 @@ SANDBOX_INSTITUTIONS = {
 RECENT_RUNS = 20
 LOST_EDITS_LIMIT = 50
 
-#: The production pre-flight (RESEARCH T2.8): done by hand in Plaid's Dashboard before the link.
+#: The production pre-flight, checked by hand in Plaid's Dashboard before the link. On the Trial
+#: plan Plaid grants OAuth banks automatically (its OAuth institutions tab says "No action is needed
+#: to access banks through Plaid's free trial"), so the use case is the only setting left to make.
 CHECKLIST: tuple[tuple[str, str, str, str], ...] = (
     (
         "use_case",
         "A Data Transparency use case is selected",
-        "Dashboard → Link: in the Link customization named “default”, open Data Transparency "
-        "and select a use case, then save. In production Link doesn't open without one.",
+        "Dashboard → Customize → Link, the Data Transparency Messaging section. Without a use "
+        "case, Plaid's window fails in production before you pick a bank, which creates no "
+        "connection.",
         "https://dashboard.plaid.com/link/data-transparency-v5",
     ),
     (
-        "profiles",
-        "The App and Company profiles are complete",
-        "Dashboard → Settings → Compliance Center: fill in the App Profile and Company Profile "
-        "tabs.",
-        "https://dashboard.plaid.com/settings/company/compliance?tab=companyProfile",
-    ),
-    (
         "amex_oauth",
-        "American Express shows as enabled for OAuth",
-        "Dashboard → US OAuth institutions: American Express must say enabled.",
-        "https://dashboard.plaid.com/settings/compliance/us-oauth-institutions",
+        "Plaid gives your team access to American Express",
+        "Dashboard → Institutions → OAuth institutions. On the Trial plan it says no action is "
+        "needed to access banks; on a paid plan American Express must show as enabled.",
+        "https://dashboard.plaid.com/activity/status?tab=oauth",
     ),
 )
 

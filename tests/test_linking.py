@@ -704,7 +704,7 @@ def test_sandbox_test_items_are_refused_in_production(
 
 def test_preflight_finds_american_express_with_liabilities(fake_plaid, production):
     result = linking.preflight(fake_plaid, production)
-    assert [c.key for c in result.checklist] == ["use_case", "profiles", "amex_oauth"]
+    assert [c.key for c in result.checklist] == ["use_case", "amex_oauth"]
     assert all(c.href.startswith("https://dashboard.plaid.com/") for c in result.checklist)
     assert result.institution.status == "ok" and result.institution.oauth is True
     assert fake_plaid.calls_to("search_institutions") == [
