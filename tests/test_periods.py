@@ -52,7 +52,11 @@ class TestCalendarHelpers:
         assert days_left(october, D("2026-10-31")) == 1
         assert days_left(october, D("2026-11-01")) == 0
         assert days_left(october, D("2026-09-30")) == 31
-        assert days_elapsed(october, D("2026-10-10")) == 9
+        assert days_elapsed(october, D("2026-10-10")) == 9  # Oct 1–9; today isn't counted
+        assert days_elapsed(october, D("2026-10-01")) == 0
+        assert days_elapsed(october, D("2026-10-31")) == 30
+        assert days_elapsed(october, D("2026-09-30")) == 0
+        assert days_elapsed(october, D("2026-11-01")) == 31
 
     def test_months_between(self):
         months = months_between(D("2025-11-20"), D("2026-02-03"))
@@ -230,3 +234,18 @@ class TestBudgetPeriods:
         custom = Period(D("2026-01-01"), D("2026-01-10"))
         assert previous_period(custom) == Period(D("2025-12-22"), D("2025-12-31"))
         assert next_period(custom) == Period(D("2026-01-11"), D("2026-01-20"))
+
+
+def test_statement_periods_need_their_closing_dates():
+    """A missing argument must not silently turn a statement cycle into a calendar month."""
+    stored = [date(2026, 9, 27), date(2026, 10, 27)]
+    cycle = budget_period_for(date(2026, 10, 10), mode="statement", closings=stored, closing_day=27)
+    assert cycle.kind == "statement"
+    for step in (previous_period, next_period):
+        with pytest.raises(ValueError, match="closing"):
+            step(cycle)
+        with pytest.raises(ValueError, match="closing"):
+            step(cycle, closings=iter(()))  # an empty iterator is no closing dates either
+    before = previous_period(cycle, closings=iter(stored), closing_day=27)
+    assert before.kind == "statement" and before.end == date(2026, 9, 27)
+    assert next_period(cycle, closing_day=27).kind == "statement"

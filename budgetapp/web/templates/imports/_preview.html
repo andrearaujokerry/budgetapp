@@ -1,0 +1,134 @@
+{#- The preview of an uploaded file (nothing is imported until "Import"). Needs `preview`. -#}
+{% import "components/ui.html" as ui %}
+{% set p = preview %}
+{%- macro count(n) %}{{ "{:,}".format(n) }}{% endmacro -%}
+{%- macro rows_table(group, title, intro) -%}
+<section class="preview-group" aria-labelledby="group-{{ group.key }}">
+<div class="preview-group__header">
+<h3 class="preview-group__title" id="group-{{ group.key }}">{{ title }}</h3>
+<span class="text-sm muted">{% if group.count > group.sample|length %}First {{ group.sample|length }} of {{ count(group.count) }}{% else %}{{ group.count|pluralize("row") }}{% endif %}</span>
+</div>
+{%- if intro %}<p class="text-sm muted">{{ intro }}</p>{% endif %}
+<div class="table-wrap">
+<table class="table table--compact">
+<thead><tr>
+<th scope="col" class="shrink col-optional-sm">Row</th>
+<th scope="col" class="shrink col-optional-sm">Date</th>
+<th scope="col" class="col-grow">Description</th>
+{%- if group.key == "matched" %}<th scope="col" class="col-optional-sm">Plaid transaction</th>{% endif %}
+{%- if group.key == "changed" %}<th scope="col" class="col-optional-sm">Imported before</th>{% endif %}
+<th scope="col" class="col-optional-md">Card member</th>
+<th scope="col" class="col-optional-lg">Amex category</th>
+<th scope="col" class="num">Amount</th>
+</tr></thead>
+<tbody>
+{%- for row in group.sample %}
+<tr>
+<td class="shrink tabular muted col-optional-sm">{{ row.row_number }}</td>
+<td class="table__date col-optional-sm">{{ row.date|date_long }}</td>
+{%- if row.other_account %}{% set detail = "Already in " ~ row.other_account %}
+{%- elif row.plaid_pending %}{% set detail = "Pending in Plaid: " ~ (row.plaid_name or "same amount") ~ " · " ~ (row.plaid_date|date_long) %}
+{%- elif row.original_description and row.original_description != row.name %}{% set detail = row.original_description %}
+{%- else %}{% set detail = "" %}{% endif %}
+<td class="col-grow"><span class="table__primary">{{ row.name }}</span>
+{%- if detail %}<span class="table__secondary"><span class="import-phone">{{ row.date|date_long }} · </span>{{ detail }}</span>
+{%- else %}<span class="table__secondary import-phone-line">{{ row.date|date_long }}</span>{% endif %}</td>
+{%- if group.key == "matched" %}<td class="col-optional-sm"><span class="table__primary">{{ row.plaid_name or "—" }}</span><span class="table__secondary">{{ row.plaid_date|date_long }}</span></td>{% endif %}
+{%- if group.key == "changed" %}<td class="col-optional-sm nowrap">{{ ui.money(row.earlier_amount) }} <span class="muted">on {{ row.earlier_date|date_long }}</span></td>{% endif %}
+<td class="col-optional-md nowrap">{{ row.account_owner or "—" }}</td>
+<td class="col-optional-lg nowrap">{{ row.external_category or "—" }}</td>
+<td class="num">{{ ui.money(row.amount) }}</td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+</section>
+{%- endmacro -%}
+
+{% set subtitle = "Into " ~ p.account_label ~ (" (new account)" if p.new_account else "") ~ " · " ~ (p.row_count|pluralize("row")) ~ ((" · " ~ (p.date_min|date_long) ~ " – " ~ (p.date_max|date_long)) if p.date_min else "") %}
+{% call ui.card("Preview: " ~ p.filename, subtitle, id="preview") %}
+<div class="stack">
+<div class="grid preview-stats" style="--grid-min: 150px">
+{{ ui.stat("New", count(p.new), sub="will be added", icon="plus") }}
+{%- if p.linked %}
+{{ ui.stat("From Plaid", count(p.matched), sub="already synced; merged", icon="link") }}
+{%- endif %}
+{%- if p.suspects %}
+{%- if p.suspects_pending == p.suspects %}{% set held_sub = "pending in Plaid; they merge" %}
+{%- elif p.suspects_pending %}{% set held_sub = count(p.suspects_pending) ~ " of them pending in Plaid" %}
+{%- else %}{% set held_sub = "no matching Plaid charge" %}{% endif %}
+{{ ui.stat("Held for review", count(p.suspects), sub=held_sub, tone="warn") }}
+{%- endif %}
+{{ ui.stat("Already imported", count(p.duplicates), sub="skipped", icon="check") }}
+{%- if p.changed %}
+{{ ui.stat("Changed", count(p.changed), sub="skipped; check them", tone="warn") }}
+{%- endif %}
+{{ ui.stat("Errors", count(p.errors|length), sub="rows skipped" if p.errors else "none", tone="over" if p.errors else none, icon=none if p.errors else "check-circle") }}
+</div>
+
+{%- if p.same_file_imported_at %}
+{{ ui.banner("info", "Rows imported then are skipped now.", title="You imported this exact file on " ~ (p.same_file_imported_at|date_long) ~ ".") }}
+{%- endif %}
+{%- if p.new_account %}
+{{ ui.banner("info", "Once your card is linked, attach this account to it here: the history then shows as one card, and the rows Plaid also has are merged.", title="A CSV-only account “" ~ p.account_label ~ "” will be created.") }}
+{%- endif %}
+{%- if p.suspects %}
+{%- set held_text = "They fall inside the period Plaid already covers but match no posted Plaid transaction, so they stay out of every total until you keep or delete them on this page." %}
+{%- if p.suspects_pending %}{% set held_text = held_text ~ " Rows marked “Pending in Plaid” merge on their own once Plaid’s charge posts: leave those." %}{% endif %}
+{{ ui.banner("warn", held_text, title=(p.suspects|pluralize("row")) ~ " will be held for review.") }}
+{%- endif %}
+{%- if p.changed %}
+{{ ui.banner("warn", "Their Reference was imported before with a different date or amount, so they are skipped. Check them against your statement.", title=(p.changed|pluralize("row")) ~ " changed since an earlier import.") }}
+{%- endif %}
+{%- if not p.can_import %}
+{{ ui.banner("ok", "Every row of this file is already here (or can’t be read).", title="Nothing new to import.") }}
+{%- endif %}
+
+{%- if p.group("new").count %}{{ rows_table(p.group("new"), "Will be added", none) }}{% endif %}
+{%- if p.group("suspect").count %}{{ rows_table(p.group("suspect"), "Will be added, held for review", "Inside Plaid’s history without a matching posted Plaid charge.") }}{% endif %}
+{%- if p.group("matched").count %}{{ rows_table(p.group("matched"), "Already synced from Plaid", "Each is merged into its Plaid transaction (your notes, tags and categories move with it), never stored twice.") }}{% endif %}
+{%- if p.group("duplicate").count %}{{ rows_table(p.group("duplicate"), "Already imported", none) }}{% endif %}
+{%- if p.group("changed").count %}{{ rows_table(p.group("changed"), "Changed since an earlier import", none) }}{% endif %}
+
+{%- if p.errors %}
+<section class="preview-group" aria-labelledby="group-errors">
+<div class="preview-group__header">
+<h3 class="preview-group__title" id="group-errors">Can’t be read</h3>
+<span class="text-sm muted">{% if p.errors|length > max_errors %}First {{ max_errors }} of {{ count(p.errors|length) }}{% else %}{{ p.errors|length|pluralize("row") }}{% endif %}</span>
+</div>
+<div class="table-wrap">
+<table class="table table--compact">
+<thead><tr><th scope="col" class="shrink">Row</th><th scope="col">Problem</th></tr></thead>
+<tbody>
+{%- for error in p.errors[:max_errors] %}
+<tr><td class="shrink tabular">{{ error.row_number }}</td><td>{{ error.reason }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+</section>
+{%- endif %}
+
+<div class="preview-actions">
+{%- if p.can_import %}
+<p class="text-sm">Importing adds <strong>{{ p.to_add|pluralize("transaction") }}</strong>
+{%- if p.suspects %} ({{ count(p.suspects) }} held for review){% endif %}
+{%- if p.matched %} and merges <strong>{{ count(p.matched) }}</strong> with transactions Plaid already has{% endif %}. Rules and Amex categories set each category.</p>
+{%- endif %}
+<div class="form-actions">
+{%- if p.can_import %}
+<form method="post" action="/import/commit">
+<input type="hidden" name="token" value="{{ p.token }}">
+{{ ui.button("Import", variant="primary", type="submit", icon="check") }}
+</form>
+{%- endif %}
+<form method="post" action="/import/discard">
+<input type="hidden" name="token" value="{{ p.token }}">
+{{ ui.button("Cancel" if p.can_import else "Choose another file", variant="ghost" if p.can_import else "secondary", type="submit") }}
+</form>
+<span class="text-sm muted">This preview is kept for 30 minutes.</span>
+</div>
+</div>
+</div>
+{% endcall %}

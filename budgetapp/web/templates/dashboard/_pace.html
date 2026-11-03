@@ -1,0 +1,11 @@
+{#- Spending added up day by day this period, against the previous period (d.pace): all
+    spending, the same total as the Top categories card. The numbers are also in the chart's
+    description and the comparison tile. -#}
+{%- import "components/ui.html" as ui -%}
+{%- set p = d.pace -%}
+{% call ui.card('Spending pace', subtitle='All spending, added up day by day' ~ (', against ' ~ words.previous if p.previous_spent is not none else ''), id='dash-pace') %}
+{% call ui.chart('dash-pace-chart', pace_chart, height=240, label='Line chart of spending added up day by day, ' ~ words.this|lower ~ (' and ' ~ words.previous if p.previous_spent is not none else '')) %}
+<p>{{ words.this }}: {{ ui.money_text(p.spent) }} spent by {{ (d.today if d.today <= ov.period.end else ov.period.end)|date_long }}.
+{%- if p.previous_spent is not none %} {{ words.previous_title }}: {{ ui.money_text(p.previous_spent) }} by {{ p.previous_through|date_long }}, {{ ui.money_text(p.previous_total) }} in all.{% endif %}</p>
+{% endcall %}
+{% endcall %}

@@ -1,0 +1,419 @@
+{#- Living style guide, served at /dev/ui-kit outside production. Every component
+    and state with realistic sample data; copy markup from here. Needs no context
+    beyond the layout's (all sample data is defined below). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% import "components/forms.html" as form %}
+{% block title %}UI kit{% endblock %}
+{% block charts %}yes{% endblock %}
+
+{#- Category colours as stored in the database: a palette slot "cat-1".."cat-16"
+    (theme-aware; what the seeded categories use), "other" (neutral grey), or a
+    custom "#rrggbb" (Pets below). -#}
+{%- set cat = {
+  'groceries': {'id': 1, 'name': 'Groceries', 'color': 'cat-3', 'is_hidden': false},
+  'dining': {'id': 2, 'name': 'Dining & Drinks', 'color': 'cat-2', 'is_hidden': false},
+  'shopping': {'id': 3, 'name': 'Shopping', 'color': 'cat-1', 'is_hidden': false},
+  'travel': {'id': 4, 'name': 'Travel', 'color': 'cat-7', 'is_hidden': false},
+  'transport': {'id': 5, 'name': 'Transportation', 'color': 'cat-9', 'is_hidden': false},
+  'subs': {'id': 6, 'name': 'Subscriptions & Streaming', 'color': 'cat-5', 'is_hidden': false},
+  'fees': {'id': 7, 'name': 'Fees & Interest', 'color': 'cat-8', 'is_hidden': false},
+  'payments': {'id': 8, 'name': 'Card Payments', 'color': 'other', 'is_hidden': false},
+  'gifts': {'id': 9, 'name': 'Gifts & Donations', 'color': 'cat-11', 'is_hidden': true},
+  'pets': {'id': 10, 'name': 'Pets', 'color': '#9f1239', 'is_hidden': false},
+} -%}
+{%- set categories = [cat.groceries, cat.dining, cat.shopping, cat.travel, cat.transport, cat.subs, cat.fees, cat.pets, cat.payments, cat.gifts] -%}
+{%- set txns = [
+  {'date': 'Oct 27', 'name': 'WHOLEFDS MKT 10255', 'merchant': 'Whole Foods Market', 'cat': cat.groceries, 'amount': 86.42, 'pending': true},
+  {'date': 'Oct 26', 'name': 'UBER *TRIP HELP.UBER.COM', 'merchant': 'Uber', 'cat': cat.transport, 'amount': 23.18, 'rule': 'Rides', 'tags': ['work']},
+  {'date': 'Oct 25', 'name': 'AMAZON.COM REFUND', 'merchant': 'Amazon', 'cat': cat.shopping, 'amount': -54.99},
+  {'date': 'Oct 24', 'name': 'BLUE BOTTLE COFFEE', 'merchant': 'Blue Bottle Coffee', 'cat': cat.dining, 'amount': 6.75},
+  {'date': 'Oct 23', 'name': 'DELTA AIR LINES ATLANTA', 'merchant': 'Delta', 'cat': cat.travel, 'amount': 412.30, 'tags': ['work', 'reimbursable']},
+  {'date': 'Oct 22', 'name': 'PAYMENT RECEIVED - THANK YOU', 'merchant': none, 'cat': cat.payments, 'amount': -1250.00, 'payment': true},
+  {'date': 'Oct 21', 'name': 'NETFLIX.COM', 'merchant': 'Netflix', 'cat': cat.subs, 'amount': 15.49, 'rule': 'Streaming'},
+  {'date': 'Oct 20', 'name': 'COSTCO WHSE #0123', 'merchant': 'Costco', 'cat': cat.groceries, 'amount': 213.77, 'split': true},
+] -%}
+
+{% block header_actions %}
+{{ ui.button("Export", icon="download", size="sm", variant="ghost") }}
+{% endblock %}
+
+{% block content %}
+{% call ui.page_header("UI kit", "Every component and state, with sample data. Build pages from these macros (components/README.md).") %}
+{{ ui.button("Import CSV", icon="upload") }}
+{{ ui.button("New rule", icon="plus", variant="primary") }}
+{% endcall %}
+
+{{ ui.tabs([
+  {'key': 'components', 'label': 'Components', 'href': '#components'},
+  {'key': 'data', 'label': 'Data display', 'href': '#data', 'count': 8},
+  {'key': 'forms', 'label': 'Forms', 'href': '#forms'},
+  {'key': 'charts', 'label': 'Charts', 'href': '#charts'},
+  {'key': 'tokens', 'label': 'Tokens', 'href': '#tokens'},
+], 'components', label='UI kit sections') }}
+
+{#- ---------------------------------------------------------------- Banners -#}
+<section class="section" id="components">
+<div class="section__header"><div><h2 class="section__title">Banners</h2><p class="section__subtitle">banner(tone, text, title, action_href, action_label) — info, warn, over (alias danger), ok, sandbox</p></div></div>
+<div class="stack stack--sm">
+{{ ui.banner('info', 'Plaid refreshes Amex data 1–4 times a day, so new charges can take a few hours to appear.', title='Heads up.') }}
+{{ ui.banner('warn', 'Amex asks you to renew access every 12 months. It takes a minute and keeps syncing uninterrupted.', title='Renew your Amex connection by Nov 27, 2026 (30 days left).', action_href='#', action_label='Renew now') }}
+{{ ui.banner('over', 'Syncing is paused until you sign in to Amex again through Plaid. Your existing data is safe.', title='Your Amex connection needs attention.', action_href='#', action_label='Reconnect') }}
+{{ ui.banner('ok', '214 transactions imported, 37 duplicates skipped, 12 matched to Plaid.', title='Import finished.') }}
+{{ ui.banner('sandbox', 'Sandbox uses Plaid test data. Linking here never uses one of your 10 real connections.', title='Sandbox.') }}
+</div>
+</section>
+
+{#- ------------------------------------------------------------- Stat tiles -#}
+<section class="section">
+<div class="section__header"><div><h2 class="section__title">Stat tiles</h2><p class="section__subtitle">stat(label, value, sub, tone, icon, href) — optional {% raw %}{% call %}{% endraw %} body</p></div></div>
+<div class="grid grid--4">
+{% call ui.stat("Spent this month", ui.money(2431.18, cents=false), sub="81% of your $3,000 target", tone="warn", icon="credit-card") %}
+{{ ui.progress(81, pace_pct=90, show_pct=false, size="sm", name="Monthly target used") }}
+{% endcall %}
+{{ ui.stat("Remaining", ui.money(568.82, tone="neutral"), sub="$47 a day for 12 days", icon="target") }}
+{{ ui.stat("Pending charges", ui.money(84.20, pending=true), sub="3 charges not yet posted", icon="clock") }}
+{{ ui.stat("Vs. last month", ui.money(-212.40, signed=true, tone="ok"), sub="8% less than September", tone="ok", icon="trending") }}
+</div>
+</section>
+
+{#- --------------------------------------------------------------- Progress -#}
+<section class="section">
+<div class="section__header"><div><h2 class="section__title">Budget progress</h2><p class="section__subtitle">progress(pct, label, pace_pct, name) — ok &lt; 80% ≤ warn ≤ 100% &lt; over</p></div></div>
+<div class="card"><div class="card__body">
+<div class="grid grid--2" style="--grid-gap: 22px 40px">
+<div class="stack stack--xs">{{ ui.category_badge(cat.groceries) }}{{ ui.progress(45, label="$405.00 of $900.00", pace_pct=60, name="Groceries budget") }}</div>
+<div class="stack stack--xs">{{ ui.category_badge(cat.dining) }}{{ ui.progress(83, label="$332.40 of $400.00", pace_pct=60, name="Dining budget") }}</div>
+<div class="stack stack--xs">{{ ui.category_badge(cat.shopping) }}{{ ui.progress(112, label="$560.10 of $500.00 · $60.10 over", pace_pct=60, name="Shopping budget") }}</div>
+<div class="stack stack--xs">{{ ui.category_badge(cat.travel) }}{{ ui.progress(none, label="No budget · $412.30 spent", name="Travel budget") }}</div>
+</div>
+<p class="muted text-sm mt-6">The small caret above a bar is the pace: how much of the month has passed (spending ahead of it is ahead of pace). Over budget, the dark tick marks where the budget ran out and the hatched part is the overspend. Near a threshold the percentage keeps one decimal, rounded toward the colour shown (79.9%, 100.1%).</p>
+</div></div>
+</section>
+
+{#- --------------------------------------------------- Amounts and badges -#}
+<section class="section">
+<div class="section__header"><div><h2 class="section__title">Amounts, categories, badges, status</h2><p class="section__subtitle">money(amount, signed, pending, tone, cents) · category_badge(category, chip, href) · badge(text, tone, icon) · status_pill(state)</p></div></div>
+<div class="grid grid--2">
+<div class="card"><div class="card__body">
+{{ ui.kv([
+  ('Charge', ui.money(86.42)),
+  ('Refund (credit)', ui.money(-54.99)),
+  ('Pending charge', ui.money(23.18, pending=true)),
+  ('Card payment', ui.money(-1250, tone='muted')),
+  ('Zero / none', ui.money(0) ~ ' · '|safe ~ ui.money(none)),
+  ('Delta (signed)', ui.money(40, signed=true) ~ ' · '|safe ~ ui.money(-25.5, signed=true, tone='over')),
+  ('Remaining (neutral)', ui.money(-60.10, tone='neutral')),
+  ('Whole dollars', ui.money(12904.55, cents=false)),
+]) }}
+</div></div>
+<div class="card"><div class="card__body stack">
+<div class="cluster">{% for c in categories %}{{ ui.category_badge(c) }}{% endfor %}{{ ui.category_badge(none) }}</div>
+<div class="cluster">{{ ui.category_badge(cat.dining, chip=true) }}{{ ui.category_badge(cat.travel, chip=true, href='#') }}{{ ui.category_badge(cat.gifts, chip=true) }}</div>
+<div class="cluster">{{ ui.badge('Pending', icon='clock') }}{{ ui.badge('Payment', tone='muted') }}{{ ui.badge('Split', tone='info', icon='split') }}{{ ui.badge('Rule', tone='accent', icon='wand') }}{{ ui.badge('On track', tone='ok') }}{{ ui.badge('80%', tone='warn') }}{{ ui.badge('Over', tone='over', icon='alert') }}{{ ui.badge('Sandbox', tone='sandbox') }}</div>
+<div class="cluster">{{ ui.status_pill('healthy', 'Synced 5 min ago', detail='American Express via Plaid') }}{{ ui.status_pill('syncing') }}{{ ui.status_pill('needs_reconnect') }}{{ ui.status_pill('error', 'Sync failed', detail='INSTITUTION_DOWN: Amex is not responding') }}{{ ui.status_pill('stale', 'Synced 2 days ago') }}{{ ui.status_pill('not_linked') }}</div>
+</div></div>
+</div>
+</section>
+
+{#- ---------------------------------------------------------------- Buttons -#}
+<section class="section">
+<div class="section__header"><div><h2 class="section__title">Buttons</h2><p class="section__subtitle">button(label, variant, size, icon, icon_only, href) · .btn .btn--primary .btn--ghost .btn--danger .btn--sm .btn--icon</p></div></div>
+<div class="card"><div class="card__body stack">
+<div class="cluster">
+{{ ui.button("Save budget", variant="primary") }}
+{{ ui.button("Secondary") }}
+{{ ui.button("Ghost", variant="ghost") }}
+{{ ui.button("Delete rule", variant="danger", icon="trash") }}
+{{ ui.button("Export CSV", icon="download", href="#") }}
+{{ ui.button("Disabled", disabled=true) }}
+<button class="btn htmx-request" type="button">{{ ui.icon('refresh', class='icon--spin') }}<span>Syncing…</span></button>
+</div>
+<div class="cluster">
+{{ ui.button("Small primary", variant="primary", size="sm") }}
+{{ ui.button("Small", size="sm", icon="plus") }}
+{{ ui.button("Small ghost", size="sm", variant="ghost") }}
+{{ ui.button("Edit", icon="pencil", icon_only=true, variant="ghost", size="sm") }}
+{{ ui.button("Split", icon="split", icon_only=true, variant="ghost", size="sm") }}
+{{ ui.button("More actions", icon="more", icon_only=true, variant="ghost", size="sm") }}
+{{ ui.button("Refresh", icon="refresh", icon_only=true) }}
+{{ ui.button("Delete", icon="trash", icon_only=true, variant="danger") }}
+</div>
+</div></div>
+</section>
+
+{#- ------------------------------------------------------------ Data table -#}
+<section class="section" id="data">
+<div class="section__header"><div><h2 class="section__title">Tables</h2><p class="section__subtitle">.table-wrap › .table (sticky header, hover, .num) · sort_th · inline category select · pagination</p></div></div>
+{% call form.filter_bar('/dev/ui-kit', label='Filter transactions') %}
+{{ form.search_field('q', placeholder='Search merchant, description or notes') }}
+{{ form.category_select('category', categories, label='Category', placeholder='All categories', compact=true, id='kit-filter-cat') }}
+{{ form.select_field('status', 'Status', [('', 'All'), ('pending', 'Pending'), ('posted', 'Posted')], compact=true, id='kit-filter-status') }}
+{{ form.date_field('from', 'From', value='2026-10-01', compact=true, id='kit-from') }}
+{{ form.date_field('to', 'To', value='2026-10-28', compact=true, id='kit-to') }}
+<div class="filter-bar__actions">
+<a class="btn btn--ghost btn--sm" href="#">Reset</a>
+{{ ui.button("Export", icon="download", size="sm", href="#") }}
+</div>
+{% endcall %}
+
+{% set footer %}
+<span class="muted text-sm">8 transactions · charges {{ ui.money(758.86) }} · credits {{ ui.money(-1304.99) }}</span>
+{{ ui.pagination(3, 12, '/dev/ui-kit?q=coffee', total=574) }}
+{% endset %}
+{% call ui.card(flush=true, footer=footer) %}
+<div class="table-wrap">
+<table class="table">
+<thead><tr>
+{{ ui.sort_th('Date', 'date', '-date', '/dev/ui-kit?q=coffee') }}
+<th scope="col" class="col-grow">Description</th>
+<th scope="col">Category</th>
+<th scope="col" class="col-optional-lg">Tags</th>
+{{ ui.sort_th('Amount', 'amount', '-date', '/dev/ui-kit?q=coffee', num=true) }}
+<th scope="col" class="shrink"><span class="sr-only">Actions</span></th>
+</tr></thead>
+<tbody>
+{%- for t in txns %}
+<tr class="{{ 'is-pending' if t.get('pending') }}{{ ' is-muted' if t.get('payment') }}">
+<td class="table__date">{{ t.date }}</td>
+<td class="col-grow">
+<span class="table__primary">{{ t.merchant or t.name }}
+{%- if t.get('pending') %} {{ ui.badge('Pending', icon='clock') }}{% endif %}
+{%- if t.get('payment') %} {{ ui.badge('Payment', tone='muted') }}{% endif %}
+{%- if t.get('split') %} {{ ui.badge('Split', tone='info', icon='split') }}{% endif %}
+</span>
+{%- if t.merchant %}<span class="table__secondary">{{ t.name }}{% if t.get('rule') %} · rule “{{ t.get('rule') }}”{% endif %}</span>{% endif %}
+</td>
+<td>{% if t.get('split') %}<div class="cluster" style="--cluster-gap: 4px 10px">{{ ui.category_badge(cat.groceries) }}{{ ui.category_badge(cat.shopping) }}</div>{% else %}{{ form.category_select('category_id', categories, t.cat.id, inline=true, label='Category for ' ~ (t.merchant or t.name), id='kit-cat-' ~ loop.index) }}{% endif %}</td>
+<td class="col-optional-lg">{% if t.get('tags') %}<span class="chips">{% for tag in t.tags %}<span class="chip">{{ tag }}</span>{% endfor %}</span>{% endif %}</td>
+<td class="num">{{ ui.money(t.amount, pending=t.get('pending'), tone='muted' if t.get('payment') else none) }}</td>
+<td class="table__actions">{{ ui.button('Edit notes and tags', icon='pencil', icon_only=true, variant='ghost', size='sm', data_dialog_open='kit-dialog') }}{{ ui.button('Split', icon='split', icon_only=true, variant='ghost', size='sm') }}</td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{% endcall %}
+
+<div class="grid grid--sidebar">
+{% call ui.card("Top merchants", subtitle="October 2026", flush=true) %}
+<div class="table-wrap">
+<table class="table table--compact">
+<thead><tr><th scope="col" class="col-grow">Merchant</th><th scope="col" class="col-optional-sm">Category</th><th scope="col" class="num">Charges</th><th scope="col" class="num">Total</th></tr></thead>
+<tbody>
+<tr><td class="col-grow"><span class="table__primary">Delta</span></td><td class="col-optional-sm">{{ ui.category_badge(cat.travel) }}</td><td class="num">2</td><td class="num">{{ ui.money(824.60) }}</td></tr>
+<tr><td class="col-grow"><span class="table__primary">Whole Foods Market</span></td><td class="col-optional-sm">{{ ui.category_badge(cat.groceries) }}</td><td class="num">6</td><td class="num">{{ ui.money(402.18) }}</td></tr>
+<tr><td class="col-grow"><span class="table__primary">Costco</span></td><td class="col-optional-sm">{{ ui.category_badge(cat.groceries) }}</td><td class="num">2</td><td class="num">{{ ui.money(371.05) }}</td></tr>
+<tr><td class="col-grow"><span class="table__primary">Uber</span></td><td class="col-optional-sm">{{ ui.category_badge(cat.transport) }}</td><td class="num">9</td><td class="num">{{ ui.money(143.27) }}</td></tr>
+</tbody>
+<tfoot><tr><td>Total</td><td class="col-optional-sm"></td><td class="num">19</td><td class="num">{{ ui.money(1741.10) }}</td></tr></tfoot>
+</table>
+</div>
+{% endcall %}
+{% call ui.card("Transaction details") %}
+{{ ui.kv([
+  ('Description', 'COSTCO WHSE #0123'),
+  ('Authorized', 'Oct 19, 2026'),
+  ('Posted', 'Oct 20, 2026'),
+  ('Amount', ui.money(213.77)),
+  ('Category set by', ui.badge('Rule', tone='accent', icon='wand') ~ ' Groceries'|safe),
+  ('Card member', none),
+]) }}
+{% endcall %}
+</div>
+</section>
+
+{#- ------------------------------------------------------------------ Forms -#}
+<section class="section" id="forms">
+<div class="section__header"><div><h2 class="section__title">Forms</h2><p class="section__subtitle">field · money_field · date_field · select_field · category_select · checkbox_field · switch_field · textarea_field · tags_field · segmented</p></div></div>
+<div class="grid grid--sidebar">
+{% call ui.card("New rule", subtitle="Rules run in priority order; the first match sets the category.") %}
+<form class="form" method="post" action="#" data-confirm="This is the UI kit. Submit anyway?">
+<div class="form-row">
+{{ form.field('merchant_pattern', 'Merchant contains', value='', placeholder='e.g. UBER', error='Enter a merchant or a description pattern.', id='kit-merchant') }}
+{{ form.select_field('match_type', 'Match type', [('contains', 'Contains'), ('equals', 'Equals'), ('starts_with', 'Starts with'), ('regex', 'Regular expression')], value='contains', id='kit-match') }}
+</div>
+<div class="form-row">
+{{ form.money_field('amount_min', 'Minimum amount', value=50, optional=true, id='kit-min') }}
+{{ form.money_field('amount_max', 'Maximum amount', optional=true, id='kit-max', help='Inclusive. Credits are negative.', allow_negative=true) }}
+</div>
+<div class="form-row">
+{{ form.category_select('category_id', categories, value=5, required=true, id='kit-rule-cat') }}
+{{ form.date_field('since', 'Apply from', value='2026-01-01', optional=true, id='kit-since') }}
+</div>
+{{ form.tags_field('tags', 'Tags', tags=['work', 'reimbursable'], suggestions=['travel', 'work', 'reimbursable', 'gift', 'home'], id='kit-tags') }}
+{{ form.textarea_field('notes', 'Notes', value='Rides to the office are reimbursed quarterly.', rows=2, optional=true, id='kit-notes') }}
+<div class="stack stack--sm">
+{{ form.checkbox_field('apply_past', 'Also apply to past transactions', checked=true, help='Transactions you edited by hand are never changed.', id='kit-apply') }}
+{{ form.switch_field('is_active', 'Rule is active', checked=true, id='kit-active') }}
+</div>
+<div class="form-actions">
+{{ ui.button('Save rule', variant='primary', type='submit') }}
+{{ ui.button('Cancel', variant='ghost') }}
+</div>
+</form>
+{% endcall %}
+<div class="stack">
+{% call ui.card("Budget settings") %}
+<div class="form">
+{{ form.segmented('period', [('calendar', 'Calendar month'), ('statement', 'Statement cycle')], value='calendar', label='Budget period', help='Statement cycles follow your Amex closing date.') }}
+{{ form.money_field('overall', 'Overall monthly target', value=3000, help='Leave empty for no overall target.', id='kit-overall') }}
+{{ form.switch_field('include_pending', 'Count pending charges in budgets', checked=true, help='Pending charges move to their posted amount automatically.', id='kit-pending') }}
+{{ form.field('large', 'Large-charge alert', value='', type='text', placeholder='Off', disabled=true, help='Disabled example.', id='kit-large') }}
+</div>
+{% endcall %}
+{% call ui.card("Inline edits", subtitle="Table-cell controls: borderless until hovered") %}
+<div class="table-wrap">
+<table class="table table--compact">
+<tbody>
+<tr><td class="col-grow">{{ ui.category_badge(cat.groceries) }}</td><td class="num">{{ form.inline_money('budget_1', 900, label='Groceries budget', id='kit-b1') }}</td></tr>
+<tr><td class="col-grow">{{ ui.category_badge(cat.dining) }}</td><td class="num">{{ form.inline_money('budget_2', 400, label='Dining budget', id='kit-b2') }}</td></tr>
+<tr><td class="col-grow">{{ ui.category_badge(cat.shopping) }}</td><td class="num">{{ form.inline_money('budget_3', none, label='Shopping budget', id='kit-b3', aria_invalid='true') }}</td></tr>
+</tbody>
+</table>
+</div>
+{% endcall %}
+</div>
+</div>
+</section>
+
+{#- ------------------------------------------------- Dialog, tooltips, toasts -#}
+<section class="section">
+<div class="section__header"><div><h2 class="section__title">Dialog, tooltips, toasts</h2><p class="section__subtitle">dialog(id, title) + data-dialog-open · data-tooltip · tip(text) · flash_message(level, text)</p></div></div>
+<div class="grid grid--3">
+{% call ui.card("Dialog") %}
+<p class="muted text-sm">Esc, the close button or a click on the backdrop closes it.</p>
+<div class="cluster mt-4">{{ ui.button("Edit notes and tags", icon="pencil", data_dialog_open="kit-dialog") }}</div>
+{% endcall %}
+{% call ui.card("Tooltips") %}
+<div class="cluster cluster--lg">
+<button class="btn btn--sm" type="button" data-tooltip="Shown above by default">Hover me</button>
+<button class="btn btn--sm" type="button" data-tooltip="Below" data-tooltip-pos="bottom">Bottom</button>
+<span>Pace {{ ui.tip('How much of the budget period has passed. Spending ahead of the marker means you are ahead of pace.') }}</span>
+</div>
+{% endcall %}
+{% call ui.card("Loading") %}
+<div class="stack stack--sm">
+<div class="cluster">{{ ui.spinner() }}<span class="muted text-sm">spinner()</span><span class="htmx-request"><span class="htmx-indicator muted text-sm">{{ ui.spinner('Saving') }} Saving…</span></span></div>
+{{ ui.skeleton(2) }}
+</div>
+{% endcall %}
+</div>
+<div class="toast-stack toast-stack--static mt-4">
+{{ ui.flash_message('success', 'Budget saved. Groceries is now $900.00 a month from October 2026.') }}
+{{ ui.flash_message('info', 'Sync started. New transactions will appear in a minute.') }}
+{{ ui.flash_message('warning', '3 rows were skipped because they are already in your history.') }}
+{{ ui.flash_message('error', 'Could not reach Plaid. Nothing was changed; try again in a few minutes.') }}
+</div>
+</section>
+
+{% call ui.dialog("kit-dialog", "Notes and tags") %}
+<form class="form" method="dialog">
+{{ form.textarea_field('notes', 'Notes', value='Team dinner, expense report #42.', rows=3, id='kit-dlg-notes') }}
+{{ form.tags_field('tags', 'Tags', tags=['work'], suggestions=['work', 'travel', 'home'], id='kit-dlg-tags') }}
+<div class="dialog__footer">
+{{ ui.button('Cancel', variant='ghost', data_dialog_close=true) }}
+{{ ui.button('Save', variant='primary', type='submit') }}
+</div>
+</form>
+{% endcall %}
+
+{#- ----------------------------------------------------------- Empty states -#}
+<section class="section">
+<div class="section__header"><div><h2 class="section__title">Empty states</h2><p class="section__subtitle">empty_state(title, message, icon, action_href, action_label, compact, heading, tone)</p></div></div>
+<div class="grid grid--3">
+<div class="card">
+{% call ui.empty_state("No transactions yet", "Link your Amex card to sync charges automatically, or import a CSV download from americanexpress.com.", icon="credit-card") %}
+<a class="btn btn--primary" href="#">{{ ui.icon('link') }}<span>Link account</span></a>
+<a class="btn" href="#">{{ ui.icon('upload') }}<span>Import CSV</span></a>
+{% endcall %}
+</div>
+<div class="card">
+{{ ui.empty_state("No matches", "Nothing matches these filters. Try a wider date range or clear the search.", icon="search", compact=true) }}
+</div>
+<div class="card">
+{{ ui.empty_state("Plaid couldn't do that", "Amex isn't responding right now. Nothing was changed; try again in a few minutes.", icon="alert", tone="warn", compact=true) }}
+</div>
+</div>
+</section>
+
+{#- ----------------------------------------------------------------- Charts -#}
+<section class="section" id="charts">
+<div class="section__header"><div><h2 class="section__title">Charts</h2><p class="section__subtitle">chart(id, config, height, label) — colours, gridlines and USD formatting come from the theme</p></div></div>
+<div class="grid grid--sidebar">
+{% call ui.card("Spending by category", subtitle="Last 6 months · stacked") %}
+{{ ui.chart("kit-stacked", {
+  'type': 'bar', 'stacked': true,
+  'data': {'labels': ['May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct'], 'datasets': [
+    {'label': 'Groceries', 'data': [612.40, 588.15, 640.92, 701.33, 655.80, 405.00], 'color': cat.groceries.color},
+    {'label': 'Dining & Drinks', 'data': [310.22, 402.75, 288.10, 344.60, 371.05, 332.40], 'color': cat.dining.color},
+    {'label': 'Shopping', 'data': [420.00, 266.48, 512.30, 198.77, 305.12, 560.10], 'color': cat.shopping.color},
+    {'label': 'Travel', 'data': [0, 1240.50, 220.00, 0, 96.40, 412.30], 'color': cat.travel.color},
+    {'label': 'Pets', 'data': [64.10, 58.00, 112.45, 61.20, 70.35, 48.99], 'color': cat.pets.color},
+    {'label': 'Other', 'data': [380.11, 290.45, 335.70, 402.95, 288.00, 421.38], 'color': 'other'},
+  ]},
+}, height=300, label="Stacked bar chart of monthly spending by category, May to October 2026") }}
+{% endcall %}
+{% call ui.card("This month", subtitle="Share of spending") %}
+{%- set slices = [(cat.shopping, 560.10), (cat.groceries, 405.00), (cat.travel, 412.30), (cat.dining, 332.40), (cat.pets, 48.99), ({'name': 'Other', 'color': 'other'}, 372.39)] %}
+{% call ui.chart("kit-doughnut", {
+  'type': 'doughnut', 'legend': false,
+  'data': {'labels': slices|map(attribute='0.name')|list, 'datasets': [
+    {'label': 'October', 'data': slices|map(attribute='1')|list, 'colors': slices|map(attribute='0.color')|list},
+  ]},
+}, height=220, label="Doughnut chart of October spending by category") %}
+<table><caption>October spending by category</caption><tbody>
+{%- for c, amount in slices %}<tr><th scope="row">{{ c.name }}</th><td>{{ ui.money_text(amount) }}</td></tr>{% endfor -%}
+</tbody></table>
+{% endcall %}
+{#- An HTML legend: swatches take the same colour values as the dots and the chart. #}
+<ul class="legend mt-4">
+{%- for c, amount in slices %}
+<li><span class="swatch" style="--swatch: {{ ui.color_value(c.color) }}"></span>{{ c.name }}</li>
+{%- endfor %}
+</ul>
+{% endcall %}
+</div>
+{% call ui.card("Total spending vs. target", subtitle="12 months") %}
+{{ ui.chart("kit-line", {
+  'type': 'line', 'format': 'usd0',
+  'data': {'labels': ['Nov', 'Dec', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct'], 'datasets': [
+    {'label': 'Spending', 'data': [2810, 3420, 2390, 2215, 2604, 2730, 1722, 2788, 1997, 1647, 1716, 2131], 'color': 'accent', 'fill': true},
+    {'label': 'Target', 'data': [3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000], 'color': 'muted', 'dashed': true},
+  ]},
+}, height=260, label="Line chart of total monthly spending against a $3,000 target") }}
+{% endcall %}
+</section>
+
+{#- ----------------------------------------------------------------- Tokens -#}
+<section class="section" id="tokens">
+<div class="section__header"><div><h2 class="section__title">Tokens and icons</h2><p class="section__subtitle">--cat-1 … --cat-16 (fixed order, theme-aware) · status colours · 24px stroke icons</p></div></div>
+<div class="grid grid--2">
+{% call ui.card("Categorical palette") %}
+<ul class="kit-swatches">
+{%- for i in range(1, 17) %}
+<li><span class="swatch" style="--swatch: var(--cat-{{ i }})"></span><code>cat-{{ i }}</code></li>
+{%- endfor %}
+</ul>
+<p class="muted text-sm mt-4">Slots 1–8 are the strongest set for charts; fold anything past 8 series into “Other”.</p>
+{% endcall %}
+{% call ui.card("Type and status") %}
+<div class="stack stack--sm">
+<p class="page-header__title">Page title 26</p>
+<p class="section__title">Section title 16</p>
+<p>Body text 14 — Your data stays on this Mac.</p>
+<p class="muted">Muted text — secondary information.</p>
+<p class="text-sm muted">Small text 13 · <span class="tabular">Tabular 1,234.56</span></p>
+<div class="cluster"><span class="text-ok">● ok</span><span class="text-warn">● warn</span><span class="text-over">● over</span><span class="text-info">● info</span><kbd>/</kbd><code>code</code></div>
+</div>
+{% endcall %}
+</div>
+{% call ui.card("Icons") %}
+<ul class="kit-icons">
+{%- for name in ['home', 'list', 'target', 'trending', 'repeat', 'receipt', 'tag', 'wand', 'upload', 'download', 'link', 'settings', 'refresh', 'search', 'plus', 'minus', 'x', 'check', 'alert', 'info', 'check-circle', 'x-circle', 'chevron-down', 'chevron-up', 'chevron-left', 'chevron-right', 'arrow-up', 'arrow-down', 'sort', 'split', 'merge', 'pencil', 'trash', 'eye', 'eye-off', 'calendar', 'bell', 'clock', 'lock', 'credit-card', 'filter', 'external', 'menu', 'more'] %}
+<li>{{ ui.icon(name, size='lg') }}<span>{{ name }}</span></li>
+{%- endfor %}
+</ul>
+{% endcall %}
+</section>
+{% endblock %}

@@ -1,0 +1,40 @@
+{#- Add or edit a category. Needs `f` (routes/categories._form_context): in a dialog it posts
+    with HTMX and swaps the table (errors come back here with status 422); on its own page it
+    is a plain form. `f.focus` names the field that gets focus: the first one with an error, or
+    the name when the dialog opens. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+{%- set fid = f.form_id -%}
+{%- set system = f.category is not none and f.category.is_system -%}
+<form class="form" id="{{ fid }}" method="post" action="{{ f.action }}"
+{%- if f.in_dialog %} hx-post="{{ f.action }}" hx-target="#categories-table-card" hx-swap="outerHTML"{% endif %}>
+{{ form.field("name", "Name", value=f.data.name, required=true, id=fid ~ "-name", error=f.errors.get("name"), maxlength="60", autocomplete="off", autofocus=(f.focus == "name")) }}
+{{ form.select_field("kind", "Counts as", f.kind_options, value=f.data.kind, id=fid ~ "-kind", error=f.errors.get("kind"), disabled=system, help=("Built-in categories keep their kind." if system else "Only Spending counts toward budgets and spending totals."), autofocus=(f.focus == "kind")) }}
+<fieldset class="field swatch-field"{% if f.errors.get("color") %} aria-describedby="{{ fid }}-color-error"{% endif %}>
+<legend class="field__label">Colour</legend>
+<div class="swatch-picker">
+{%- for s in f.swatches %}
+<label class="swatch-option" data-tooltip="{{ s.name }}">
+<input type="radio" name="color" value="{{ s.value }}"{% if s.value == (f.data.color or '')|trim|lower %} checked{% endif %}>
+<span class="swatch-option__dot" style="--swatch: {{ ui.color_value(s.value)|trim }}">{{ ui.icon("check", size="sm") }}</span>
+<span class="sr-only">{{ s.name }}</span>
+</label>
+{%- endfor %}
+</div>
+{%- if f.errors.get("color") %}
+<p class="field__error" id="{{ fid }}-color-error">{{ ui.icon("alert") }}<span>{{ f.errors.get("color") }}</span></p>
+{%- endif %}
+</fieldset>
+{{ form.field("icon", "Icon", value=f.data.icon, optional=true, placeholder="e.g. 🐾", id=fid ~ "-icon", error=f.errors.get("icon"), help="One emoji, shown next to the name.", maxlength="16", autocomplete="off", autofocus=(f.focus == "icon")) }}
+{%- if f.in_dialog %}
+<div class="dialog__footer">
+{{ ui.button("Cancel", variant="ghost", data_dialog_close=true) }}
+{{ ui.button("Save" if f.category else "Add category", variant="primary", type="submit", id=fid ~ "-save") }}
+</div>
+{%- else %}
+<div class="form-actions">
+{{ ui.button("Save" if f.category else "Add category", variant="primary", type="submit") }}
+<a class="btn btn--ghost" href="/categories">Cancel</a>
+</div>
+{%- endif %}
+</form>

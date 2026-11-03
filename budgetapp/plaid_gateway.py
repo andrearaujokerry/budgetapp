@@ -7,14 +7,18 @@ inside the error handling (it arrives lazily) and parsed with ``json.loads(parse
 so amounts are exact ``Decimal`` (JSON integers such as ``"limit": 5000`` stay ``int``; normalize
 with ``money.to_money``). plaid-python's typed response models (floats) are never used.
 
-Errors: ``plaid.ApiException`` → :class:`PlaidError`; urllib3 errors, non-JSON bodies and the
-plaid-python TLS bug (``AttributeError``) → :class:`PlaidTransportError`.
+Errors: ``plaid.ApiException`` → :class:`PlaidError`; urllib3 errors, non-JSON bodies, error
+bodies that are not UTF-8 and the plaid-python TLS bug (``AttributeError``) →
+:class:`PlaidTransportError`. Both subclass :class:`PlaidGatewayError`, so one ``except`` clause
+and one set of attributes (``error_code``, ``error_message``, ``needs_reconnect``,
+``restart_pagination`` …) handle every failed call.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -101,16 +105,63 @@ NEEDS_RECONNECT_CODES = frozenset(
 )
 TRIAL_LIMIT_CODE = "TRIAL_CONNECTION_LIMIT"
 MUTATION_CODE = "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"
+TRANSPORT_ERROR = "TRANSPORT_ERROR"
 RETRYABLE_TYPES = frozenset({"RATE_LIMIT_EXCEEDED", "INSTITUTION_ERROR", "API_ERROR"})
 RETRYABLE_CODES = frozenset({"INTERNAL_SERVER_ERROR", "PLANNED_MAINTENANCE"})
 
 
-class PlaidError(Exception):
-    """An error response from Plaid (``plaid.ApiException`` translated).
+class PlaidGatewayError(Exception):
+    """Base of the errors a failed Plaid call raises: :class:`PlaidError` (Plaid answered with an
+    error) and :class:`PlaidTransportError` (no usable answer). Every attribute exists on both.
 
-    ``classification`` is ``needs_reconnect`` (fix with update mode), ``trial_limit`` (shown
-    plainly, never retried) or ``error`` (retried on the next run).
+    * ``classification``: ``needs_reconnect`` (fix with update mode), ``trial_limit`` (shown
+      plainly, never retried) or ``error`` (retried on the next run).
+    * ``retryable``: transient, worth retrying with backoff (rate limits, Plaid or institution
+      outages, transport failures); never the Trial limit or a reconnect.
+    * ``restart_pagination``: a ``/transactions/sync`` loop must discard the pages it fetched and
+      restart from its original cursor (§8): a transport failure or
+      ``TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION``.
     """
+
+    status: int | None = None
+    error_type: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    display_message: str | None = None
+    request_id: str | None = None
+    error_code_reason: str | None = None
+
+    @property
+    def classification(self) -> str:
+        return classify_error(self.error_code, self.error_type)
+
+    @property
+    def needs_reconnect(self) -> bool:
+        return self.classification == "needs_reconnect"
+
+    @property
+    def is_trial_limit(self) -> bool:
+        return self.error_code == TRIAL_LIMIT_CODE
+
+    @property
+    def is_mutation_during_pagination(self) -> bool:
+        return self.error_code == MUTATION_CODE
+
+    @property
+    def retryable(self) -> bool:
+        """Worth retrying within a run (with backoff); never for the Trial connection limit."""
+        if self.is_trial_limit or self.needs_reconnect:
+            return False
+        return self.error_type in RETRYABLE_TYPES or self.error_code in RETRYABLE_CODES
+
+    @property
+    def restart_pagination(self) -> bool:
+        """Restart the sync loop from its original cursor (transport failure or mutation)."""
+        return self.is_mutation_during_pagination
+
+
+class PlaidError(PlaidGatewayError):
+    """An error response from Plaid (``plaid.ApiException`` translated); see the base class."""
 
     def __init__(
         self,
@@ -147,38 +198,28 @@ class PlaidError(Exception):
             error_code_reason=body.get("error_code_reason"),
         )
 
-    @property
-    def classification(self) -> str:
-        return classify_error(self.error_code, self.error_type)
 
-    @property
-    def needs_reconnect(self) -> bool:
-        return self.classification == "needs_reconnect"
+class PlaidTransportError(PlaidGatewayError):
+    """Network failure, timeout or an unusable response body; transient (retried next run).
 
-    @property
-    def is_trial_limit(self) -> bool:
-        return self.error_code == TRIAL_LIMIT_CODE
+    ``error_type``/``error_code`` are ``TRANSPORT_ERROR``, ``error_message`` is the message,
+    ``status``/``display_message``/``request_id`` are ``None``.
+    """
 
-    @property
-    def is_mutation_during_pagination(self) -> bool:
-        return self.error_code == MUTATION_CODE
+    error_type = TRANSPORT_ERROR
+    error_code = TRANSPORT_ERROR
+
+    def __init__(self, message: str = "Plaid could not be reached") -> None:
+        self.error_message = message
+        super().__init__(message)
 
     @property
     def retryable(self) -> bool:
-        """Worth retrying within a run (with backoff); never for the Trial connection limit."""
-        if self.is_trial_limit or self.needs_reconnect:
-            return False
-        return self.error_type in RETRYABLE_TYPES or self.error_code in RETRYABLE_CODES
+        return True
 
-
-class PlaidTransportError(Exception):
-    """Network failure, timeout or a non-JSON response; transient (retried next run)."""
-
-    classification = "error"
-    retryable = True
-    error_code = "TRANSPORT_ERROR"
-    error_type = "TRANSPORT_ERROR"
-    display_message = None
+    @property
+    def restart_pagination(self) -> bool:
+        return True
 
 
 def classify_error(error_code: str | None, error_type: str | None = None) -> str:
@@ -190,7 +231,7 @@ def classify_error(error_code: str | None, error_type: str | None = None) -> str
     return "error"
 
 
-def item_status_for(error: PlaidError | PlaidTransportError) -> str:
+def item_status_for(error: PlaidGatewayError) -> str:
     """The ``plaid_items.status`` an error leaves the Item in: ``needs_reconnect`` or ``error``."""
     return "needs_reconnect" if error.classification == "needs_reconnect" else "error"
 
@@ -237,6 +278,7 @@ class PlaidGateway(Protocol):
         *,
         override_username: str | None = None,
         override_password: str | None = None,
+        initial_products: Sequence[str] = ("transactions",),
     ) -> str: ...
 
     def sandbox_reset_login(self, access_token: str) -> None: ...
@@ -299,7 +341,9 @@ def call_raw(
 
     RESEARCH T2.9c (corrected): with ``_preload_content=False`` the endpoint returns once the
     headers arrive and the body is read lazily at ``resp.data``, so the read happens inside the
-    error handling too.
+    error handling too. plaid-python decodes an error body as UTF-8 before raising
+    ``ApiException``, so a non-UTF-8 error page (a proxy's Latin-1 HTML) surfaces as
+    ``UnicodeDecodeError``; that, too, is a transport error.
     """
     try:
         resp = method(request, _preload_content=False, _request_timeout=timeout)
@@ -311,6 +355,10 @@ def call_raw(
         raise error_from_api_exception(exc) from None
     except (urllib3.exceptions.HTTPError, OSError) as exc:
         raise PlaidTransportError(f"{type(exc).__name__}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise PlaidTransportError(
+            f"Plaid returned an HTTP error with a body that is not UTF-8: {exc}"
+        ) from exc
     except AttributeError as exc:
         # plaid-python bug: a TLS failure with retries disabled surfaces as
         # "'NoneType' object has no attribute 'decode'". Anything else is a real bug.
@@ -320,8 +368,24 @@ def call_raw(
     return parse_json(raw)
 
 
+def _refuse_real_client_in_tests(plaid_env: str) -> None:
+    """Test processes use FakePlaidGateway; only ``./run test --sandbox`` may reach the Sandbox."""
+    if os.environ.get("BUDGETAPP_ENV") != "test":
+        return
+    if os.environ.get("BUDGETAPP_LIVE_SANDBOX") and plaid_env == "sandbox":
+        return
+    raise PlaidEnvironmentError(
+        "Tests must use FakePlaidGateway; only the live Sandbox tests (./run test --sandbox) may "
+        "build a real Plaid client, and only for the Sandbox."
+    )
+
+
 class RealPlaidGateway:
-    """The real Plaid API for one environment (``sandbox`` or ``production``)."""
+    """The real Plaid API for one environment (``sandbox`` or ``production``).
+
+    Building a real client (no ``client`` injected) is refused in a test process, except for the
+    Sandbox under ``BUDGETAPP_LIVE_SANDBOX=1`` (``./run test --sandbox``).
+    """
 
     def __init__(
         self,
@@ -335,6 +399,7 @@ class RealPlaidGateway:
             raise ValueError(f"unknown Plaid environment {plaid_env!r}")
         self.plaid_env = plaid_env
         if client is None:
+            _refuse_real_client_in_tests(plaid_env)
             if not client_id or not secret:
                 raise ValueError("client_id and secret are required")
             register_secret(client_id)
@@ -494,9 +559,17 @@ class RealPlaidGateway:
         *,
         override_username: str | None = None,
         override_password: str | None = None,
+        initial_products: Sequence[str] = ("transactions",),
     ) -> str:
-        """Create a Sandbox Item without Link (730 days of history)."""
+        """Create a Sandbox Item without Link (730 days of history).
+
+        ``initial_products=("transactions", "liabilities")`` (RESEARCH T3.10) lets Sandbox Items
+        exercise ``/liabilities/get`` and statement snapshots before the one real link.
+        """
         self._require_sandbox("sandbox_create_public_token")
+        products = list(dict.fromkeys(initial_products))
+        if not products:
+            raise ValueError("initial_products must name at least one product")
         options: dict[str, Any] = {
             "transactions": SandboxPublicTokenCreateRequestOptionsTransactions(
                 days_requested=DAYS_REQUESTED
@@ -508,7 +581,7 @@ class RealPlaidGateway:
             options["override_password"] = override_password
         request = SandboxPublicTokenCreateRequest(
             institution_id=institution_id,
-            initial_products=[Products("transactions")],
+            initial_products=[Products(p) for p in products],
             options=SandboxPublicTokenCreateRequestOptions(**options),
         )
         body = call_raw(self._client.sandbox_public_token_create, request)

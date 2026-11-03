@@ -28,6 +28,7 @@ python-dateutil==3.0.0
 python-dotenv==1.2.4
 python-multipart==0.0.32
 PyYAML==6.0.3
+regex==2026.9.29
 six==1.17.0
 SQLAlchemy==2.1.6
 starlette==1.10.0

@@ -20,6 +20,7 @@ dependencies = [
     "psycopg[binary]>=3.3,<4",
     "plaid-python>=46,<47",
     "keyring>=25.7",
+    "regex>=2026.9",
 ]
 
 [project.scripts]

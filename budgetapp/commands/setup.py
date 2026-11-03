@@ -4,7 +4,10 @@
 2. The dedicated PostgreSQL 18 cluster (created if missing) started on 127.0.0.1:5434.
 3. Roles and databases, with generated passwords saved in the login Keychain.
 4. Time Machine exclusion of the cluster's data directory.
-5. Both databases migrated to the latest schema, each as its owner role.
+5. The Sandbox database migrated to the latest schema; the production database only the first
+   time (while it is still empty). After that production is upgraded ONLY by the guarded upgrade
+   of the installed copy (``./run live`` / ``./run install-agents``: backup, sync lock, migrations
+   from the new install — ARCHITECTURE §2), never from whatever checkout runs setup.
 6. Unless ``--skip-plaid``: the Plaid client ID, Sandbox secret and optional Production secret,
    typed with hidden input (never echoed, never on a command line) and saved in Keychain.
 
@@ -24,7 +27,7 @@ from typing import Any
 from budgetapp import pgcluster, secrets
 from budgetapp.commands import add_command
 from budgetapp.config import Settings, load_settings
-from budgetapp.db import migrate_env
+from budgetapp.db import code_head, current_revision, make_engine, migrate_env
 
 KEYS_INTRO = """\
 Plaid keys: copy them from https://dashboard.plaid.com/developers/keys
@@ -95,10 +98,31 @@ def setup_database(settings: Settings) -> None:
             "  ! Could not exclude the database folder from Time Machine; ./run doctor checks this."
         )
     for env in ("sandbox", "production"):
-        env_settings = load_settings(env)
-        before, after = migrate_env(env_settings)
-        change = "already up to date" if before == after else f"{before or 'empty'} → {after}"
-        _ok(f"{env.capitalize()} database {env_settings.db_name}: {change}")
+        _ok(migrate_database(load_settings(env)))
+
+
+def migrate_database(settings: Settings) -> str:
+    """Migrate one environment's database for setup; returns a line for the user.
+
+    Sandbox: always to head. Production: only while it is empty (the first setup); a production
+    database that has a schema is reported, never upgraded here (ARCHITECTURE §2).
+    """
+    name = f"{settings.env.capitalize()} database {settings.db_name}"
+    if settings.is_production:
+        engine = make_engine(settings)
+        try:
+            current = current_revision(engine)
+        finally:
+            engine.dispose()
+        if current is not None:
+            head = code_head()
+            state = "up to date" if current == head else f"at {current} (this code has {head})"
+            return (
+                f"{name}: {state}. Setup never upgrades production; ./run live does, after a backup"
+            )
+    before, after = migrate_env(settings)
+    change = "already up to date" if before == after else f"{before or 'empty'} → {after}"
+    return f"{name}: {change}"
 
 
 def check_key_shape(value: str, kind: str) -> tuple[bool, str | None]:
@@ -200,6 +224,7 @@ def enter_access_token(
     existing = secrets.get_access_token("production", store=store)
     if existing == token:
         print("This token is already saved in Keychain. Nothing to do.")
+        _mark_recovery_files(settings, token)
         return 0
     if existing:
         print(
@@ -226,11 +251,21 @@ def enter_access_token(
         item.get("institution_name") or item.get("institution_id") or "unknown institution"
     )
     print(f"Saved the access token for Item {item_id} ({institution}) in Keychain.")
+    _mark_recovery_files(settings, token)
     print(
         "If the app has no connection yet, open ./run live → Connection → "
         "“Re-attach existing connection”. Never link a new one."
     )
     return 0
+
+
+def _mark_recovery_files(settings: Settings, token: str) -> None:
+    """The token is in Keychain now: its recovery files no longer block a link (``*.saved``)."""
+    for path in secrets.mark_recovery_saved(settings, token):
+        print(
+            f"Marked the recovery file as saved: {path}. Delete it once the token is also in "
+            "your password manager."
+        )
 
 
 def run(args: argparse.Namespace, settings: Settings) -> int:

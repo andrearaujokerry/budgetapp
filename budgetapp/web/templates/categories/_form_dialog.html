@@ -1,0 +1,5 @@
+{#- The add/edit form in a dialog that opens as soon as HTMX puts it in #dialog-slot. -#}
+{%- import "components/ui.html" as ui -%}
+{% call ui.dialog("category-dialog", ("Edit “" ~ f.category.name ~ "”") if f.category else "Add category", autoopen=true) %}
+{% include "categories/_form.html" %}
+{% endcall %}

@@ -11,6 +11,11 @@ Three environments exist (ARCHITECTURE §2):
 ``load_settings()`` picks the environment from its argument, then ``$BUDGETAPP_ENV``, then
 ``sandbox``. Paths can be redirected with ``BUDGETAPP_DATA_DIR``, ``BUDGETAPP_LOGS_DIR`` and
 ``BUDGETAPP_PG_BIN`` (the PostgreSQL 18 ``bin`` directory).
+
+The test environment shares the real cluster (``data_dir``, its socket and data directory) but
+never the places the app writes to: ``state_dir``, ``logs_dir``, ``backups_dir`` and
+``install_dir`` default to a per-process scratch folder (:func:`scratch_dir_for_tests`), so test
+code can never drop recovery files, daily markers, logs or an install into the real locations.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 import getpass
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +46,26 @@ _WEB_PORT = {"production": 8765, "sandbox": 8766, "test": 8766}
 
 class ConfigError(Exception):
     """The requested settings are invalid or unsafe."""
+
+
+class PostgresNotFound(ConfigError):
+    """A PostgreSQL 18 program is missing from ``settings.pg_bin_dir``."""
+
+
+def in_test_process(settings: Settings | None = None) -> bool:
+    """True inside pytest (``BUDGETAPP_ENV=test``) or for test-environment settings.
+
+    Test code never gets a superuser connection and never starts, stops or reconfigures the real
+    cluster (SEC-5: database roles are the boundary between test code and real data).
+    """
+    if os.environ.get("BUDGETAPP_ENV") == "test":
+        return True
+    return settings is not None and settings.env == "test"
+
+
+def scratch_dir_for_tests() -> Path:
+    """Per-process folder for the test environment's state, logs, backups and install paths."""
+    return Path(tempfile.gettempdir()).resolve() / f"budgetapp-test-{os.getpid()}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +112,16 @@ class Settings:
         """Absolute path of a PostgreSQL 18 binary, e.g. ``settings.pg_bin("pg_dump")``."""
         return str(self.pg_bin_dir / name)
 
+    def require_pg_bin(self, name: str) -> str:
+        """Like :meth:`pg_bin`, but raise :class:`PostgresNotFound` when the program is missing."""
+        path = self.pg_bin_dir / name
+        if not os.access(path, os.X_OK) or not path.is_file():
+            raise PostgresNotFound(
+                f"PostgreSQL 18 not found: {path} does not exist. Install it with "
+                "`brew install postgresql@18` (or point BUDGETAPP_PG_BIN at its bin folder)."
+            )
+        return str(path)
+
     def replace(self, **changes: Any) -> Settings:
         """A copy with some fields changed (validated like :func:`load_settings`)."""
         new = dataclasses.replace(self, **changes)
@@ -96,6 +132,10 @@ class Settings:
         """Raise :class:`ConfigError` if the settings are unsafe (ARCHITECTURE §2, SEC-1, SEC-5)."""
         if self.env not in ENVIRONMENTS:
             raise ConfigError(f"Unknown environment {self.env!r}; use one of {ENVIRONMENTS}.")
+        for name in ("pg_port", "web_port"):
+            value = getattr(self, name)
+            if type(value) is not int or not 0 < value < 65536:
+                raise ConfigError(f"{name} must be a port number (an int), got {value!r}.")
         if self.pg_port in FORBIDDEN_PG_PORTS:
             raise ConfigError(
                 f"Port {self.pg_port} belongs to a shared development cluster; budgetapp uses its "
@@ -110,6 +150,8 @@ class Settings:
                 raise ConfigError(
                     "The test environment must use a budgetapp_test_* database as budgetapp_test."
                 )
+            if self.plaid_env != "sandbox":
+                raise ConfigError("The test environment always uses the Plaid Sandbox (or a fake).")
         else:
             expected = _DB[self.env]
             if (self.db_name, self.db_role) != expected:
@@ -146,15 +188,20 @@ def protected_folders(home: Path | None = None) -> tuple[Path, ...]:
 
 
 def _is_within(path: Path, parent: Path) -> bool:
+    """``path`` is ``parent`` or below it, ignoring case (macOS volumes are case-insensitive)."""
     try:
-        path.relative_to(parent)
+        Path(str(path).casefold()).relative_to(Path(str(parent).casefold()))
     except ValueError:
         return False
     return True
 
 
 def check_private_path(path: Path, label: str = "path", *, repo_dir: Path | None = None) -> None:
-    """Refuse app data paths that are relative, inside the repository or in a protected folder."""
+    """Refuse app data paths that are relative, inside the repository or in a protected folder.
+
+    The comparison resolves symlinks and ignores case, because the default APFS volume is
+    case-insensitive (``~/desktop`` is ``~/Desktop``).
+    """
     if not path.is_absolute():
         raise ConfigError(f"{label} must be an absolute path, got {path}.")
     resolved = path.resolve(strict=False)
@@ -207,6 +254,10 @@ def load_settings(env: str | None = None, **overrides: Any) -> Settings:
 
     ``overrides`` replace individual fields (tests use them to point paths at temp dirs). When
     ``data_dir`` is overridden, the paths derived from it follow unless overridden too.
+
+    For ``env="test"`` without a ``data_dir`` override, ``state_dir``, ``logs_dir``,
+    ``backups_dir`` and ``install_dir`` default to :func:`scratch_dir_for_tests` (never the real
+    folders); the cluster paths stay real so tests can reach the cluster.
     """
     env = resolve_env(env)
     field_names = {f.name for f in dataclasses.fields(Settings)}
@@ -214,7 +265,8 @@ def load_settings(env: str | None = None, **overrides: Any) -> Settings:
     if unknown:
         raise ConfigError(f"Unknown settings: {', '.join(sorted(unknown))}")
 
-    data_dir = Path(overrides.pop("data_dir", None) or default_data_dir())
+    data_dir_override = overrides.pop("data_dir", None)
+    data_dir = Path(data_dir_override or default_data_dir())
     if env == "test":
         db_name, db_role = f"{TEST_DB_PREFIX}{os.getpid()}", "budgetapp_test"
         plaid_env = "sandbox"
@@ -241,6 +293,13 @@ def load_settings(env: str | None = None, **overrides: Any) -> Settings:
         "db_role": db_role,
         "plaid_env": plaid_env,
     }
+    if env == "test":
+        scratch = scratch_dir_for_tests()
+        values["logs_dir"] = scratch / "logs"
+        if not data_dir_override:
+            values["state_dir"] = scratch / "state"
+            values["backups_dir"] = scratch / "backups"
+            values["install_dir"] = scratch / "venv"
     values.update(overrides)
     settings = Settings(**values)
     settings.validate()

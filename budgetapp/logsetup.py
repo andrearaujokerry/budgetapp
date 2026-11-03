@@ -3,11 +3,17 @@
 Every secret read through :mod:`budgetapp.secrets` is registered here, and anything shaped like a
 Plaid token (``access-sandbox-…``, ``public-production-…``, ``link-sandbox-…``) is masked, so
 neither ever reaches a log file, the console or a traceback.
+
+Log files stay bounded: the app's own logs (``web-<env>.log``, ``sync-<env>.log``) rotate at 5 MB,
+keeping 3 older files, and :func:`trim_logs` (run by the nightly backup agent) cuts any other
+``*.log`` over 10 MB down to its newest 1 MB in place: launchd and PostgreSQL keep those files open
+(``sync.log``, ``backup.log``, ``web.log``, ``postgres.log``), so they can't be renamed.
 """
 
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import os
 import re
 import sys
@@ -25,6 +31,12 @@ _secrets: set[str] = set()
 _pattern: re.Pattern[str] | None = None
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+#: The app's own log files rotate at this size, keeping LOG_BACKUPS older files (.1 … .3).
+LOG_MAX_BYTES = 5 * 2**20
+LOG_BACKUPS = 3
+#: trim_logs: a ``*.log`` over TRIM_ABOVE bytes keeps only its newest TRIM_KEEP bytes.
+TRIM_ABOVE = 10 * 2**20
+TRIM_KEEP = 2**20
 
 
 def register_secret(value: str | None) -> None:
@@ -83,13 +95,59 @@ class RedactingFormatter(logging.Formatter):
         return redact(super().formatException(ei))
 
 
+class PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """Rotates like :class:`~logging.handlers.RotatingFileHandler`; every file it creates (the
+    first one and each one after a rotation) is 0600 whatever the umask (Terminal runs use 022)."""
+
+    def _open(self) -> Any:
+        fd = os.open(self.baseFilename, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+        return open(fd, "a", encoding=self.encoding, errors=self.errors)  # noqa: SIM115
+
+
 def _private_file_handler(path: Path) -> logging.Handler:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if not path.exists():
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
-        os.close(fd)
-    handler = logging.FileHandler(path, encoding="utf-8")
-    return handler
+    return PrivateRotatingFileHandler(
+        path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8"
+    )
+
+
+def trim_logs(
+    folder: Path, *, max_bytes: int = TRIM_ABOVE, keep_bytes: int = TRIM_KEEP
+) -> list[Path]:
+    """Cut every ``*.log`` in ``folder`` larger than ``max_bytes`` down to its newest whole lines
+    (about ``keep_bytes``), in place; returns the trimmed files.
+
+    In place, because launchd (the agents' output) and PostgreSQL keep these files open with
+    ``O_APPEND``: their next line lands after the kept part. A renamed file would keep growing
+    unseen. The mode is unchanged. A file that can't be read or written is skipped.
+    """
+    trimmed = []
+    try:
+        candidates = sorted(Path(folder).glob("*.log"))
+    except OSError:
+        return []
+    for path in candidates:
+        try:
+            if not path.is_file() or path.stat().st_size <= max_bytes:
+                continue
+            with open(path, "r+b") as handle:
+                size = handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, size - keep_bytes))
+                tail = handle.read()
+                newline = tail.find(b"\n")
+                tail = tail[newline + 1 :] if newline != -1 else tail
+                note = (
+                    f"--- older lines removed by budgetapp: the log was {size:,} bytes; the "
+                    "newest ones follow ---\n"
+                )
+                handle.seek(0)
+                handle.truncate()
+                handle.write(note.encode() + tail)
+        except OSError as exc:
+            logging.getLogger(__name__).warning("could not trim %s: %s", path, exc)
+            continue
+        trimmed.append(path)
+    return trimmed
 
 
 def make_handler(handler: logging.Handler, fmt: str = LOG_FORMAT) -> logging.Handler:
@@ -134,13 +192,38 @@ def setup_logging(
 
 
 def install_excepthook() -> None:
-    """Print uncaught exceptions with secrets redacted (CLI entry points call this)."""
+    """Print uncaught exceptions with secrets redacted (CLI entry points call this).
+
+    Covers the main thread (``sys.excepthook``), every other thread (``threading.excepthook``,
+    e.g. the web app's background sync worker) and exceptions Python cannot raise
+    (``sys.unraisablehook``); under launchd stderr is a log file, so none may leak a secret.
+    """
 
     def hook(exc_type: Any, exc: BaseException, tb: Any) -> None:
         text = "".join(traceback.format_exception(exc_type, exc, tb))
         sys.stderr.write(redact(text))
 
+    def thread_hook(args: Any) -> None:
+        if args.exc_type is SystemExit:
+            return
+        name = args.thread.name if args.thread is not None else "unknown"
+        text = "".join(
+            traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)
+        )
+        sys.stderr.write(redact(f"Exception in thread {name}:\n{text}"))
+
+    def unraisable_hook(unraisable: Any) -> None:
+        message = unraisable.err_msg or "Exception ignored in"
+        text = "".join(
+            traceback.format_exception(
+                unraisable.exc_type, unraisable.exc_value, unraisable.exc_traceback
+            )
+        )
+        sys.stderr.write(redact(f"{message}: {unraisable.object!r}\n{text}"))
+
     sys.excepthook = hook
+    threading.excepthook = thread_hook
+    sys.unraisablehook = unraisable_hook
 
 
 def uvicorn_log_config(level: str = "info") -> dict[str, Any]:

@@ -1,0 +1,21 @@
+{#- Imported CSV history and the linked cards it could move to (ARCHITECTURE §6: linking attaches
+    a lone manual account by itself; otherwise the user chooses here). Context: overview.attach
+    (linking.AttachChoice). -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+{%- set choice = overview.attach -%}
+{% call ui.card("Imported CSV history", subtitle="Move the transactions you imported from Amex CSV files onto the linked card, so each charge is counted once.", id="attach") %}
+<form method="post" action="/connection/attach" class="form">
+<div class="form-row">
+{%- set manual_options = [] %}
+{%- for m in choice.manual %}{% set _ = manual_options.append((m.id, m.label ~ (" (" ~ m.detail ~ ")" if m.detail else ""))) %}{% endfor %}
+{%- set linked_options = [] %}
+{%- for c in choice.linked %}{% set _ = linked_options.append((c.id, c.label)) %}{% endfor %}
+{{ form.select_field("manual_id", "Imported account", manual_options, id="attach-manual") }}
+{{ form.select_field("account_id", "Linked card", linked_options, id="attach-card") }}
+</div>
+<div class="form-actions">
+{{ ui.button("Move the history", variant="primary", type="submit", icon="merge", data_confirm="Move all imported transactions onto this card? Charges Plaid also has are kept once, with your edits.") }}
+</div>
+</form>
+{% endcall %}

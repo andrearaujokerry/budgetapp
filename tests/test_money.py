@@ -105,3 +105,35 @@ def test_is_cents():
     assert is_cents(Decimal("1"))
     assert not is_cents(Decimal("1.234"))
     assert not is_cents(Decimal("NaN"))
+
+
+class TestRange:
+    """NUMERIC(14,2) holds up to 999,999,999,999.99: bigger input is a friendly error, not a 500."""
+
+    @pytest.mark.parametrize("text", ["9" * 27, "1000000000000", "1,000,000,000,000.00", "-1e13"])
+    def test_typed_amounts_that_do_not_fit_are_refused_kindly(self, text):
+        with pytest.raises(ValueError, match="under \\$1,000,000,000,000|not an amount"):
+            parse_money_input(text)
+
+    def test_the_largest_amount_fits(self):
+        assert parse_money_input("999,999,999,999.99") == Decimal("999999999999.99")
+        assert to_money("-999999999999.99") == Decimal("-999999999999.99")
+
+    @pytest.mark.parametrize("value", ["9" * 27, Decimal("1e30"), 10**13, "999999999999.995"])
+    def test_to_money_raises_value_error_never_invalid_operation(self, value):
+        with pytest.raises(ValueError, match="out of range"):
+            to_money(value)
+
+    def test_is_cents_never_raises(self):
+        assert is_cents(Decimal("1e30")) is False
+        assert is_cents(Decimal("12.34")) is True
+
+    def test_rule_bounds_out_of_range_are_validation_errors(self, db):
+        from budgetapp.services.categorize import RuleValidationError, create_rule
+        from tests.factories import get_category
+
+        home = get_category(db, "Home")
+        for value in ("9" * 27, "1000000000000"):
+            with pytest.raises(RuleValidationError) as info:
+                create_rule(db, category_id=home.id, amount_min=value)
+            assert "amount_min" in info.value.errors

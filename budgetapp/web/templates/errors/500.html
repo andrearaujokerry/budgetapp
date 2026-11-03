@@ -1,0 +1,15 @@
+{#- 500 page. Never shows exception details: those go to the log only.
+    Render it through web/templating.render() when possible so `env` is set; with
+    an empty context it still renders, without an env bar (never a false
+    "Sandbox" claim). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% block title %}Something went wrong{% endblock %}
+{% block content %}
+<div class="card">
+{% call ui.empty_state("Something went wrong", "The app hit an unexpected error and nothing was changed. The details were written to the app's log on this Mac.", icon="alert", heading=1, tone="warn") %}
+<a class="btn btn--primary" href="">Try again</a>
+<a class="btn" href="/">Go to the dashboard</a>
+{% endcall %}
+</div>
+{% endblock %}

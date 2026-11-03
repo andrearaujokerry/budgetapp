@@ -1,0 +1,79 @@
+{#- The live preview of a rule being written (swapped as you type). Needs `pv`
+    (routes/rules._preview_state): blank, invalid (with the messages) or ready. -#}
+{%- import "components/ui.html" as ui -%}
+{%- if pv.state == "blank" %}
+{{ ui.empty_state("Nothing to match yet", "Fill in a merchant, a description, an amount or a card: the past transactions the rule matches show up here.", icon="search", compact=true) }}
+{%- elif pv.state == "invalid" %}
+{{ ui.empty_state("Fix the form to see the preview", none, icon="alert", compact=true, tone="warn") }}
+<ul class="preview-errors">
+{%- for message in pv.errors.values() %}
+<li>{{ message }}</li>
+{%- endfor %}
+</ul>
+{%- else %}
+{%- set p = pv.preview -%}
+{%- set shows = pv.shows_changes -%}
+<div class="preview-summary">
+<p class="preview-summary__count"><strong>{{ '{:,}'.format(p.match_count) }}</strong> past transaction{{ "s" if p.match_count != 1 }} match{{ "es" if p.match_count == 1 }}</p>
+{%- if not p.is_active and p.is_new %}
+<p class="preview-summary__note">{{ ui.icon("info", size="sm") }}<span>The rule is off: saving it changes nothing.</span></p>
+{%- elif not pv.apply %}
+<p class="preview-summary__note">{{ ui.icon("info", size="sm") }}<span>Past transactions keep their category: “Also apply to past transactions” is off.</span></p>
+{%- elif not pv.category_chosen %}
+<p class="preview-summary__note">{{ ui.icon("info", size="sm") }}<span>Choose a category to see what would change.</span></p>
+{%- endif %}
+{%- if shows or p.skipped_user_count or p.released_count %}
+<ul class="preview-outcomes">
+{%- if shows %}
+<li class="preview-outcomes__main">{{ ui.icon("check-circle", size="sm") }}<span>
+{%- if p.would_change_count %}{{ p.would_change_count|pluralize("transaction") }} change{{ "s" if p.would_change_count == 1 }} category when you save
+{%- else %}No past transaction changes category when you save{% endif -%}
+</span></li>
+{%- if p.unchanged_count %}
+<li>{{ ui.icon("check", size="sm") }}<span>{{ p.unchanged_count|pluralize("transaction") }} {{ "is" if p.unchanged_count == 1 else "are" }} already in {{ pv.category.name }}</span></li>
+{%- endif %}
+{%- endif %}
+{%- if p.skipped_user_count %}
+<li>{{ ui.icon("lock", size="sm") }}<span>{{ p.skipped_user_count|pluralize("transaction") }} you categorized yourself stay{{ "s" if p.skipped_user_count == 1 }} as {{ "it is" if p.skipped_user_count == 1 else "they are" }}</span></li>
+{%- endif %}
+{%- if shows and p.payment_count %}
+<li>{{ ui.icon("credit-card", size="sm") }}<span>{{ p.payment_count|pluralize("card payment") }} stay{{ "s" if p.payment_count == 1 }} in Card Payments</span></li>
+{%- endif %}
+{%- if shows and p.earlier_rule_count %}
+<li>{{ ui.icon("wand", size="sm") }}<span>{{ p.earlier_rule_count|pluralize("transaction") }} {{ "goes" if p.earlier_rule_count == 1 else "go" }} to a rule that runs first</span></li>
+{%- endif %}
+{%- if p.released_count %}
+<li>{{ ui.icon("refresh", size="sm") }}<span>{{ p.released_count|pluralize("transaction") }} it categorized before no longer match{{ "es" if p.released_count == 1 }}{% if shows %} and get{{ "s" if p.released_count == 1 }} categorized again{% endif %}</span></li>
+{%- endif %}
+</ul>
+{%- endif %}
+</div>
+{%- if p.sample %}
+<ul class="preview-list" aria-label="{{ 'Matching transactions: the ones that change first, then the newest' if p.changes_first else 'Matching transactions, newest first' }}">
+{%- for item in p.sample %}
+<li class="preview-item">
+<div class="preview-item__main">
+<span class="preview-item__desc" title="{{ item.detail or item.description }}">{{ item.description }}</span>
+{{ ui.money(item.amount, pending=item.pending) }}
+</div>
+<div class="preview-item__meta">
+<span class="preview-item__date">{{ item.date|date_long }}</span>
+{{ ui.category_badge(item.current) }}
+{%- if shows and item.proposed %}
+<span class="preview-item__arrow">{{ ui.icon("chevron-right", size="sm") }}<span class="sr-only">changes to</span></span>
+{{ ui.category_badge(item.proposed) }}
+{%- endif %}
+</div>
+{#- "same" says nothing new: the summary counts those, and no arrow means no change. -#}
+{%- if item.note and item.status != "same" %}
+<p class="preview-item__note">{{ item.note }}</p>
+{%- endif %}
+</li>
+{%- endfor %}
+</ul>
+{%- set listed = p.match_count + p.released_count -%}
+{%- if listed > p.sample|length %}
+<p class="preview-more muted text-sm">Showing {{ p.sample|length }} of {{ '{:,}'.format(listed) }}: {{ "the ones that change first, then the most recent" if p.changes_first else "the most recent" }}.</p>
+{%- endif %}
+{%- endif %}
+{%- endif %}

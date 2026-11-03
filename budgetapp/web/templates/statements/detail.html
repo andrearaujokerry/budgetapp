@@ -1,0 +1,248 @@
+{#- One statement period (INS-4, REL-3, Gate D), laid out like the Amex summary box.
+    Context: detail (StatementDetail), cycle, summary, account, today, form_values (dict of
+    field → value), form_errors, reported_fields. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% import "components/forms.html" as form %}
+{% import "statements/_macros.html" as stmt %}
+{% block title %}Statement · {{ cycle.closing_date|date_short }}{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/statements.css">{% endblock %}
+
+{%- macro box_money(value, operator) -%}
+{%- if value is none -%}<span class="amount amount--none">—</span>
+{%- else -%}{{ ui.money(value, signed=operator in ['+', '−'], tone="neutral") }}
+{%- endif -%}
+{%- endmacro -%}
+
+{%- macro difference(f) -%}
+{%- if f.difference is none -%}<span class="amount amount--none">—</span>
+{%- elif f.matches -%}<span class="stmt-match">{{ ui.icon("check") }}<span>Matches</span></span>
+{%- else -%}<span class="stmt-diff">{{ ui.icon("alert") }}<span>{{ f.difference|money_signed }}</span></span>
+{%- endif -%}
+{%- endmacro -%}
+
+{%- macro side_badge(side) -%}
+{%- if side == "this" %}{{ ui.badge("This statement", tone="accent") }}
+{%- elif side == "previous" %}{{ ui.badge("Previous", tone="muted") }}
+{%- elif side == "next" %}{{ ui.badge("Next", tone="muted") }}
+{%- else %}{{ ui.badge("Pending", icon="clock") }}{% endif -%}
+{%- endmacro -%}
+
+{%- macro boundary_row(line) -%}
+<tr class="{{ 'is-pending' if line.pending }}{{ ' is-muted' if line.side in ['previous', 'next'] }}">
+<td class="table__date">{{ line.posted_date|date_short if line.posted_date else "—" }}</td>
+<td class="table__date col-optional-sm">{{ line.date|date_short }}</td>
+{{ line_cells(line) }}
+<td class="col-optional-sm">{{ side_badge(line.side) }}</td>
+<td class="num">{{ ui.money(line.amount, pending=line.pending) }}</td>
+</tr>
+{%- endmacro -%}
+
+{%- macro line_cells(line) -%}
+<td class="col-grow">
+<span class="table__primary">{{ line.merchant_name or line.name }}</span>
+{%- if line.merchant_name %}<span class="table__secondary">{{ line.name }}</span>{% endif %}
+</td>
+{%- endmacro -%}
+
+{% block content %}
+{%- set base_url = "/statements/" ~ account.id %}
+{%- set url = base_url ~ "/" ~ cycle.key %}
+{%- set check = summary.check %}
+{%- set errors = form_errors %}
+
+{% call ui.page_header("Statement · " ~ cycle.label, account.name ~ " · " ~ cycle.days ~ " days · " ~ stmt.source_text(cycle), back_href="/statements?account=" ~ account.id, back_label="All statements") %}
+{%- if detail.earlier %}{{ ui.button("Earlier", icon="chevron-left", href=base_url ~ "/" ~ detail.earlier.key, tooltip=detail.earlier.label) }}{% endif %}
+{%- if detail.later %}{{ ui.button("Later", icon="chevron-right", href=base_url ~ "/" ~ detail.later.key, tooltip=detail.later.label) }}{% endif %}
+{{ ui.button("Print", icon="receipt", data_print=true) }}
+{% endcall %}
+
+{#- ------------------------------------------------------------ the check, in words -#}
+{%- set previous_words = "the previous statement's New Balance" if check.previous_source == "previous_statement" else "this statement's Previous Balance" %}
+{%- set settle_note = (" Late transactions can still arrive until " ~ (cycle.final_on|date_long) ~ ", so check again then.") if check.provisional else "" %}
+{%- if check.state == "open" %}
+{{ ui.banner("info", "It closes on " ~ (cycle.closing_date|date_long) ~ ". Charges that post until then belong to it; the check against your statement runs once it has closed.", title="This period is still open.", icon="clock", id="check-banner") }}
+{%- elif check.state == "pass" %}
+{{ ui.banner("ok", "The app's activity for this period, " ~ (check.net_activity|money) ~ ", equals your New Balance of " ~ (check.new_balance|money) ~ " minus " ~ previous_words ~ ", " ~ (check.previous_balance|money) ~ "." ~ settle_note, title=("Matches your statement so far." if check.provisional else "Matches your statement to the cent."), id="check-banner") }}
+{%- elif check.state == "fail" %}
+{{ ui.banner("over", "The app's activity for this period is " ~ (check.net_activity|money) ~ ". Your statement says " ~ (check.expected_activity|money) ~ ": the New Balance of " ~ (check.new_balance|money) ~ " minus " ~ previous_words ~ ", " ~ (check.previous_balance|money) ~ ". The app has " ~ (check.difference|abs|money) ~ (" less" if check.difference < 0 else " more") ~ ". Differences usually come from transactions posted near the closing dates (listed below) or a typo in the numbers typed." ~ settle_note, title="Off by " ~ (check.difference|abs|money) ~ ".", id="check-banner") }}
+{%- elif check.missing == "new_balance" %}
+{{ ui.banner("info", "Type this statement's New Balance below to check the period to the cent.", title="Not checked yet.", id="check-banner") }}
+{%- else %}
+{{ ui.banner("info", "Type the Previous Balance printed on this statement below (or the previous statement's New Balance) to check the period to the cent.", title="Not checked yet.", id="check-banner") }}
+{%- endif %}
+
+{%- if cycle.flagged %}
+{%- if cycle.days < 25 %}
+{{ ui.banner("warn", "Statement periods are usually 28 to 31 days. If one of its closing dates was entered by mistake, open that statement and remove it, or set it to the date printed on the statement.", title="This period is " ~ cycle.days ~ " days long.", id="flagged-banner") }}
+{%- else %}
+{{ ui.banner("warn", "Statement periods are usually 28 to 31 days. If a statement is missing, add it by its closing date on the Statements page.", title="This period is " ~ cycle.days ~ " days long.", id="flagged-banner") }}
+{%- endif %}
+{%- endif %}
+{%- if errors.get("period") %}
+{{ ui.banner("over", errors.get("period"), title="Nothing was saved.", id="period-error") }}
+{%- endif %}
+{%- set identity = cycle.reported.identity_difference %}
+{%- if identity is not none and identity != 0 %}
+{{ ui.banner("warn", "Previous Balance − Payments/Credits + New Charges + Fees + Interest Charged comes to " ~ ((cycle.reported.new_balance - identity)|money) ~ ", but the New Balance typed is " ~ (cycle.reported.new_balance|money) ~ ". Check the numbers for a typo.", title="The statement's numbers don't add up.", id="identity-banner") }}
+{%- endif %}
+
+{#- ------------------------------------------------------------ the summary box -#}
+<div class="grid grid--sidebar stmt-top">
+{% set footer %}
+<p class="text-sm">Activity {{ ui.money(summary.net_activity, tone="neutral") }} from {{ summary.transaction_count|pluralize("posted transaction") }}.
+{%- if summary.balance_basis == "previous_statement" %} The app's Previous Balance is the New Balance of the statement that closed {{ cycle.previous_closing|date_long }}.
+{%- elif summary.balance_basis == "this_statement" %} The app's New Balance starts from this statement's Previous Balance, because the statement before it isn't recorded.
+{%- else %} Type this statement's Previous Balance to see the app's New Balance.{% endif %}
+{%- if detail.pending.count %} {{ detail.pending.count|pluralize("pending charge") }} ({{ detail.pending.total|money }}) dated in this period {{ "isn't" if detail.pending.count == 1 else "aren't" }} counted until {{ "it posts" if detail.pending.count == 1 else "they post" }}.{% endif %}</p>
+{% endset %}
+{% call ui.card("Summary", subtitle="Laid out like the box at the top of your Amex statement.", flush=true, footer=footer, id="summary") %}
+<div class="table-wrap">
+<table class="table table--compact stmt-box">
+<thead><tr>
+<th scope="col" class="col-grow"><span class="sr-only">Line</span></th>
+<th scope="col" class="num">App</th>
+<th scope="col" class="num">Statement</th>
+<th scope="col" class="num col-optional-sm">Difference</th>
+</tr></thead>
+<tbody>
+{%- for f in summary.fields %}
+<tr class="stmt-box__row{{ ' stmt-box__row--total' if f.key == 'new_balance' }}{{ ' stmt-box__row--off' if f.matches == false }}" id="line-{{ f.key|replace('_', '-') }}">
+<th scope="row" class="col-grow">{% if f.matches == false %}{{ ui.icon("alert", label="Doesn't match: " ~ (f.difference|money_signed)) }}{% endif %}{{ f.label }}</th>
+<td class="num">{{ box_money(f.app, f.operator) }}</td>
+<td class="num">{{ box_money(f.reported, f.operator) }}</td>
+<td class="num col-optional-sm">{{ difference(f) }}</td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{% endcall %}
+
+{#- ------------------------------------------------------------ the statement's numbers -#}
+{%- if cycle.is_estimate_open %}
+{% set edit_subtitle %}Its statement isn't issued yet.{% endset %}
+{% call ui.card("Your statement", subtitle=edit_subtitle, id="edit", class="no-print") %}
+<p class="stmt-later">You can type this statement's numbers once it closes, around {{ cycle.closing_date|date_long }} (the date is an estimate). If Amex closes it on another day, add the statement by the date printed on it on the <a href="/statements?account={{ account.id }}#add-statement">Statements page</a>.</p>
+{% endcall %}
+{%- else %}
+{% set edit_subtitle %}Type the numbers from the summary box of your Amex statement (PDF). Leave a box empty if you don't have that number.{% endset %}
+{% call ui.card("Your statement", subtitle=edit_subtitle, id="edit", class="no-print") %}
+<form class="form" method="post" action="{{ url }}">
+<div class="form-row">
+{{ form.date_field("closing_date", "Closing date", value=form_values.get("closing_date"), required=true, error=errors.get("closing_date"), help="As printed on the statement.", id="f-closing-date") }}
+{%- if cycle.can_set_period_start %}
+{{ form.date_field("period_start", "Period start", value=form_values.get("period_start"), optional=true, error=errors.get("period_start"), help="Earliest statement only: the day after the previous closing date.", id="f-period-start") }}
+{%- endif %}
+</div>
+<div class="form-row stmt-fields">
+{%- for name, label in reported_fields %}
+{%- if name == "previous_balance" %}{% set help = "A credit balance (CR) is negative." %}
+{%- elif name == "payments_credits" %}{% set help = "As printed, with or without the minus." %}
+{%- elif name == "new_balance" and cycle.reported.new_balance_source == "liabilities" %}{% set help = "From Amex through Plaid." %}
+{%- else %}{% set help = none %}{% endif %}
+{#- No "0.00" placeholder: an empty box means "not typed", never $0.00. -#}
+{{ form.money_field(name, label, value=form_values.get(name), placeholder="", allow_negative=name in ["previous_balance", "payments_credits", "new_balance"], error=errors.get(name), help=help, id="f-" ~ name|replace("_", "-")) }}
+{%- endfor %}
+</div>
+{{ form.textarea_field("notes", "Notes", value=form_values.get("notes"), rows=2, optional=true, error=errors.get("notes"), id="f-notes") }}
+<div class="form-actions">{{ ui.button("Save statement", variant="primary", type="submit") }}</div>
+</form>
+{%- if cycle.status != "open" %}
+<div class="stmt-checked">
+{%- if cycle.checked_at %}
+<p class="stmt-checked__text">{{ ui.icon("check-circle") }}<span>You checked this statement on {{ cycle.checked_at|date_long }}.</span></p>
+<form method="post" action="{{ url }}/checked"><input type="hidden" name="checked" value="0">{{ ui.button("Mark as not checked", variant="ghost", size="sm", type="submit") }}</form>
+{%- else %}
+<p class="stmt-checked__text muted"><span>Compared this period with your statement?</span></p>
+<form method="post" action="{{ url }}/checked"><input type="hidden" name="checked" value="1">{{ ui.button("Mark as checked", icon="check", size="sm", type="submit") }}</form>
+{%- endif %}
+</div>
+{%- endif %}
+{%- if cycle.removable %}
+<div class="stmt-remove">
+<p class="stmt-remove__text muted">You added this statement. If its date was a mistake, remove it (its typed numbers go with it).</p>
+<form method="post" action="{{ url }}/remove" data-confirm="Remove the statement closing {{ cycle.closing_date|date_long }}? Its typed numbers are removed too.">{{ ui.button("Remove statement", icon="trash", variant="danger", size="sm", type="submit") }}</form>
+</div>
+{%- endif %}
+{% endcall %}
+{%- endif %}
+</div>
+
+{#- ------------------------------------------------------------ boundary transactions -#}
+{% set boundary_subtitle %}Transactions posted within {{ detail.boundaries[0].days }} days of each end of the period. A charge on the wrong side of a closing date is the usual cause of a difference.{% endset %}
+{% call ui.card("Near the closing dates", subtitle=boundary_subtitle, flush=true, id="boundaries") %}
+{%- for b in detail.boundaries %}
+<div class="stmt-boundary">
+<h3 class="stmt-boundary__title">{{ "Start of the period" if b.edge == "start" else "End of the period" }} <span class="muted">· {{ "previous statement closed" if b.edge == "start" else "closes" }} {{ b.closing_date|date_long }}</span></h3>
+{%- if b.lines %}
+<div class="table-wrap">
+<table class="table table--compact stmt-lines">
+<thead><tr>
+<th scope="col">Posted</th>
+<th scope="col" class="col-optional-sm">Date</th>
+<th scope="col" class="col-grow">Description</th>
+<th scope="col" class="col-optional-sm">Statement</th>
+<th scope="col" class="num">Amount</th>
+</tr></thead>
+<tbody>
+{%- set earlier_side, later_side = ("previous", "this") if b.edge == "start" else ("this", "next") %}
+{%- for line in b.lines|selectattr("side", "equalto", earlier_side) %}{{ boundary_row(line) }}{% endfor %}
+<tr class="stmt-cut"><td colspan="5"><span>{{ ui.icon("calendar", size="sm") }}{{ "Previous closing date" if b.edge == "start" else "Closing date" }}: {{ b.closing_date|date_long }}</span></td></tr>
+{%- for line in b.lines|selectattr("side", "equalto", later_side) %}{{ boundary_row(line) }}{% endfor %}
+{%- set pending = b.lines|selectattr("side", "equalto", "pending")|list %}
+{%- if pending %}
+<tr class="stmt-cut stmt-cut--pending"><td colspan="5"><span>{{ ui.icon("clock", size="sm") }}Still pending: can post into either statement</span></td></tr>
+{%- for line in pending %}{{ boundary_row(line) }}{% endfor %}
+{%- endif %}
+</tbody>
+</table>
+</div>
+{%- else %}
+<p class="stmt-boundary__empty muted">Nothing posted in these days.</p>
+{%- endif %}
+</div>
+{%- endfor %}
+{% endcall %}
+
+{#- ------------------------------------------------------------ every posted transaction -#}
+{% call ui.card("Transactions", subtitle=summary.transaction_count|pluralize("posted transaction") ~ " in this period, in the statement's sections.", flush=true, id="transactions", class="stmt-transactions") %}
+{%- if detail.groups %}
+<div class="table-wrap">
+<table class="table stmt-lines">
+<thead><tr>
+<th scope="col">Posted</th>
+<th scope="col" class="col-optional-sm">Date</th>
+<th scope="col" class="col-grow">Description</th>
+<th scope="col" class="col-optional-md">Category</th>
+<th scope="col" class="num">Amount</th>
+</tr></thead>
+{%- for g in detail.groups %}
+<tbody id="bucket-{{ g.bucket|replace('_', '-') }}">
+<tr class="stmt-group">
+<td></td>
+<td class="col-optional-sm"></td>
+<th scope="rowgroup" class="col-grow">{{ g.label }} <span class="stmt-group__count">· {{ g.lines|length }}</span></th>
+<td class="col-optional-md"></td>
+<td class="num">{{ ui.money(g.total, tone="neutral") }}</td>
+</tr>
+{%- for line in g.lines %}
+<tr>
+<td class="table__date">{{ line.posted_date|date_short }}</td>
+<td class="table__date col-optional-sm">{{ line.date|date_short }}</td>
+{{ line_cells(line) }}
+<td class="col-optional-md">{{ ui.category_badge(line.category) }}</td>
+<td class="num">{{ ui.money(line.amount) }}</td>
+</tr>
+{%- endfor %}
+</tbody>
+{%- endfor %}
+</table>
+</div>
+{%- else %}
+{{ ui.empty_state("Nothing posted in this period", "Transactions appear here once they post.", icon="list", compact=true) }}
+{%- endif %}
+{% endcall %}
+{% endblock %}
+
+{% block scripts %}<script src="/static/js/statements.js" defer></script>{% endblock %}

@@ -19,6 +19,7 @@ from budgetapp.logsetup import install_excepthook, setup_logging
 #: Command modules in ``budgetapp/commands`` (a fixed list; each has ``register(subparsers)``).
 COMMAND_MODULES = (
     "serve",
+    "demo",
     "setup",
     "db",
     "migrate",
@@ -65,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments, load settings for the chosen environment and run the command."""
-    from budgetapp.db import SchemaMismatch
+    from budgetapp.db import DatabaseUnavailable, SchemaMismatch
     from budgetapp.pgcluster import ClusterError
     from budgetapp.secrets import KeychainApprovalNeeded, SecretStoreError
 
@@ -90,7 +91,13 @@ def main(argv: list[str] | None = None) -> int:
     except KeychainApprovalNeeded as exc:
         print(f"\n{exc}\n", file=sys.stderr)
         return EXIT_KEYCHAIN
-    except (ConfigError, ClusterError, SchemaMismatch, SecretStoreError) as exc:
+    except (
+        ConfigError,
+        ClusterError,
+        DatabaseUnavailable,
+        SchemaMismatch,
+        SecretStoreError,
+    ) as exc:
         print(f"\nerror: {exc}\n", file=sys.stderr)
         return 1
 

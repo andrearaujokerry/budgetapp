@@ -1,0 +1,13 @@
+{#- Budgets page (BUD-1..5). The page body is budgets/_page.html, which HTMX period navigation
+    swaps into #budgets-page; budgets/README in routes/budgets.py lists the routes. -#}
+{% extends "base.html" %}
+{% block title %}Budgets{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/budgets.css">{% endblock %}
+{% block content %}
+{#- Announced after the period arrows (app.js copies the page's data-status here). -#}
+<p id="budgets-page-status" class="sr-only" role="status" data-status-for="budgets-page"></p>
+<div id="budgets-page" class="budgets-page">
+{% include "budgets/_page.html" %}
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/js/budgets.js" defer></script>{% endblock %}

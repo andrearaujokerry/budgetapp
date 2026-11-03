@@ -45,10 +45,13 @@ Paths — never inside the git checkout, never under `~/Desktop`, `~/Documents`,
   (excluded from Time Machine; a copy of a live data directory is not a backup anyway)
 - `~/Library/Application Support/budgetapp/run/` — the cluster's private Unix socket directory
 - `~/Library/Application Support/budgetapp/venv/` — the production install of the app
+- `~/Library/Application Support/budgetapp/bin/` — the postgres agent's start-up wrapper script
 - `~/Library/Application Support/budgetapp/backups/<env>/` — nightly `pg_dump` files (REL-2)
 - `~/Library/Application Support/budgetapp/state/` — small marker files (alert de-duplication
   when the database or Keychain is unavailable, install stamp, recovery files)
-- `~/Library/Logs/budgetapp/` — app, sync, backup and postgres logs (never contain secrets)
+- `~/Library/Logs/budgetapp/` — app, sync, backup and postgres logs (never contain secrets). The
+  app's own logs rotate (5 MB, 3 kept); the backup agent trims any other log over 10 MB to its
+  newest 1 MB in place (launchd and PostgreSQL keep those files open with `O_APPEND`)
 
 All are created with mode `0700`; files written there are `0600`.
 
@@ -56,16 +59,28 @@ All are created with mode `0700`; files written there are `0600`.
 macOS privacy protection (TCC) blocks launchd-started processes from `~/Desktop`, where the
 repository lives. So production **always** runs the Application Support install:
 - `upgrade_install()` is the only way production code changes: refuse if the repository has
-  uncommitted changes → stop the web, sync and backup agents → take a backup →
-  `pip install -r requirements.txt` then `pip install --no-deps <repo>` (never editable) →
-  run migrations from the new install while holding the sync lock → write the install stamp
-  (git commit) → restart the agents.
+  uncommitted changes → stop the web, sync and backup agents → take a pre-upgrade dump (kept
+  apart from the 30 backups, newest 5) → `pip install -r requirements.txt -r
+  requirements-build.txt` then `pip install --no-deps --no-build-isolation` from
+  `git archive <commit>` (never the working tree, never editable; the pinned build tools mean
+  nothing is downloaded once the dependencies are installed, so upgrades work offline) → run
+  migrations from the new install while holding the sync lock → write the install stamp (that
+  commit) → restart the agents.
 - `./run live` calls `upgrade_install()` when the repository's commit differs from the stamp,
-  then opens the web agent (or serves from the install when no web agent is installed).
+  then opens the web agent (or serves from the install when no web agent is installed). When the
+  upgrade stops before it changed the install (uncommitted changes, an unreadable database, a
+  failed backup), `./run live` says why and opens the installed copy as it is.
 - A **schema guard** in `db.py` compares the database's Alembic revision with the code's
   head at every entry point. In production nothing migrates automatically: the web app shows
   an "upgrade needed" page and sync exits quietly with one de-duplicated notice. Sandbox
-  `./run` migrates the sandbox database automatically.
+  `./run` migrates the sandbox database automatically. A database that cannot be reached is
+  not a schema problem: the guard raises `DatabaseUnavailable` ("try later" / an error page),
+  never "upgrade needed". A database at a revision this code doesn't ship (newer code, another
+  branch, migrated it) raises `SchemaAhead`: `migrate_env` refuses it before Alembic runs, and
+  the messages say to check out that code or restore an older backup, never to migrate.
+- `./run setup` creates the production schema only while that database is still empty (the
+  first setup); it never upgrades it afterwards, and `migrate --env production` refuses to run
+  from a git checkout. Only `upgrade_install()` upgrades production.
 - Once a migration has been applied to production it is never edited.
 
 ### Dedicated PostgreSQL cluster
@@ -124,11 +139,17 @@ Rules:
   a page with the same instruction. Run interactively, `doctor` reads every item of both
   environments so the user can click *Always Allow* (needed after each `brew upgrade` of
   Python).
+- A missing item (`MissingSecretError`) names the command that saves it
+  (`secrets.missing_secret_fix`): `./run setup --keys-only` for the Plaid keys, `./run setup` for
+  a database password (it creates the roles and their passwords), `./run doctor` otherwise. The
+  web app shows it on a "Setup isn't finished" page; the sync agent notifies once a day (marker
+  file: no sync runs, so no other alert can) and exits 1.
 - The production access token is written once and read back to verify; it is never
   rewritten. If the Keychain write fails after a successful exchange, the token goes to a
   0600 recovery file under `state/` and the app stops with instructions. `./run setup --env
   production --access-token` re-enters a saved token (via `getpass`), verified with
-  `/item/get`. The README suggests keeping a copy in the user's password manager.
+  `/item/get`. The user guide (`docs/going-live.md`) suggests keeping a copy in the user's
+  password manager.
 
 ## 4. Repository layout
 
@@ -136,6 +157,7 @@ Rules:
 run                         one command starts everything (MNT-1)
 pyproject.toml              hatchling build (installable package) + pytest/ruff config
 requirements.txt            pinned runtime deps; requirements-dev.txt adds test tools
+requirements-build.txt      pinned build tools (hatchling) for offline production installs
 alembic.ini                 dev convenience; points at budgetapp:migrations
 budgetapp/
   __main__.py, cli.py       `python -m budgetapp <command>`
@@ -149,6 +171,7 @@ budgetapp/
   models.py                 all SQLAlchemy models
   migrations/               Alembic environment and versions (shipped inside the package) (MNT-3)
   money.py                  Decimal helpers and formatting
+  textutil.py               control characters out of user text (PostgreSQL refuses NUL)
   periods.py                calendar months, statement cycles, years, days left
   plaid_gateway.py          PlaidGateway protocol, RealPlaidGateway, PlaidError
   services/
@@ -203,7 +226,8 @@ charge, fee or interest; a negative amount is a credit (refund, statement credit
 | plaid_item_id | text unique not null | |
 | institution_id, institution_name | text | |
 | status | text not null default 'healthy' | `healthy` \| `needs_reconnect` \| `error` |
-| error_code, error_message | text | last error (Plaid or internal), cleared on success |
+| error_code, error_message | text | last error (Plaid or internal), cleared on success; `error_message` is the technical text (logs, doctor) |
+| error_display_message | text | Plaid's `display_message` for the user, when sent; cleared on success |
 | transactions_cursor | text | saved cursor; null = start from scratch (never store `''`) |
 | transactions_update_status | text | last `transactions_update_status` |
 | history_complete_at | timestamptz | first time `HISTORICAL_UPDATE_COMPLETE` was seen |
@@ -234,24 +258,37 @@ charge, fee or interest; a negative amount is a credit (refund, statement credit
 | notice | text | a message for the user (e.g. "Plaid re-issued this account; please confirm") |
 | is_hidden | bool not null default false | hides the account in pickers; its money still counts |
 
+`CHECK ((item_id IS NULL) = (plaid_account_id IS NULL))`: an account is manual or linked, never
+half of each. The ORM relationship from `plaid_items` uses `passive_deletes="all"` so deleting an
+Item that still has accounts is refused by the database (ON DELETE RESTRICT), not "fixed" by
+nulling `item_id`.
+
 ### categories
 | column | type | notes |
 | --- | --- | --- |
 | name | text not null | unique on `lower(name)` |
 | kind | text not null default 'expense' | `expense` (spending) \| `income` (credits/rewards, not spending) \| `transfer` (card payments, not spending) |
-| system_key | text unique, null | `uncategorized`, `card_payments` — cannot be merged away or hidden |
+| system_key | text unique, null | `uncategorized` (always `expense`), `card_payments` (always `transfer`) — cannot be merged away, hidden or change kind (CHECK) |
 | is_hidden | bool not null default false | hidden from pickers and budget lists; transactions still count |
-| color | text | hex colour for charts and badges |
+| color | text | palette slot `cat-1` … `cat-16` (theme-aware; the seeded categories use these), `other` (neutral grey), or a custom `#rrggbb` |
 | icon | text | optional emoji |
 | sort_order | int not null default 0 | |
 
-Categories are never deleted except by merging (section 6), which re-points every reference first.
+Categories are never deleted except by merging (`categories.merge_categories`), which re-points
+every reference first: transactions, split parts, rules, mappings, alert events and the category
+ids in tombstones' saved edits. Budgets: the target keeps all its rows; the source's rows move
+only when the target has none; a target with no budget in the current period takes the source's
+current one, written like a budget edit; otherwise the source's rows are dropped.
 
 ### category_mappings (CAT-2)
 `(source, external_key) → category_id` (FK ON DELETE CASCADE), unique on
 `(source, external_key)`. `source` is `plaid_pfc` (keys are Plaid **PFC v2** codes, detailed
 or primary) or `amex_csv` (Amex CSV `Group-Subgroup` strings, or the `Group` prefix).
-Lookup order: detailed/full key, then primary/group key, then Uncategorized.
+Lookup order: detailed/full key, then primary/group key, then Uncategorized. For a negative
+amount the keys with a `|credit` suffix are tried first (unless the row reads like a fee
+reversal): Amex files cash back and billing-inquiry credits under "Fees & Adjustments", so
+`Fees & Adjustments|credit` and `Fees & Adjustments-Fees & Adjustments|credit` map to Credits &
+Rewards while positive fees stay in Fees & Interest.
 
 ### rules (CAT-3)
 | column | type | notes |
@@ -268,7 +305,11 @@ Lookup order: detailed/full key, then primary/group key, then Uncategorized.
 | is_system | bool not null default false | seeded rules |
 | source_transaction_id | FK transactions ON DELETE SET NULL, null | one-click rule origin |
 
-`CHECK` requires at least one condition. All set conditions must match (AND).
+`CHECK` requires at least one condition. All set conditions must match (AND). A `regex`
+pattern runs on the `regex` package with a 0.1 s limit per search (`categorize.REGEX_TIMEOUT`;
+Python's `re` has none, and a pattern like `^(a|aa)+$` backtracks for ever while holding the
+GIL). Saving and the preview refuse a pattern that runs past the limit on a few probe texts or on
+a past transaction; a saved one that does matches nothing from then on (logged once).
 
 ### transactions
 | column | type | notes |
@@ -321,10 +362,18 @@ to the transaction amount. Pending transactions cannot be split.
 One row per (transaction, category) allocation. Splits are used only when they sum exactly to
 the transaction's amount; otherwise the whole amount goes to the transaction's category (and
 the sync flags the row `needs_review`), so allocations always add up to `transactions.amount`.
-Rows with `duplicate_status = 'suspect'` are excluded.
+Rows with `duplicate_status = 'suspect'` are excluded. The CTE names the columns it needs (not
+`SELECT *`): PostgreSQL pins every column a view uses, so a migration that drops, renames or
+retypes one of these columns must recreate the view; any other `transactions` column can change
+freely.
 
 ```sql
-WITH t AS (SELECT * FROM transactions WHERE duplicate_status <> 'suspect'),
+WITH t AS (
+    SELECT id, account_id, date, authorized_date, posted_date, pending, category_id, amount,
+           pfc_primary, pfc_detailed, transaction_code, source
+    FROM transactions
+    WHERE duplicate_status <> 'suspect'
+),
 s AS (SELECT transaction_id, SUM(amount) AS total FROM transaction_splits GROUP BY 1)
 SELECT t.id AS transaction_id, t.account_id, t.date, t.authorized_date, t.posted_date,
        COALESCE(t.authorized_date, t.date) AS spend_date, t.pending,
@@ -359,7 +408,9 @@ with user edits are listed on the Connection page before they are pruned.
 
 Unique `NULLS NOT DISTINCT (category_id, period, effective_from)`. The amount for a period is
 the row with the latest `effective_from <= period.end`. An edit updates the row whose
-`effective_from` falls inside the current period, or inserts one at `period.start`. A category
+`effective_from` falls inside the current period, or inserts one at `period.start` (for a
+statement cycle, at its middle day: the cycle's ends come from closing dates that can still move
+by a few days, and a row at its start would then fall inside the previous cycle). A category
 has at most one active period type: setting a monthly budget writes an amount-null annual row
 from the same date, and vice versa.
 
@@ -378,8 +429,11 @@ from the same date, and vice versa.
 | notes | text | |
 
 A snapshot upserts on `(account_id, plaid_issue_date)`; if no row has that issue date, it
-attaches to a row whose `closing_date` is within 7 days, else inserts a new row. A period's start
-is always derived (previous `closing_date` + 1 day), never stored, except the override above.
+attaches to a row whose `closing_date` is within 10 days, else inserts a new row. Two closing dates
+within 10 days are one statement everywhere: generated dates that near a stored one are dropped
+(§6), and the Statements page refuses to add one that near (moving one onto the other combines
+them). A period's start is always derived (previous `closing_date` + 1 day), never stored, except
+the override above.
 
 ### Other tables
 - **app_settings** (single row, `id = 1`): `budget_period_mode` (`calendar` \| `statement`,
@@ -397,9 +451,11 @@ is always derived (previous `closing_date` + 1 day), never stored, except the ov
   `delivered_at`, `error`.
 - **csv_imports** (SYNC-8): `filename`, `file_sha256`, `account_id` (FK ON DELETE RESTRICT),
   `imported_at`, `row_count`, `inserted_count`, `duplicate_count`, `matched_plaid_count`,
-  `error_count`, `date_min`, `date_max`.
-- **recurring_overrides** (INS-3): `merchant_key` (unique), `status` (`ignored` \|
-  `confirmed`).
+  `error_count` (unreadable rows, and rows whose Reference was imported before with a different
+  date or amount), `date_min`, `date_max`.
+- **recurring_overrides** (INS-3): `merchant_key` (unique: a merchant key, or
+  `<merchant key>|<amount>` for one of a merchant's several exact-amount series), `status`
+  (`ignored` \| `confirmed`).
 
 ## 6. Domain rules
 
@@ -411,8 +467,15 @@ period". It reads `app_settings`: the date basis (posting date in statement mode
 `kind = 'expense'`, per category. Charges add; refunds (negative amounts in an expense
 category) subtract from it (TXN-3). Card payments (`kind = 'transfer'`) and credits/rewards
 (`kind = 'income'`) never count. The Budgets page, every "this period" widget on the dashboard,
-and the budget alerts all call it. Trends always use calendar months by `spend_date`, with the
-same pending setting.
+and the budget alerts all call it. `spending.periods_spending(session, periods)` is the same
+function for several periods read in one query (a rollover chain's earlier periods);
+`period_spending` is it for one period. Trends always use calendar months by `spend_date`, with
+the same pending setting.
+
+The Transactions list's sums (Charges, Credits & payments, Net) add whole amounts, except under a
+category filter: then each row adds what `v_allocations` puts in the chosen categories, so a split
+charge counts only those parts (its row still shows the whole charge and its split). Every
+"spent" link (Budgets, Dashboard, Trends) therefore opens a list whose Net is the figure.
 
 ### Categorization precedence (CAT-2, TXN-3)
 For a new transaction:
@@ -423,9 +486,19 @@ For a new transaction:
    category. A positive `PAYMENT … RETURNED/REVERSED` is also Card Payments.
    (`category_source = 'system'`.)
 1. User state carried over from the transaction this one replaces (`category_source = 'user'`).
+   A card payment (step 0) never takes a carried category or carried splits; the row is flagged
+   `needs_review` when one was dropped.
 2. The first matching active rule by `(priority, id)`.
-3. Plaid PFC v2 mapping (detailed, then primary) or, for CSV rows, the Amex category mapping.
+3. Plaid PFC v2 mapping (detailed, then primary) or, for CSV rows, the Amex category mapping —
+   sign-aware: negative amounts try the `|credit` mappings first (section 5), and a positive
+   amount never reaches a `transfer` category through a mapping (it is a charge; real payment
+   reversals were caught by step 0, and a row Plaid codes as a card payment stays one): it goes
+   to Uncategorized, which counts as spending.
 4. Uncategorized.
+
+Every path that gives a row the user state of the row it replaces calls
+`categorize.apply_carried_state(categorizer, row, state)`, so this order never depends on call
+order. A row whose category the user already set keeps it, and keeps its own splits.
 
 A row with `transaction_code = 'refund'` never lands in an `income` or `transfer` category:
 it takes the most recent expense category used for the same merchant, else Uncategorized.
@@ -460,29 +533,49 @@ applies.
    nothing: same account, amount within `max($1, 20%)`, `COALESCE(authorized_date, date)` within
    7 days, similar description; best score first; posted candidates preferred for a pending
    source. The match inherits the state and the tombstone records `consumed_by_transaction_id`.
+   A pending row with user state that this batch removed and no inserted row took is then
+   matched the same way to posted rows stored by an earlier sync in the last 30 days that name no
+   pending row, have no user state and replace nothing (Plaid can list a posting that doesn't
+   name its pending row one sync before it removes the pending row). Then unconsumed tombstones
+   without user state are matched to the rows inserted in this batch still unmatched by the same
+   rules, only to record `consumed_by_transaction_id`: the row is the same charge (a posting
+   Plaid didn't link, a re-delivery after account churn), not a new one (section 11, ALR-3).
 6. **Reconciliation** with CSV rows (below), then the cursor update.
 
 ### CSV ↔ Plaid reconciliation (SYNC-8)
-`reconcile.reconcile_item(session, item_id)` is a full pass, run after every sync that
-inserted rows, after every CSV import and after attaching a manual account:
-- Candidates: unpaired CSV rows (`source = 'csv'`) and unpaired Plaid rows (no `csv_reference`)
-  across all accounts of the Item, with equal amounts, the CSV date within
+`reconcile.reconcile_item(session, item_id)` is a full pass, run by every sync that inserted
+rows or completed Plaid's history, after every CSV import and after attaching a manual account:
+- Candidates: unpaired CSV rows (`source = 'csv'`) and unpaired, posted Plaid rows (no
+  `csv_reference`) across all accounts of the Item, with equal amounts, the CSV date within
   `[COALESCE(authorized_date, date) − 3 days, date]` — widened to `[date − 30 days, date]` when
-  `authorized_date` is null.
+  `authorized_date` is null. A CSV row whose Reference holds a plausible posting date pairs only
+  with a Plaid row posted on that date or up to 3 days before it (never with a later charge of
+  the same amount).
 - One global one-to-one assignment, best first by date distance, then description similarity
-  (CSV `Appears On Your Statement As`/`Description` vs Plaid `original_description`/`name`).
+  (CSV `Appears On Your Statement As`/`Description` vs Plaid `original_description`/`name`),
+  then augmenting paths so every row that can pair does (two identical charges posted on
+  different days both pair, whatever their order).
 - A pair moves the CSV row's user state onto the Plaid row (unless the Plaid row has its own),
   copies `csv_reference` and `csv_import_id` onto it, and deletes the CSV row. The globally
-  unique `csv_reference` then makes every re-import of that row a duplicate.
+  unique `csv_reference` then makes every re-import of that row a duplicate. Order matters
+  because that unique key is not deferrable (CSV import uses `ON CONFLICT (csv_reference) DO
+  NOTHING`): capture the CSV row's state, delete the CSV row and flush, then copy the reference
+  and apply the state.
 - **Cutover:** once the Item has `history_complete_at`, each account's `plaid_history_start`
   is set to its earliest Plaid posted date. Unpaired CSV rows dated on or after it become
   `duplicate_status = 'suspect'` (excluded from every total) and are listed on `/import` with
-  "Keep" (→ `kept`) and "Delete".
+  "Keep" (→ `kept`) and "Delete". The sync that first sees `HISTORICAL_UPDATE_COMPLETE` sets
+  `history_complete_at` before its pass, so it holds those rows itself.
 - `reconcile.attach_manual_account(session, manual_id, plaid_account_id)` (CSV package): drops
   manual rows whose Reference already exists, moves the rest (transactions, imports, rules,
-  statements), deletes the manual account, then runs the full pass. Linking calls it when
-  exactly one manual account and one credit account exist; otherwise the Connection page asks.
-  Once a production Item exists, CSV import may only target linked accounts.
+  statements — a statement that collides on `(account_id, closing_date)` or
+  `(account_id, plaid_issue_date)` is merged into the Plaid account's row, user-entered dates and
+  reported values winning), re-points `app_settings.budget_cycle_account_id` when it names the
+  manual account (its ON DELETE SET NULL would otherwise silently turn statement-cycle budgets
+  into calendar months), copies `statement_closing_day` and `notice` when the Plaid account has
+  none, deletes the manual account, then runs the full pass. Linking calls it when exactly one
+  manual account and one credit account exist; otherwise the Connection page asks. Once a
+  production Item exists, CSV import may only target linked accounts.
 
 ### Locks (REL-1)
 - **Sync lock** (per Item): `pg_try_advisory_lock` on a dedicated connection held for the whole
@@ -497,7 +590,8 @@ inserted rows, after every CSV import and after attaching a manual account:
 
 ### Budget math (BUD-1..5)
 - `available = budget amount + carry-in` (carry-in only when `rollover`: the previous period's
-  `available − spent`, starting at 0 in the first rollover period; may be negative).
+  `available − spent`, chained back to the first rollover period however long ago, which starts
+  at 0; may be negative; a flagged statement cycle ends the chain).
 - `remaining = available − spent`; `percent_used = spent / available` (undefined when
   `available ≤ 0`).
 - **Overall target (BUD-3):** compared with spending in categories that have no active annual
@@ -506,7 +600,14 @@ inserted rows, after every CSV import and after attaching a manual account:
 - **Annual budgets (BUD-5):** calendar year; year-to-date spending uses the same basis rule as
   `period_spending`; shown with a pace line (`amount × elapsed days / days in year`) in a
   separate Annual section, never inside monthly totals.
-- "Suggest from last 3 months" = mean of the last 3 complete periods, rounded up to $5.
+- **A statement cycle across Dec 31:** each year's days of a category count by its budget on that
+  year's last day in the cycle (Dec 31, or the cycle's end), the day each year's annual tally is
+  taken. Late-December spending of a category whose annual budget starts in January is spending
+  without a budget (in the overall target); late-December spending that the old year's annual
+  budget counts stays out of a monthly budget set in the cycle (and out of its rollover). Each
+  row's "spent" link covers the same days.
+- "Suggest from last 3 months" = mean of the last 3 complete periods (ended, wholly inside the
+  history, not flagged), rounded up to $5.
 - `days_left` counts today: `(period.end − today).days + 1`.
 
 ### Statement cycles and reconciliation (INS-4, REL-3, Gate D)
@@ -571,10 +672,14 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
 
 ### Linking safety (SYNC-1)
 - **The guard.** A production new-link token is issued only when there is no `plaid_items` row,
-  no `plaid.access_token.production` in Keychain and no unexpired
-  `plaid.link_in_progress.production` marker — checked and the marker set under the link lock.
-  The marker is cleared on a successful exchange or when the user cancels Link; otherwise it
-  expires after 4 hours (a Link token's lifetime).
+  no `plaid.access_token.production` in Keychain, no unexpired
+  `plaid.link_in_progress.production` marker and no unsaved production token in a recovery file
+  (`secrets.production_link_blockers`) — checked and the marker set under the link lock.
+  The marker records a random attempt id that goes back to the page with the Link token; only
+  that attempt clears it: after its successful exchange (once `store_access_token` has returned
+  normally), a definite refusal, or Link's `onExit`. Otherwise it expires after 4 hours (a Link
+  token's lifetime). `./run setup --env production --access-token` marks a stored token's
+  recovery files `*.saved`.
 - **Re-attach.** If Keychain holds a production token but the database has no Item (lost or
   restored database), the Connection page offers "Re-attach existing connection" (rebuild the row
   from `/item/get` and `/accounts/get`, sync from a null cursor, reconcile) — never a new link.
@@ -583,15 +688,21 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   enabled on the dashboard's US OAuth institutions page) and
   `search_institutions('American Express', ['liabilities'])`. A Link attempt that fails these
   checks creates no access token and uses no connection.
-- **Exchange.** In production a public token whose `onSuccess` institution already has an Item
-  is not exchanged. The public token stays in memory until the access token is in Keychain (read
-  back) and the Item row is committed; transport failures are retried within the token's 30-minute
-  life; one code path only; recovery file if the Keychain write fails (section 3).
+- **Exchange.** In production a public token is not exchanged while any trace of a connection
+  exists (an Item row, the Keychain token, an unsaved recovery file) or when `onSuccess` names an
+  institution that clearly isn't American Express. One exchange or re-attach runs at a time (a
+  session-level advisory lock held until the Item row is committed; a second one is refused), and
+  it keeps the link-in-progress marker while it runs. The public token stays in memory until the
+  access token is in Keychain (read back) and the Item row is committed; transport failures are
+  retried within the token's 30-minute life; one code path only; recovery file if the Keychain
+  write fails (section 3), and if no file can be written either, the token is shown once for the
+  user to keep.
 - **After linking:** `/item/get` (consent expiry, `consented_products`), `/accounts/get`,
   attach a manual CSV account if one exists, `/liabilities/get` only if Liabilities was consented
   (otherwise the page offers an update-mode session to add it), then the first sync and backfill.
-- Link `onExit`/`onEvent` treat `CLOSE_OAUTH` and `FAIL_OAUTH` as "not linked" and clear the
-  marker.
+- Link's `onExit` (Link closed without linking) clears its own attempt's marker. The
+  `CLOSE_OAUTH` and `FAIL_OAUTH` events are logged as "not linked" but never clear it: the Amex
+  window closed or timed out while Link itself stays open and can still succeed.
 
 ## 8. Sync engine (SYNC-2, SYNC-5, SYNC-6, SYNC-7, REL-1)
 
@@ -604,18 +715,22 @@ sync_item(item_id, trigger):
   start = item.transactions_cursor            # None → omit cursor
   fetch every page until has_more is false; on TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION
      or a transport error, discard the pages and restart from `start` (bounded retries)
-  NOT_READY → record success with no changes; keep the cursor null
-  ONE transaction: ledger lock → apply algorithm (section 6) → reconcile_item →
-     cursor compare-and-set → item healthy, error cleared, history_complete_at, cutover
+  NOT_READY → record success with no changes; keep the cursor null (and, while it is null,
+     last_sync_success_at: no data has arrived yet)
+  ONE transaction: ledger lock → apply algorithm (section 6) → history_complete_at and
+     plaid_history_start → reconcile_item (pairs, then the cutover) → item healthy, error
+     cleared → cursor compare-and-set
   record sync_run success with counts (own transaction)
   best effort, each in its own transaction:
      /accounts/get → balances (SYNC-7)
      /item/get → consent_expires_at, consented_products, item error, Plaid freshness
      /liabilities/get when consented → liabilities columns + statements snapshot (SYNC-7)
-     alerts.evaluate_after_sync
-  on PlaidError: roll back, set item status/error per classification, record the run, alert
+  on PlaidError: roll back, set item status/error per classification, record the run
   on any other exception: roll back, record the run as error 'INTERNAL' with the exception
-     class, set item status 'error', alert (ALR-2, once a day), re-raise (non-zero exit)
+     class, set item status 'error'
+  release the sync lock, then alerts.evaluate_after_sync in its own transaction (after success,
+     not_ready and every failure; ALR-2 once a day); an INTERNAL exception is then re-raised
+     (non-zero exit)
 ```
 
 - **Schedule:** the launchd sync agent runs at 00:15, 06:15, 12:15 and 18:15
@@ -642,6 +757,18 @@ Security middleware (SEC-1, SEC-4):
 - Host header must be `127.0.0.1` or `localhost` (blocks DNS rebinding).
 - Unsafe methods require an `Origin` of this app, or no `Sec-Fetch-Site` other than
   `same-origin`/`none` (blocks cross-site form posts to localhost).
+- Fetch Metadata on every method: when `Sec-Fetch-Site` is present and is neither
+  `same-origin` nor `none`, only a top-level `GET` navigation (`Sec-Fetch-Mode: navigate`,
+  `Sec-Fetch-Dest: document`) passes; anything else gets 403. This blocks cross-site
+  subresource loads of pages such as `/transactions?q=…` (XS-Search). Requests without Fetch
+  Metadata (curl, old browsers) are not checked.
+- User text is cleaned of control characters (`textutil`, tab and newline kept) before it reaches
+  a query: transaction notes, tags and filters, category and rule names, rule patterns and every
+  text cell of an Amex CSV. Values that are identifiers (a CSV Reference, a lost-edit id) are
+  refused instead: a row error, or 404.
+- The new-rule form fills itself from the query string (`/rules/new?merchant_pattern=…`) only
+  when `Sec-Fetch-Site` is absent, `same-origin` or `none`: a link from another site opens a
+  blank form, so it can't make the preview run its pattern on every past transaction.
 - **CSP on every page:** `default-src 'self'; script-src 'self'; style-src 'self';
   style-src-attr 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none';
   form-action 'self'; frame-ancestors 'none'` (inline `style=""` attributes are allowed for
@@ -666,17 +793,22 @@ environment on every page.
 
 | Command | Purpose |
 | --- | --- |
-| `./run` | Sandbox: start the cluster if needed, migrate the sandbox DB, serve from the repo, open the browser |
+| `./run` (`./run start`) | Sandbox: start the cluster if needed, migrate the sandbox DB, serve from the repo, open the browser |
 | `./run live` | Production: upgrade the install if the repo moved on, then open the app from the install |
-| `./run setup` | create the cluster, roles and databases; store generated DB passwords and the Plaid keys you type in Keychain; `--access-token` re-enters a saved production token |
+| `./run setup` | create the cluster, roles and databases; store generated DB passwords and the Plaid keys you type in Keychain; `--keys-only` asks only for the keys; `--access-token` re-enters a saved production token |
+| `./run serve` | only the web server (no migration, no browser); `--demo NAME [--port N]` serves a demo database; the web agent runs `serve --env production --unattended` |
+| `./run demo create\|drop\|list` | demo databases `budgetapp_test_demo_<NAME>` with realistic made-up data (Sandbox only) |
+| `./run migrate` | upgrade this environment's database (refused for production from a git checkout) |
 | `./run sync` | sync every Item now |
 | `./run import-csv FILE` | import an Amex CSV (preview with `--dry-run`) |
+| `./run recategorize` | re-apply rules and mappings to past transactions (CAT-4) |
 | `./run backup` / `./run restore FILE` | backup now / restore one |
 | `./run doctor` | check SEC-1..6, backups, agents, keys, schema; re-approve Keychain access |
+| `./run notify-test` | send a test notification (the one-time Script Editor permission) |
 | `./run install-agents` / `uninstall-agents` | `upgrade_install()` and (re)load / remove the launchd agents |
 | `./run sandbox-link` / `sandbox-refresh` / `sandbox-reset-login` | Sandbox only test helpers |
 | `./run test` | run the test suite |
-| `./run db start\|stop\|status\|psql` | manage the dedicated cluster (`psql` connects as the env's role) |
+| `./run db start\|stop\|status\|psql\|url` | manage the dedicated cluster (`psql` connects as the env's role) |
 
 LaunchAgents (`~/Library/LaunchAgents/local.budgetapp.*.plist`), all running the Application
 Support install with `BUDGETAPP_ENV=production`, `LC_ALL=C.UTF-8` and a PATH that includes
@@ -686,16 +818,21 @@ Homebrew; every entry point waits for the database first:
 | --- | --- | --- |
 | `postgres` | at login, kept alive | stale-lock wrapper; `Umask 077`; `ExitTimeOut 120` |
 | `sync` | 00:15, 06:15, 12:15, 18:15 and at login | skips if synced in the last 5 h |
-| `backup` | 02:30 and at login | skips if the newest verified dump is under 20 h old |
+| `backup` | 02:30 and at login | skips if a verified dump was made since the last 02:30 |
 | `web` (optional) | at login, kept alive | serves the production app at http://127.0.0.1:8765 |
 
 **Backups (REL-2):** as the environment's role, `pg_dump --format=custom` into a temporary file
 (`umask 077`), verified with `pg_restore --list` and a full `pg_restore --file=/dev/null`, renamed
 into place, newest 30 kept; a "backup failed or stale" alert fires when the newest verified dump is
-over 26 hours old. **Restore** reads the dump's database name and refuses a dump from another
-environment, needs an explicit `--env` and a typed confirmation for production, takes a
-pre-restore dump, stops the web and sync agents and holds the sync lock, restores preserving
-ownership, then runs the schema guard.
+over 26 hours old (the backup agent reports its own runs; the sync agent announces stale backups
+when the backup agent has not run for 26 hours either). The dump `upgrade_install()` takes first
+is named `…-pre-upgrade.dump` and kept apart (newest 5), like pre-restore dumps: neither counts
+toward the 30, "due" or "stale". **Restore** reads the dump's database name and refuses a dump
+from another environment, asks for a typed confirmation (the environment's name) and, for production, an
+explicit `--env production` on the command line, takes the sync locks (refusing while a sync
+runs) before it stops the web, sync and backup agents, takes a pre-restore dump (kept apart from
+the 30 backups, newest 5; `--without-safety-copy` skips it only when the current data can't be
+dumped), restores in one transaction preserving ownership, then runs the schema guard.
 
 **Time Machine (SEC-6):** `setup` excludes the cluster directory. Backups stay included only if
 every Time Machine destination is encrypted; `doctor` checks this and explains how to exclude
@@ -709,18 +846,43 @@ Script Editor and silently drops them until Script Editor is allowed to notify, 
 a one-time step (`./run notify-test`, then allow Script Editor in System Settings →
 Notifications) and `doctor` checks it.
 
-- **Budget thresholds (ALR-1):** evaluated with `period_spending` (same basis and pending setting
-  as the Budgets page) after each sync, import and edit that changes categories. A threshold `t`
-  is crossed when `spent > 0` and `spent ≥ available × t / 100` (so a zero or negative available
-  amount fires on the first spending). Each fires once per category, period and threshold; if
-  spending falls back below a threshold (a pending hold dropped), its event is deleted so it can
-  fire again.
+`alerts.record_and_notify` records each alert once (its `dedupe_key`) and sends the notification
+only after the caller's transaction commits, and only if the alert row is still there: a rolled
+back transaction or savepoint sends nothing, a released savepoint is not the caller's commit
+(SQLAlchemy reports both as `after_commit`), and no notification runs while a lock is held (the
+sync engine evaluates its alerts after releasing the Item's sync lock). Each evaluation runs in a
+savepoint of its own and logs its errors: an alert problem never breaks the sync, import or edit
+that called it.
+
+- **Budget thresholds (ALR-1):** evaluated with the Budgets page's numbers (`budgets.overview`
+  over `period_spending`, same basis and pending setting) after each successful sync, import and
+  edit that changes categories (transactions, a rule saved with "apply to existing", rule
+  re-apply on the Rules page or `./run recategorize`, category merge): every monthly
+  category budget the page lists, the overall target, and annual budgets for the calendar year. A
+  threshold `t` is crossed when `spent > 0` and `spent ≥ available × t / 100` (so a zero or
+  negative available amount fires on the first spending). Each fires once per category, period
+  and threshold (`budget:<category|overall>:<period start>:<t>`; annual
+  `budget:<category>:<year>:<t>`); several crossed at once notify only the highest (the others
+  are recorded silently). If spending falls back below a threshold (a pending hold dropped, a
+  bigger budget), its event is deleted so it can fire again. An event keyed within 10 days of the
+  period's start belongs to the period (a statement cycle's start can still move). A flagged
+  cycle's message says to check the Statements page.
 - **Sync problems (ALR-2):** failures (Plaid or internal) once per Item, error code and day;
-  reconnect needed once per occurrence; stale data after 36 h; Keychain approval needed (marker
-  file).
-- **Consent (SYNC-6):** renewal due within `consent_reminder_days`, once per due date.
-- **Large charges (ALR-3):** only rows inserted by a sync, dated within the last 7 days, after the
-  initial history load; once per charge and not again when it posts.
+  reconnect needed once per occurrence (`reconnect:<item>:open` until a sync sees the Item
+  healthy, then renamed, so the next occurrence alerts); stale data after 36 h once a day (folded
+  into a failure or reconnect alert sent in the same run); Keychain approval needed and a
+  Keychain item missing (marker files).
+- **Consent (SYNC-6):** renewal due within `consent_reminder_days`, once per due date; not while
+  the Item needs reconnecting (update mode renews the consent too).
+- **Large charges (ALR-3):** only Plaid rows inserted by a sync for more than
+  `large_charge_threshold`, dated at most 7 days before the previous successful sync (so a
+  catch-up sync after a break of over a week still announces the break's charges), after the
+  initial history load; once per charge and not again when it posts. The sync outcome lists only
+  new charges: a row that replaces one the app already had (a posting, linked or matched, or a
+  re-delivery after account churn) is left out. A charge that first goes over the amount when it
+  posts (a pending charge at or under it, posted higher with a tip or hotel incidentals, or
+  raised in place by Plaid; the sync outcome's `pending_raises`) alerts once, under the pending
+  row's key. More than 3 new ones in a run send one summary notification.
 - **Backups:** failed or stale, once a day.
 
 ## 12. Testing (MNT-2)
@@ -728,14 +890,20 @@ Notifications) and `doctor` checks it.
 - Each pytest process connects as `budgetapp_test` (non-superuser) and creates
   `budgetapp_test_<pid>`, runs the migrations, and drops it afterwards. The harness refuses to run
   unless the role is not a superuser and the database name starts with `budgetapp_test_`. Each test
-  runs inside a transaction that is rolled back.
+  runs inside a transaction that is rolled back. Test code never gets a superuser connection and
+  never starts, stops or reconfigures the real cluster; the test settings' state, logs, backups
+  and install folders are a per-process scratch folder; test connections time out on locks after
+  30 s instead of hanging. A test compares the catalog built by the migrations with the one
+  built by the models (every column, constraint definition and index definition).
 - `tests/fake_plaid.py` replays an **event log**, so one sync can carry the same id in added,
   modified and removed on different pages, exactly as Plaid may. It also serves pending → posted,
   churn, `NOT_READY`, mutation-during-pagination, transport errors and item errors.
 - Optional live tests (`./run test --sandbox`) use the real Plaid Sandbox with keys from Keychain:
   a custom Sandbox user with an Amex-like card and known totals, and `user_transactions_dynamic`
-  with `/transactions/refresh` for pending → posted. They produce the Gate A evidence. Tests never
-  drive the Link UI.
+  with `/transactions/refresh` for pending → posted. They produce the Gate A evidence. Plaid posts
+  a pending charge only on a refresh on or after its posting date, which is still ahead for an
+  Item created that day, so the pending → posted test then skips and says why; the fake-Plaid
+  tests cover the carry-over. Tests never drive the Link UI.
 
 ## 13. Toward a mobile app
 

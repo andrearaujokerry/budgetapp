@@ -1,0 +1,8 @@
+{#- The tabs and the active tab's panel (what an HTMX tab switch swaps; the route sets
+    `focus_panel` then, so keyboard focus moves to the new panel instead of the page). -#}
+{%- import "components/ui.html" as ui -%}
+{{ ui.tabs([
+  {'key': 'categories', 'label': 'Your categories', 'href': '/categories', 'count': category_count},
+  {'key': 'mappings', 'label': 'Plaid & Amex categories', 'href': '/categories/mappings'},
+], tab, label="Category views", target="#categories-view") }}
+{% if tab == "categories" %}{% include "categories/_categories.html" %}{% else %}{% include "categories/_mappings.html" %}{% endif %}

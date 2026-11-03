@@ -1,0 +1,6 @@
+{#- "Add a budget" dialog for `kind` ('monthly' or 'annual'), opened by data-dialog-open. -#}
+{%- import "components/ui.html" as ui -%}
+{%- set state = dialog if dialog and dialog.kind == kind else none -%}
+{% call ui.dialog('add-' ~ kind, 'Add an annual budget' if kind == 'annual' else 'Add a monthly budget', autoopen=state is not none) %}
+{% include "budgets/_add_form.html" %}
+{% endcall %}

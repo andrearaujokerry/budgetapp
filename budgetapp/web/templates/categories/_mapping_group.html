@@ -1,0 +1,37 @@
+{#- One group of external categories (a Plaid primary code or an Amex group), swapped after a
+    row's mapping changes. Needs `group`, `categories`, `category_by_id`, `show`. Every select has
+    a stable id, so htmx puts keyboard focus back on it after the swap; "Not mapped" removes a
+    row's own mapping (it then uses the next key categorization tries). -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+{%- set fallback_notes = {"group": " (from its group)", "group_credits": " (its group’s credits)", "charges": " (like its charges)"} -%}
+<tbody class="mapping-group">
+<tr class="mapping-group__head">
+<th scope="rowgroup" colspan="3"><span class="mapping-group__label">{{ group.label }}</span><span class="mapping-group__count">{{ group.transaction_count|pluralize("transaction") }}</span></th>
+</tr>
+{%- for r in group.rows %}
+{%- set effective = category_by_id.get(r.effective_category_id) if r.effective_category_id is not none else none %}
+<tr>
+<td class="col-grow">
+{#- The Credits badge comes first so a truncated label (phones) never hides it. -#}
+<span class="table__primary">
+{%- if r.for_credits %}{{ ui.badge("Credits", tone="info", title="Tried first for credits (negative amounts), e.g. cash back. Fee reversals use the main mapping.") }} {% endif -%}
+{{ r.label }}</span>
+<span class="table__secondary"><code>{{ r.code }}</code></span>
+</td>
+<td class="num col-optional-sm">{{ '{:,}'.format(r.transaction_count) }}</td>
+<td class="mapping-target">
+<form class="mapping-form" method="post" action="/categories/mappings" hx-post="/categories/mappings" hx-trigger="change" hx-target="closest tbody" hx-swap="outerHTML">
+<input type="hidden" name="source" value="{{ r.source }}">
+<input type="hidden" name="key" value="{{ r.key }}">
+<input type="hidden" name="show" value="{{ show }}">
+{{ form.category_select("category_id", categories, value=r.category_id, inline=true, label=group.label ~ ": " ~ r.label ~ (" (credits)" if r.for_credits else "") ~ " goes to", placeholder="Not mapped", id="map-" ~ r.slug) }}
+<noscript>{{ ui.button("Save", size="sm", type="submit") }}</noscript>
+</form>
+{%- if not r.is_mapped %}
+<span class="table__secondary mapping-fallback">{% if effective %}Uses {{ effective.name }}{{ fallback_notes.get(r.fallback_from, "") }}{% else %}{{ ui.icon("alert", size="xs") }} Goes to Uncategorized{% endif %}</span>
+{%- endif %}
+</td>
+</tr>
+{%- endfor %}
+</tbody>

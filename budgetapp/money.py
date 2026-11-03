@@ -13,6 +13,8 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 CENT = Decimal("0.01")
 ZERO = Decimal("0.00")
 MINUS = "−"  # typographic minus sign used for display
+#: The largest amount NUMERIC(14,2) holds; anything bigger is refused before it reaches the DB.
+MAX_AMOUNT = Decimal("999999999999.99")
 
 _INPUT_RE = re.compile(r"^(?P<sign>[-+]?)(?P<digits>\d+(?:\.\d*)?|\.\d+)$")
 
@@ -22,7 +24,8 @@ def to_money(value: Decimal | int | str) -> Decimal:
 
     Accepts ``Decimal`` (e.g. Plaid JSON parsed with ``parse_float=Decimal``), ``int`` (JSON
     integers such as ``"limit": 5000``) and numeric strings. ``float`` is refused with
-    ``TypeError`` because binary floats cannot represent cents exactly.
+    ``TypeError`` because binary floats cannot represent cents exactly. ``ValueError`` for text,
+    NaN/infinity and amounts beyond ±:data:`MAX_AMOUNT` (what ``NUMERIC(14,2)`` holds).
     """
     if isinstance(value, bool):
         raise TypeError("to_money() does not accept bool")
@@ -41,7 +44,15 @@ def to_money(value: Decimal | int | str) -> Decimal:
         raise TypeError(f"to_money() cannot convert {type(value).__name__}")
     if not number.is_finite():
         raise ValueError(f"not a finite amount: {value!r}")
-    return number.quantize(CENT, rounding=ROUND_HALF_UP)
+    if abs(number) > MAX_AMOUNT + Decimal("0.005"):
+        raise ValueError(f"amount out of range: {value!r}")
+    try:
+        result = number.quantize(CENT, rounding=ROUND_HALF_UP)
+    except InvalidOperation as exc:  # pragma: no cover - excluded by the range check
+        raise ValueError(f"amount out of range: {value!r}") from exc
+    if abs(result) > MAX_AMOUNT:
+        raise ValueError(f"amount out of range: {value!r}")
+    return result
 
 
 def to_money_or_none(value: Decimal | int | str | None) -> Decimal | None:
@@ -54,7 +65,8 @@ def parse_money_input(text: str) -> Decimal:
 
     Accepts an optional sign (``-``, ``+`` or the typographic minus), a ``$``, thousands
     separators and accounting-style parentheses. Raises ``ValueError`` with a friendly message for
-    anything else, including more than two decimal places.
+    anything else, including more than two decimal places and amounts of a trillion dollars or
+    more (beyond what the database stores).
     """
     if not isinstance(text, str):
         raise TypeError("parse_money_input() expects a string")
@@ -70,6 +82,8 @@ def parse_money_input(text: str) -> Decimal:
     if "." in digits and len(digits.split(".", 1)[1]) > 2:
         raise ValueError("Amounts can have at most two decimal places.")
     number = Decimal(digits)
+    if number > MAX_AMOUNT:
+        raise ValueError("Amounts must be under $1,000,000,000,000.")
     if match.group("sign") == "-":
         negative = not negative
     return to_money(-number if negative else number)
@@ -108,9 +122,8 @@ def sum_money(values: Iterable[Decimal | int]) -> Decimal:
 
 
 def is_cents(value: Decimal) -> bool:
-    """True when ``value`` is a finite Decimal with at most two decimal places."""
-    return (
-        isinstance(value, Decimal)
-        and value.is_finite()
-        and value == value.quantize(CENT, rounding=ROUND_HALF_UP)
-    )
+    """True when ``value`` is a finite Decimal with at most two decimal places that fits in
+    ``NUMERIC(14,2)``."""
+    if not isinstance(value, Decimal) or not value.is_finite() or abs(value) > MAX_AMOUNT:
+        return False
+    return value == value.quantize(CENT, rounding=ROUND_HALF_UP)

@@ -1,0 +1,318 @@
+{#- ==========================================================================
+    Form controls. Import once per template:
+        {% import "components/forms.html" as form %}
+    Every field macro renders <div class="field"> with a <label>, the control,
+    an optional error (aria-invalid + aria-describedby wired up) and help text.
+    Shared parameters:
+      name, label            required
+      id                     defaults to "f-<name>"; pass one when the same
+                             name appears more than once on a page
+      help, error            strings shown under the control
+      required, optional     required adds the attribute and a red "*";
+                             optional adds "(optional)" to the label
+      compact                small label + 32px control (filter bars)
+      hide_label             keeps the label for screen readers only
+      wrapper_class          extra class on the .field wrapper
+      **attrs                extra attributes on the control itself
+                             ("_" -> "-": hx_post="/x", data_autosubmit=true);
+                             class="…" is appended to the control's classes
+    Option lists (select_field, inline_select, segmented) accept
+      [("value", "Label"), …]  or  [{"value": …, "label": …, "disabled": bool}, …]
+      or plain strings; optgroups: {"group": "Label", "options": [ … ]}.
+    Number values in money inputs render half-up with two decimals
+    (ui.decimal_text), the same rounding as money.format_money.
+    ========================================================================== -#}
+{%- import "components/ui.html" as ui -%}
+
+{#- Internal: stop rendering with a readable message (see ui.html). -#}
+{%- macro _fail(message) -%}{{ {}[message]() }}{%- endmacro -%}
+
+{%- macro _id(id, name) -%}{{ id or ('f-' ~ (name|replace('.', '-')|replace('[', '-')|replace(']', ''))) }}{%- endmacro -%}
+
+{%- macro _describedby(fid, help, error) -%}
+{%- set ids = ([fid ~ '-error'] if error else []) + ([fid ~ '-help'] if help else []) -%}
+{%- if ids %} aria-describedby="{{ ids|join(' ') }}"{% endif -%}
+{%- if error %} aria-invalid="true"{% endif -%}
+{%- endmacro -%}
+
+{%- macro _label(fid, label, required=false, optional=false, hide_label=false) -%}
+<label class="field__label{{ ' sr-only' if hide_label }}" for="{{ fid }}">{{ label }}
+{%- if required %}<span class="field__req" aria-hidden="true">*</span>{% elif optional %}<span class="field__optional">(optional)</span>{% endif -%}
+</label>
+{%- endmacro -%}
+
+{%- macro _messages(fid, help, error) -%}
+{%- if error %}
+<p class="field__error" id="{{ fid }}-error">{{ ui.icon('alert') }}<span>{{ error }}</span></p>
+{%- endif %}
+{%- if help %}
+<p class="field__help" id="{{ fid }}-help">{{ help }}</p>
+{%- endif %}
+{%- endmacro -%}
+
+{%- macro _options(options, value) -%}
+{#- The selected value(s) as strings: a scalar or a list (multiple selects). -#}
+{%- if value is none or value is undefined -%}
+{%- set chosen = [] -%}
+{%- elif value is iterable and value is not string and value is not mapping -%}
+{%- set chosen = value|map('string')|list -%}
+{%- else -%}
+{%- set chosen = [value|string] -%}
+{%- endif -%}
+{%- for opt in options -%}
+{%- if opt is mapping and opt.get('group') is not none and opt.get('options') is not none -%}
+<optgroup label="{{ opt.group }}">{{ _options(opt.options, value) }}</optgroup>
+{%- else -%}
+{%- if opt is mapping -%}
+{%- set v = opt.get('value') -%}{%- set l = opt.get('label', v) -%}{%- set dis = opt.get('disabled', false) -%}{%- set extra = opt.get('attrs', {}) -%}
+{%- elif opt is string or opt is number -%}
+{%- set v = opt -%}{%- set l = opt -%}{%- set dis = false -%}{%- set extra = {} -%}
+{%- else -%}
+{%- set v = opt[0] -%}{%- set l = opt[1] -%}{%- set dis = false -%}{%- set extra = {} -%}
+{%- endif -%}
+{%- set vs = '' if v is none else v|string -%}
+<option value="{{ vs }}"{% if vs in chosen %} selected{% endif %}{% if dis %} disabled{% endif %}{{ ui.html_attrs(extra) }}>{{ l }}</option>
+{%- endif -%}
+{%- endfor -%}
+{%- endmacro -%}
+
+{%- macro _cls(base, attrs) -%}{{ base }}{{ ' ' ~ attrs['class'] if attrs.get('class') }}{%- endmacro -%}
+
+
+{#- field(name, label, value=none, type="text", placeholder=none, …shared)
+    Text-like input: text, email, number, url, search, password, date, month. -#}
+{%- macro field(name, label, value=none, type="text", placeholder=none, id=none, help=none, error=none, required=false, optional=false, compact=false, hide_label=false, wrapper_class=none) -%}
+{%- set fid = _id(id, name) -%}
+<div class="field{{ ' field--compact' if compact }}{{ ' ' ~ wrapper_class if wrapper_class }}">
+{{ _label(fid, label, required, optional, hide_label) }}
+<input class="{{ _cls('input' ~ (' input--sm' if compact else ''), kwargs) }}" id="{{ fid }}" name="{{ name }}" type="{{ type }}"
+{%- if value is not none %} value="{{ value }}"{% endif %}{% if placeholder %} placeholder="{{ placeholder }}"{% endif %}
+{%- if required %} required{% endif %}{{ _describedby(fid, help, error) }}{{ ui.html_attrs(kwargs, ['class']) }}>
+{{- _messages(fid, help, error) }}
+</div>
+{%- endmacro -%}
+
+
+{#- date_field(name, label, value=none, min=none, max=none, …shared)
+    <input type="date">; value/min/max accept date objects or ISO strings. -#}
+{%- macro date_field(name, label, value=none, min=none, max=none, id=none, help=none, error=none, required=false, optional=false, compact=false, hide_label=false, wrapper_class=none) -%}
+{%- set fid = _id(id, name) -%}
+<div class="field{{ ' field--compact' if compact }}{{ ' ' ~ wrapper_class if wrapper_class }}">
+{{ _label(fid, label, required, optional, hide_label) }}
+<input class="{{ _cls('input' ~ (' input--sm' if compact else ''), kwargs) }}" id="{{ fid }}" name="{{ name }}" type="date"
+{%- if value %} value="{{ value }}"{% endif %}{% if min %} min="{{ min }}"{% endif %}{% if max %} max="{{ max }}"{% endif %}
+{%- if required %} required{% endif %}{{ _describedby(fid, help, error) }}{{ ui.html_attrs(kwargs, ['class']) }}>
+{{- _messages(fid, help, error) }}
+</div>
+{%- endmacro -%}
+
+
+{#- money_field(name, label, value=none, placeholder="0.00", allow_negative=false, …shared)
+    Dollar input with a "$" prefix, inputmode=decimal and tabular figures. A
+    number value renders with two decimals ("500.00"); a string is kept as typed
+    (re-rendering a form with an error). The server parses and validates. -#}
+{%- macro money_field(name, label, value=none, placeholder="0.00", allow_negative=false, id=none, help=none, error=none, required=false, optional=false, compact=false, hide_label=false, wrapper_class=none) -%}
+{%- set fid = _id(id, name) -%}
+{%- set v = ui.decimal_text(value) if value is number else (value if value is not none else '') -%}
+<div class="field{{ ' field--compact' if compact }}{{ ' ' ~ wrapper_class if wrapper_class }}">
+{{ _label(fid, label, required, optional, hide_label) }}
+<div class="input-affix input-affix--prefix">
+<span class="input-affix__prefix" aria-hidden="true">$</span>
+<input class="{{ _cls('input input--money' ~ (' input--sm' if compact else ''), kwargs) }}" id="{{ fid }}" name="{{ name }}" type="text" inputmode="{{ 'text' if allow_negative else 'decimal' }}" autocomplete="off" spellcheck="false" value="{{ v }}" placeholder="{{ placeholder }}"
+{%- if required %} required{% endif %}{{ _describedby(fid, help, error) }}{{ ui.html_attrs(kwargs, ['class']) }}>
+</div>
+{{- _messages(fid, help, error) }}
+</div>
+{%- endmacro -%}
+
+
+{#- select_field(name, label, options, value=none, placeholder=none, multiple=false, …shared)
+    placeholder adds a first option with value "" (e.g. "All categories"). -#}
+{%- macro select_field(name, label, options, value=none, placeholder=none, multiple=false, id=none, help=none, error=none, required=false, optional=false, compact=false, hide_label=false, wrapper_class=none) -%}
+{%- set fid = _id(id, name) -%}
+<div class="field{{ ' field--compact' if compact }}{{ ' ' ~ wrapper_class if wrapper_class }}">
+{{ _label(fid, label, required, optional, hide_label) }}
+<select class="{{ _cls('select' ~ (' select--sm' if compact else ''), kwargs) }}" id="{{ fid }}" name="{{ name }}"
+{%- if multiple %} multiple{% endif %}{% if required %} required{% endif %}{{ _describedby(fid, help, error) }}{{ ui.html_attrs(kwargs, ['class']) }}>
+{%- if placeholder is not none %}<option value="">{{ placeholder }}</option>{% endif -%}
+{{ _options(options, value) }}
+</select>
+{{- _messages(fid, help, error) }}
+</div>
+{%- endmacro -%}
+
+
+{#- category_select(name, categories, value=none, label="Category", inline=false, include_hidden=false, placeholder=none, …shared)
+    Picker built from category objects (id, name, color, is_hidden). Hidden
+    categories are left out unless selected or include_hidden=true. Each option
+    carries data-color. inline=true renders the borderless table-cell variant
+    with the selected category's colour dot (app.js updates the dot on change). -#}
+{%- macro category_select(name, categories, value=none, label="Category", inline=false, include_hidden=false, placeholder=none, id=none, help=none, error=none, required=false, compact=false, hide_label=false, wrapper_class=none) -%}
+{%- set sv = '' if value is none else value|string -%}
+{%- set ns = namespace(opts=[], current=none) -%}
+{%- for c in categories -%}
+{%- set hidden = c.is_hidden|default(false) -%}
+{%- if c.id|string == sv %}{% set ns.current = c %}{% endif -%}
+{%- if include_hidden or not hidden or c.id|string == sv -%}
+{%- set ns.opts = ns.opts + [{'value': c.id, 'label': c.name ~ (' (hidden)' if hidden else ''), 'attrs': {'data-color': ui.color_value(c.color|default(none))|trim or none}}] -%}
+{%- endif -%}
+{%- endfor -%}
+{%- if inline -%}
+{%- set color = ui.color_value(ns.current.color|default(none) if ns.current else none)|trim -%}
+<span class="inline-cat"{% if color %} style="--cat-color: {{ color }}"{% endif %}>
+<span class="cat__dot" aria-hidden="true"></span>
+<select class="{{ _cls('inline-control', kwargs) }}" name="{{ name }}" aria-label="{{ label }}"{% if id %} id="{{ id }}"{% endif %} data-category-select{{ ui.html_attrs(kwargs, ['class']) }}>
+{%- if placeholder is not none %}<option value="">{{ placeholder }}</option>{% endif -%}
+{{ _options(ns.opts, value) }}
+</select>
+</span>
+{%- else -%}
+{{ select_field(name, label, ns.opts, value=value, placeholder=placeholder, id=id, help=help, error=error, required=required, compact=compact, hide_label=hide_label, wrapper_class=wrapper_class, data_category_select=true, **kwargs) }}
+{%- endif -%}
+{%- endmacro -%}
+
+
+{#- textarea_field(name, label, value=none, rows=3, placeholder=none, …shared) -#}
+{%- macro textarea_field(name, label, value=none, rows=3, placeholder=none, id=none, help=none, error=none, required=false, optional=false, hide_label=false, wrapper_class=none) -%}
+{%- set fid = _id(id, name) -%}
+<div class="field{{ ' ' ~ wrapper_class if wrapper_class }}">
+{{ _label(fid, label, required, optional, hide_label) }}
+<textarea class="{{ _cls('textarea', kwargs) }}" id="{{ fid }}" name="{{ name }}" rows="{{ rows }}"
+{%- if placeholder %} placeholder="{{ placeholder }}"{% endif %}{% if required %} required{% endif %}{{ _describedby(fid, help, error) }}{{ ui.html_attrs(kwargs, ['class']) }}>{{ value if value is not none else '' }}</textarea>
+{{- _messages(fid, help, error) }}
+</div>
+{%- endmacro -%}
+
+
+{#- checkbox_field(name, label, checked=false, value="1", help=none, switch=false, id=none, disabled=false, **attrs)
+    Checkbox (or switch=true for a toggle switch, role="switch") with its label
+    on the right and optional help under the label. Unchecked boxes submit
+    nothing, so the server treats a missing field as false. -#}
+{%- macro checkbox_field(name, label, checked=false, value="1", help=none, switch=false, id=none, disabled=false, wrapper_class=none) -%}
+{%- set fid = _id(id, name) -%}
+<label class="check{{ ' ' ~ wrapper_class if wrapper_class }}" for="{{ fid }}">
+<input id="{{ fid }}" name="{{ name }}" type="checkbox" value="{{ value }}"{% if switch %} class="{{ _cls('switch', kwargs) }}" role="switch"{% elif kwargs.get('class') %} class="{{ kwargs['class'] }}"{% endif %}
+{%- if checked %} checked{% endif %}{% if disabled %} disabled{% endif %}{% if help %} aria-describedby="{{ fid }}-help"{% endif %}{{ ui.html_attrs(kwargs, ['class']) }}>
+<span class="check__text"><span>{{ label }}</span>{% if help %}<span class="check__help" id="{{ fid }}-help">{{ help }}</span>{% endif %}</span>
+</label>
+{%- endmacro -%}
+
+
+{#- switch_field(…) — checkbox_field(…, switch=true). -#}
+{%- macro switch_field(name, label, checked=false, value="1", help=none, id=none, disabled=false, wrapper_class=none) -%}
+{{ checkbox_field(name, label, checked=checked, value=value, help=help, switch=true, id=id, disabled=disabled, wrapper_class=wrapper_class, **kwargs) }}
+{%- endmacro -%}
+
+
+{#- tags_field(name, label, tags=none, suggestions=none, placeholder="Add a tag…", …shared)
+    Tag chips + an entry box. Each tag submits as its own `name` field, plus
+    one always-present empty `name` field, so read them on the server with
+    [t for t in form.getlist(name) if t.strip()] (an empty list = all removed).
+    app.js adds a chip on Enter or ",", removes the last on Backspace in an
+    empty box, and fires "change" (so data-autosubmit forms save). suggestions
+    feed a <datalist> for autocomplete. -#}
+{%- macro tags_field(name, label, tags=none, suggestions=none, placeholder="Add a tag…", id=none, help="Press Enter or comma to add a tag.", error=none, optional=false, hide_label=false, wrapper_class=none) -%}
+{%- set fid = _id(id, name) -%}
+<div class="field{{ ' ' ~ wrapper_class if wrapper_class }}">
+{{ _label(fid, label, false, optional, hide_label) }}
+<div class="tags-input" data-tags-input data-name="{{ name }}"{% if error %} aria-invalid="true"{% endif %}>
+<input type="hidden" name="{{ name }}" value="">
+{%- for t in tags or [] %}
+<span class="chip chip--removable" data-tag><span>{{ t }}</span><input type="hidden" name="{{ name }}" value="{{ t }}"><button type="button" class="chip__remove" data-tag-remove aria-label="Remove tag {{ t }}">{{ ui.icon('x') }}</button></span>
+{%- endfor %}
+<input class="tags-input__entry" id="{{ fid }}" type="text" placeholder="{{ placeholder }}" autocomplete="off" enterkeyhint="enter"
+{%- if suggestions %} list="{{ fid }}-list"{% endif %}{{ _describedby(fid, help, error) }}{{ ui.html_attrs(kwargs, ['class']) }}>
+</div>
+{%- if suggestions %}
+<datalist id="{{ fid }}-list">{% for s in suggestions %}<option value="{{ s }}"></option>{% endfor %}</datalist>
+{%- endif %}
+{{- _messages(fid, help, error) }}
+</div>
+{%- endmacro -%}
+
+
+{#- search_field(name="q", value=none, label="Search", placeholder="Search…", id=none, shortcut=true, **attrs)
+    Search box with an icon. Marked data-search, so "/" focuses it; shortcut
+    shows the "/" hint. Typically inside filter_bar (data-autosubmit debounces
+    typing). -#}
+{%- macro search_field(name="q", value=none, label="Search", placeholder="Search…", id=none, shortcut=true) -%}
+{%- set fid = _id(id, name) -%}
+<div class="search">
+<label class="sr-only" for="{{ fid }}">{{ label }}</label>
+{{ ui.icon('search', size='sm') }}
+<input class="{{ _cls('input input--sm', kwargs) }}" id="{{ fid }}" name="{{ name }}" type="search" value="{{ value if value is not none else '' }}" placeholder="{{ placeholder }}" autocomplete="off" spellcheck="false" data-search{{ ui.html_attrs(kwargs, ['class']) }}>
+{%- if shortcut %}<kbd aria-hidden="true">/</kbd>{% endif %}
+</div>
+{%- endmacro -%}
+
+
+{#- segmented(name, options, value=none, label=none, hide_label=false, help=none, wrapper_class=none, **attrs)
+    Radio group drawn as a segmented control (presets such as date ranges,
+    "Calendar month / Statement cycle"). With a `label` it renders like the
+    other fields: <fieldset class="field"> with a visible <legend> (and
+    `help` under the control); hide_label=true (or no label) renders just the
+    control, the label then read by screen readers only. **attrs go on the
+    outer <fieldset> (e.g. hx_post + hx_trigger="change": radios bubble). -#}
+{%- macro segmented(name, options, value=none, label=none, hide_label=false, help=none, wrapper_class=none) -%}
+{%- set sv = '' if value is none else value|string -%}
+{%- macro _opts() -%}
+{%- for opt in options %}
+{%- if opt is mapping %}{% set v = opt.get('value') %}{% set l = opt.get('label', v) %}{% elif opt is string %}{% set v = opt %}{% set l = opt %}{% else %}{% set v = opt[0] %}{% set l = opt[1] %}{% endif %}
+<label class="segmented__option"><input type="radio" name="{{ name }}" value="{{ v }}"{% if v|string == sv %} checked{% endif %}><span>{{ l }}</span></label>
+{%- endfor %}
+{%- endmacro -%}
+{%- if label and not hide_label -%}
+{%- set fid = _id(none, name) -%}
+<fieldset class="field segmented-field{{ ' ' ~ wrapper_class if wrapper_class }}"{% if help %} aria-describedby="{{ fid }}-help"{% endif %}{{ ui.html_attrs(kwargs) }}>
+<legend class="field__label">{{ label }}</legend>
+<div class="segmented">{{ _opts() }}
+</div>
+{{- _messages(fid, help, none) }}
+</fieldset>
+{%- else -%}
+<fieldset class="segmented{{ ' ' ~ wrapper_class if wrapper_class }}"{{ ui.html_attrs(kwargs) }}>
+{%- if label %}<legend class="sr-only">{{ label }}</legend>{% endif %}{{ _opts() }}
+</fieldset>
+{%- endif -%}
+{%- endmacro -%}
+
+
+{#- inline_select(name, options, value=none, label=<required>, id=none, **attrs)
+    Borderless select for table cells (border appears on hover/focus). `label`
+    is required: it becomes the aria-label (make it specific, e.g. "Period for
+    Groceries"); leaving it out raises an error. Pair with hx_post /
+    hx_trigger="change" etc. -#}
+{%- macro inline_select(name, options, value=none, label=none, id=none) -%}
+{%- if not label %}{{ _fail('form.inline_select("' ~ name ~ '"): pass label= (it becomes the control\'s aria-label).') }}{% endif -%}
+<select class="{{ _cls('inline-control', kwargs) }}" name="{{ name }}" aria-label="{{ label }}"{% if id %} id="{{ id }}"{% endif %}{{ ui.html_attrs(kwargs, ['class']) }}>
+{{- _options(options, value) -}}
+</select>
+{%- endmacro -%}
+
+
+{#- inline_money(name, value=none, label=<required>, id=none, placeholder="0.00", **attrs)
+    Compact right-aligned money input for table cells (e.g. budget amounts).
+    A number value renders half-up with two decimals; None renders empty.
+    `label` is required (aria-label, e.g. "Groceries budget"). -#}
+{%- macro inline_money(name, value=none, label=none, id=none, placeholder="0.00") -%}
+{%- if not label %}{{ _fail('form.inline_money("' ~ name ~ '"): pass label= (it becomes the input\'s aria-label).') }}{% endif -%}
+{%- set v = ui.decimal_text(value) if value is number else (value if value is not none else '') -%}
+<span class="inline-money"><span class="inline-money__prefix" aria-hidden="true">$</span><input class="{{ _cls('inline-control', kwargs) }}" type="text" inputmode="decimal" autocomplete="off" name="{{ name }}" value="{{ v }}" placeholder="{{ placeholder }}" aria-label="{{ label }}"{% if id %} id="{{ id }}"{% endif %}{{ ui.html_attrs(kwargs, ['class']) }}></span>
+{%- endmacro -%}
+
+
+{#- filter_bar(action, target=none, history="replace", autosubmit=true, label="Filters", **attrs)
+    A GET form laid out as one row of compact controls; fields come from
+    {% call %}. With `target` it swaps that region via hx-get. history:
+    "replace" (default: the address bar follows the filters without adding a
+    Back step per keystroke), "push" (each submit is a history entry) or none.
+    autosubmit submits on change and debounces typing and date entry (400 ms).
+    Put <div class="filter-bar__actions"> last for Reset/Export links. -#}
+{%- macro filter_bar(action, target=none, history="replace", autosubmit=true, label="Filters") -%}
+<form class="filter-bar" role="search" aria-label="{{ label }}" method="get" action="{{ action }}"
+{%- if target %} hx-get="{{ action }}" hx-target="{{ target }}" hx-sync="this:replace"{% if history == 'push' %} hx-push-url="true"{% elif history == 'replace' %} hx-replace-url="true"{% endif %}{% endif %}
+{%- if autosubmit %} data-autosubmit{% endif %}{{ ui.html_attrs(kwargs) }}>
+{%- if caller is defined %}{{ caller() }}{% endif %}
+<noscript><button class="btn btn--sm" type="submit">Apply</button></noscript>
+</form>
+{%- endmacro -%}

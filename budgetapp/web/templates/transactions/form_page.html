@@ -1,0 +1,15 @@
+{#- A transaction form as a full page (a dialog URL opened directly, or without JavaScript).
+    Context: page_title, form_template, t, next (+ what the form needs). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% block title %}{{ page_title }}{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/transactions.css">{% endblock %}
+
+{% block content %}
+{{ ui.page_header(page_title, t.title ~ " · " ~ (t.spend_date|date_long) ~ " · " ~ ui.money_text(t.amount), back_href=next, back_label="Transactions") }}
+{% call ui.card(class="txn-form-card") %}
+{% include form_template %}
+{% endcall %}
+{% endblock %}
+
+{% block scripts %}<script src="/static/js/transactions.js" defer></script>{% endblock %}

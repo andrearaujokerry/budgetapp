@@ -1,0 +1,16 @@
+{#- Sandbox only (never in production): more test Items, with or without Plaid Link. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+{% call ui.card("Sandbox tools", subtitle="Test data only: these never touch a real account.", id="sandbox-tools") %}
+<div class="grid grid--2">
+<form method="post" action="/connection/sandbox-item" class="stack stack--sm">
+{{ form.select_field("user", "Add a test Item", sandbox_users, value="custom", id="sandbox-user") }}
+<div>{{ ui.button("Create without Link", type="submit", icon="plus", disabled=not link_enabled) }}</div>
+</form>
+<div class="stack stack--sm">
+<p class="text-secondary">Or go through Plaid Link: pick First Platypus Bank and sign in with <code>user_good</code> and <code>pass_good</code>.</p>
+<div>{{ ui.button("Link with Plaid Link", icon="link", data_link_mode="new", disabled=not link_enabled) }}</div>
+</div>
+</div>
+<p class="sandbox-hint">In Terminal, <code>./run sandbox-refresh</code> asks Plaid for new test data and <code>./run sandbox-reset-login</code> breaks the sign-in so you can try Reconnect.</p>
+{% endcall %}

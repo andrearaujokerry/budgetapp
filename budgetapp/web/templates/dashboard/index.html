@@ -1,0 +1,47 @@
+{#- Dashboard (INS-1): the current budget period. Every budget figure is the Budgets page's
+    (budgets.overview of the same period); see routes/dashboard.py. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+{% block title %}Dashboard{% endblock %}
+{% block charts %}{% if d.has_transactions %}yes{% endif %}{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/dashboard.css">{% endblock %}
+{% block content %}
+{%- set subtitle = words.heading ~ ' · ' ~ (ov.days_left|pluralize('day')) ~ ' left' if d.has_transactions else 'Spending against your budgets, at a glance.' -%}
+{% call ui.page_header("Dashboard", subtitle) %}
+{%- if d.has_transactions %}
+{{ ui.button('Budgets', href='/budgets', icon='target', size='sm', id='dash-open-budgets') }}
+{{ ui.button('Trends', href='/trends', icon='trending', size='sm', id='dash-open-trends') }}
+{%- endif %}
+{% endcall %}
+
+{%- if ov.notice %}
+{{ ui.banner('warn', ov.notice, title='Statement cycles unavailable.', action_href='/settings', action_label='Open Settings', id='period-notice') }}
+{%- endif %}
+{%- if ov.cycle_notice %}
+{{ ui.banner('warn', ov.cycle_notice, title='Unusual statement cycle.', action_href='/statements', action_label='Open Statements', id='cycle-notice') }}
+{%- endif %}
+{%- if d.held_rows %}
+{{ ui.banner('info', 'They look like charges Plaid already has, so no total counts them until you keep or delete them.', title=(d.held_rows|pluralize('imported row')) ~ ' held for review.', action_href='/import', action_label='Review', id='held-notice') }}
+{%- endif %}
+
+{%- if not d.has_transactions %}
+{% include "dashboard/_empty.html" %}
+{%- else %}
+{% include "dashboard/_kpis.html" %}
+
+<div class="grid grid--2 dash-grid">
+{% include "dashboard/_budgets.html" %}
+{% include "dashboard/_categories.html" %}
+</div>
+
+<div class="grid grid--sidebar dash-grid">
+{% include "dashboard/_pace.html" %}
+{% include "dashboard/_merchants.html" %}
+</div>
+
+<div class="grid grid--2 dash-grid">
+{% include "dashboard/_upcoming.html" %}
+{% include "dashboard/_annual.html" %}
+</div>
+{%- endif %}
+{% endblock %}

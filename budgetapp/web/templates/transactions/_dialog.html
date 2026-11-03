@@ -1,0 +1,6 @@
+{#- A form in a modal dialog, fetched into #txn-dialog; it opens itself (autoopen). Context:
+    dialog_id, dialog_title, dialog_size, form_template (+ what that form needs). -#}
+{% import "components/ui.html" as ui %}
+{% call ui.dialog(dialog_id, dialog_title, size=dialog_size, autoopen=true) %}
+{% include form_template %}
+{% endcall %}

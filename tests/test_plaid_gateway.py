@@ -13,9 +13,11 @@ from budgetapp import plaid_gateway as pg
 from budgetapp.config import load_settings
 from budgetapp.plaid_gateway import (
     ALLOWED_METHODS,
+    MUTATION_CODE,
     PlaidEnvironmentError,
     PlaidError,
     PlaidGateway,
+    PlaidGatewayError,
     PlaidTransportError,
     RealPlaidGateway,
 )
@@ -135,6 +137,25 @@ class TestAllowlist:
     def test_the_fake_satisfies_the_protocol(self):
         assert isinstance(FakePlaidGateway(), PlaidGateway)
         assert pg.gateway_methods(FakePlaidGateway) >= ALLOWED_METHODS
+
+    def test_no_other_module_imports_plaid_or_reaches_the_client(self):
+        """SEC-3: plaid_gateway is the only module that may talk to Plaid."""
+        package = Path(pg.__file__).parent
+        offenders = []
+        for path in sorted(package.rglob("*.py")):
+            if path == Path(pg.__file__):
+                continue
+            for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                    names = [node.module]
+                if any(n == "plaid" or n.startswith("plaid.") for n in names):
+                    offenders.append(f"{path.relative_to(package)} imports {names}")
+                if isinstance(node, ast.Attribute) and node.attr == "_client":
+                    offenders.append(f"{path.relative_to(package)} uses ._client")
+        assert offenders == []
 
 
 class TestRequests:
@@ -302,6 +323,57 @@ class TestErrors:
         with pytest.raises(AttributeError):
             gateway.get_item(SANDBOX_TOKEN)
 
+    def test_an_error_page_that_is_not_utf8_is_a_transport_error(self, gateway, client):
+        """plaid-python decodes error bodies as UTF-8 before raising ApiException."""
+        client.responses["transactions_sync"] = UnicodeDecodeError(
+            "utf-8", b"\xe9", 0, 1, "invalid continuation byte"
+        )
+        with pytest.raises(PlaidTransportError, match="not UTF-8"):
+            gateway.transactions_sync(SANDBOX_TOKEN, None)
+
+
+class TestErrorInterface:
+    """SYNC handles both errors with one ``except PlaidGatewayError`` and one set of fields."""
+
+    FIELDS = (
+        "status",
+        "error_type",
+        "error_code",
+        "error_message",
+        "display_message",
+        "request_id",
+        "error_code_reason",
+        "classification",
+        "needs_reconnect",
+        "is_trial_limit",
+        "is_mutation_during_pagination",
+        "retryable",
+        "restart_pagination",
+    )
+
+    def test_both_errors_share_the_interface(self):
+        transport = PlaidTransportError("ReadTimeoutError: read timed out")
+        plaid_error = PlaidError(400, "ITEM_ERROR", "ITEM_LOGIN_REQUIRED", "login", "Log in again")
+        for error in (transport, plaid_error):
+            assert isinstance(error, PlaidGatewayError)
+            for field in self.FIELDS:
+                getattr(error, field)
+        assert (transport.error_code, transport.error_message) == (
+            "TRANSPORT_ERROR",
+            "ReadTimeoutError: read timed out",
+        )
+        assert transport.status is None and transport.display_message is None
+        assert transport.classification == "error" and not transport.needs_reconnect
+        assert pg.item_status_for(transport) == "error"
+        assert pg.item_status_for(plaid_error) == "needs_reconnect"
+
+    def test_restart_pagination_for_transport_errors_and_mutations_only(self):
+        mutation = PlaidError(400, "TRANSACTIONS_ERROR", MUTATION_CODE, "changed")
+        assert mutation.restart_pagination and not mutation.retryable
+        assert PlaidTransportError("reset").restart_pagination
+        limit = PlaidError(429, "RATE_LIMIT_EXCEEDED", "TRANSACTIONS_SYNC_LIMIT", "slow down")
+        assert limit.retryable and not limit.restart_pagination
+
 
 class TestEnvironmentGuards:
     def test_sandbox_only_methods_refused_in_production(self, client):
@@ -326,11 +398,24 @@ class TestEnvironmentGuards:
         with pytest.raises(PlaidEnvironmentError):
             RealPlaidGateway.from_settings(settings)
 
-    def test_from_settings_reads_keychain(self, secrets):
+    def test_from_settings_reads_keychain(self, secrets, monkeypatch):
         secrets.values["plaid.client_id"] = "0123456789abcdef01234567"
         secrets.values["plaid.secret.sandbox"] = "abcdef0123456789abcdef01234567"
+        monkeypatch.setenv("BUDGETAPP_LIVE_SANDBOX", "1")  # as ./run test --sandbox does
         gateway = RealPlaidGateway.from_settings(load_settings("sandbox"))
         assert gateway.plaid_env == "sandbox"
+
+    def test_tests_never_build_a_real_client(self, secrets, monkeypatch):
+        secrets.values["plaid.client_id"] = "0123456789abcdef01234567"
+        secrets.values["plaid.secret.sandbox"] = "abcdef0123456789abcdef01234567"
+        secrets.values["plaid.secret.production"] = "fedcba9876543210fedcba98765432"
+        for env in ("sandbox", "production"):
+            with pytest.raises(PlaidEnvironmentError, match="FakePlaidGateway"):
+                RealPlaidGateway.from_settings(load_settings(env))
+        monkeypatch.setenv("BUDGETAPP_LIVE_SANDBOX", "1")
+        with pytest.raises(PlaidEnvironmentError):
+            RealPlaidGateway.from_settings(load_settings("production"))
+        assert RealPlaidGateway("production", client=FakeClient()).plaid_env == "production"
 
     def test_unknown_environment(self):
         with pytest.raises(ValueError):
@@ -348,6 +433,16 @@ class TestSandboxHelpers:
         assert body["initial_products"] == ["transactions"]
         assert body["options"]["transactions"] == {"days_requested": 730}
         assert body["options"]["override_username"] == "user_transactions_dynamic"
+
+    def test_public_token_with_liabilities(self, gateway, client):
+        """RESEARCH T3.10: Sandbox Items with Liabilities exercise statement snapshots."""
+        client.responses["sandbox_public_token_create"] = {"public_token": "public-sandbox-y"}
+        gateway.sandbox_create_public_token(
+            "ins_109508", initial_products=("transactions", "liabilities")
+        )
+        assert client.calls[-1][1].to_dict()["initial_products"] == ["transactions", "liabilities"]
+        with pytest.raises(ValueError):
+            gateway.sandbox_create_public_token("ins_109508", initial_products=())
 
     def test_create_transactions_converts_decimal_only_at_the_boundary(self, gateway, client):
         gateway.sandbox_create_transactions(

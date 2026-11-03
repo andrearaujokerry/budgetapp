@@ -1,0 +1,68 @@
+{#- "Re-apply rules to past transactions" (CAT-4): choose which transactions, preview (a dry
+    run), then apply exactly what was previewed. Swapped into #reapply. Needs `ra`
+    (routes/rules._reapply_context). The Preview button keeps its id, so keyboard focus stays on
+    it after the swap; #reapply-status (outside the swap) announces the result. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+{%- set r = ra.result -%}
+{% call ui.card("Re-apply rules to past transactions", subtitle="Runs card payments, your rules and the Plaid and Amex category mappings again, for example after adding a rule or changing a mapping. Categories you set yourself never change.", id="reapply-card") %}
+<div class="stack">
+<form class="form reapply-form" method="post" action="/rules/reapply" hx-post="/rules/reapply" hx-target="#reapply" hx-swap="innerHTML">
+<input type="hidden" name="action" value="preview">
+<div class="form-row">
+{{ form.select_field("scope", "Which transactions", ra.scope_options, value=ra.scope, id="reapply-scope", error=ra.errors.get("scope")) }}
+{{ form.date_field("since", "From", value=ra.since, id="reapply-since", error=ra.errors.get("since"), help="Used with “Transactions since a date”.", wrapper_class="reapply-since") }}
+</div>
+<div class="form-actions">
+{{ ui.button("Preview changes", icon="eye", type="submit", spin=true, id="reapply-preview") }}
+</div>
+</form>
+{%- if r %}
+<section class="reapply-result stack" aria-labelledby="reapply-result-title">
+<h3 class="reapply-result__title" id="reapply-result-title">Preview for {{ r.scope.description }}</h3>
+<div class="grid grid--3">
+{{ ui.stat("Would change category", '{:,}'.format(r.changed), icon="refresh", tone=("info" if r.changed else none)) }}
+{{ ui.stat("Checked", '{:,}'.format(r.examined), sub="categorized automatically") }}
+{{ ui.stat("Kept as you set them", '{:,}'.format(r.skipped_user), icon="lock") }}
+</div>
+{%- if r.sample %}
+<div class="table-wrap">
+<table class="table table--compact reapply-table">
+<caption class="sr-only">Examples of transactions that would change category</caption>
+<thead><tr>
+<th scope="col" class="col-optional-sm">Date</th>
+<th scope="col" class="col-grow">Transaction</th>
+<th scope="col">Category change</th>
+<th scope="col" class="num">Amount</th>
+</tr></thead>
+<tbody>
+{%- for item in r.sample %}
+<tr>
+<td class="table__date col-optional-sm">{{ item.date|date_long }}</td>
+<td class="col-grow"><span class="table__primary">{{ item.description }}</span></td>
+<td><span class="reapply-change">{{ ui.category_badge(item.old) }}<span class="reapply-change__arrow">{{ ui.icon("chevron-right", size="sm") }}<span class="sr-only">would be</span></span>{{ ui.category_badge(item.new) }}</span></td>
+<td class="num">{{ ui.money(item.amount) }}</td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{%- if r.changed > r.sample|length %}
+<p class="muted text-sm">{{ r.sample|length }} examples of {{ '{:,}'.format(r.changed) }}.</p>
+{%- endif %}
+{%- endif %}
+{%- if r.changed %}
+<form class="form-actions" method="post" action="/rules/reapply" hx-post="/rules/reapply">
+<input type="hidden" name="scope" value="{{ r.scope.key }}">
+<input type="hidden" name="since" value="{{ r.scope.since.isoformat() if r.scope.since else '' }}">
+<input type="hidden" name="action" value="apply">
+{{ ui.button("Apply to " ~ (r.changed|pluralize("transaction")), icon="check", variant="primary", type="submit", spin=true, data_confirm="Change the category of " ~ (r.changed|pluralize("transaction")) ~ "? Categories you set yourself stay as they are.") }}
+<span class="muted text-sm">Nothing has changed yet.</span>
+</form>
+{%- else %}
+<p class="text-secondary">Nothing would change: every transaction in scope already has the category your rules and mappings give it.</p>
+{%- endif %}
+</section>
+{%- endif %}
+</div>
+{% endcall %}

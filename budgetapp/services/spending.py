@@ -3,13 +3,17 @@
 * :func:`period_spending` is the ONLY definition of "spending in a budget period": the Budgets page,
   every "this period" dashboard widget and the budget alerts call it. It reads ``app_settings``:
   the date basis (posting date in statement mode, ``spend_date = COALESCE(authorized_date, date)``
-  in calendar mode) and ``include_pending_in_budgets``.
+  in calendar mode) and ``include_pending_in_budgets``. :func:`periods_spending` is the same for
+  several periods in one query (a rollover chain's earlier periods); ``period_spending`` is it
+  for one period.
 * Only categories of kind ``expense`` count. Charges add; refunds (negative amounts in an expense
   category) subtract (TXN-3). Card payments (``transfer``) and credits/rewards (``income``) never
   count. Hidden categories still count.
 * Splits count only when they sum exactly to the amount, and suspected duplicates are excluded —
   both handled by the ``v_allocations`` view.
 * Trends (:func:`monthly_spending`) always use calendar months by ``spend_date``.
+* :func:`daily_spending` splits a budget period into days on the same rules (the dashboard's
+  pace chart); its days add up to :func:`period_spending`'s total.
 
 In the posting-date basis a pending row (no ``posted_date`` yet) is dated by its Plaid ``date``.
 """
@@ -21,7 +25,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from sqlalchemy import Date, case, cast, func, select
+from sqlalchemy import ARRAY, Date, case, cast, func, literal, select
 from sqlalchemy.orm import Session
 
 from budgetapp.models import Category, Transaction, get_app_settings, v_allocations
@@ -109,6 +113,9 @@ class MerchantSpending:
     merchant: str
     amount: Decimal
     transaction_count: int
+    #: The spending categories the amount is in (where the Transactions page's ``category=``
+    #: filter finds its rows), ascending.
+    category_ids: tuple[int, ...] = ()
 
 
 def _filters(start: dt.date, end: dt.date, basis: str, include_pending: bool, kinds: Iterable[str]):
@@ -119,24 +126,29 @@ def _filters(start: dt.date, end: dt.date, basis: str, include_pending: bool, ki
     return conditions
 
 
+def _category_spending(r) -> CategorySpending:
+    """A result row of :func:`_category_columns` as a :class:`CategorySpending`."""
+    return CategorySpending(
+        category_id=r.category_id,
+        name=r.name,
+        kind=r.kind,
+        color=r.color,
+        icon=r.icon,
+        is_hidden=r.is_hidden,
+        amount=to_money(r.amount),
+        charges=to_money(r.charges),
+        credits=to_money(r.credits),
+        transaction_count=r.transaction_count,
+    )
+
+
+def _largest_first(row: CategorySpending) -> tuple[Decimal, str]:
+    return (-row.amount, row.name.casefold())
+
+
 def _category_rows(session: Session, query) -> list[CategorySpending]:
-    rows = []
-    for r in session.execute(query):
-        rows.append(
-            CategorySpending(
-                category_id=r.category_id,
-                name=r.name,
-                kind=r.kind,
-                color=r.color,
-                icon=r.icon,
-                is_hidden=r.is_hidden,
-                amount=to_money(r.amount),
-                charges=to_money(r.charges),
-                credits=to_money(r.credits),
-                transaction_count=r.transaction_count,
-            )
-        )
-    rows.sort(key=lambda row: (-row.amount, row.name.casefold()))
+    rows = [_category_spending(r) for r in session.execute(query)]
+    rows.sort(key=_largest_first)
     return rows
 
 
@@ -181,14 +193,51 @@ def spending_by_category(
 
 def period_spending(session: Session, period: Period) -> PeriodSpending:
     """THE spending for a budget period (see module docstring). Reads ``app_settings``."""
+    return periods_spending(session, (period,))[(period.start, period.end)]
+
+
+def periods_spending(
+    session: Session, periods: Iterable[Period]
+) -> dict[tuple[dt.date, dt.date], PeriodSpending]:
+    """:func:`period_spending` of several budget periods, read in one query, keyed by
+    ``(start, end)``. The periods must not overlap (budget periods never do).
+
+    With the periods sorted, a day lies in period number ``started`` (1-based) when ``started``
+    periods have started on or before it and fewer have ended before it (PostgreSQL's
+    ``width_bucket`` counts both); otherwise it falls between two periods.
+    """
     settings = get_app_settings(session)
     basis = basis_for_mode(settings.budget_period_mode)
     include_pending = settings.include_pending_in_budgets
-    rows = spending_by_category(
-        session, period.start, period.end, basis=basis, include_pending=include_pending
-    )
-    total = to_money(sum((row.amount for row in rows), Decimal("0")))
-    return PeriodSpending(period, basis, include_pending, tuple(rows), total)
+    ordered = sorted({(p.start, p.end): p for p in periods}.values(), key=lambda p: p.start)
+    for before, after in zip(ordered, ordered[1:], strict=False):
+        if after.start <= before.end:
+            raise ValueError(f"budget periods overlap: {before.label} and {after.label}")
+    found: dict[int, list[CategorySpending]] = {}
+    if ordered:
+        day = basis_date(basis)
+        starts = [p.start for p in ordered]
+        ends = [p.end + dt.timedelta(days=1) for p in ordered]  # the day after each period
+        started = func.width_bucket(day, literal(starts, ARRAY(Date)))
+        ended = func.width_bucket(day, literal(ends, ARRAY(Date)))
+        conditions = _filters(starts[0], ordered[-1].end, basis, include_pending, ("expense",))
+        query = (
+            select(started.label("number"), *_category_columns())
+            .select_from(v_allocations)
+            .join(Category, Category.id == v_allocations.c.category_id)
+            .where(*conditions, ended < started)
+            .group_by(started, Category.id)
+        )
+        for r in session.execute(query):
+            found.setdefault(r.number, []).append(_category_spending(r))
+    result = {}
+    for number, period in enumerate(ordered, start=1):
+        rows = sorted(found.get(number, ()), key=_largest_first)
+        total = to_money(sum((row.amount for row in rows), Decimal("0")))
+        result[(period.start, period.end)] = PeriodSpending(
+            period, basis, include_pending, tuple(rows), total
+        )
+    return result
 
 
 def monthly_spending(
@@ -252,26 +301,43 @@ def top_merchants(
     limit: int = 10,
     kinds: Iterable[str] = ("expense",),
 ) -> list[MerchantSpending]:
-    """Merchants with the most net spending (``merchant_name``, else the description)."""
-    merchant = func.coalesce(Transaction.merchant_name, Transaction.name)
+    """Merchants with the most net spending (``merchant_name``, else the description).
+
+    A merchant is matched the way the Transactions page's ``merchant=`` filter matches it
+    (``transactions.merchant_key_expr``: case and runs of spaces ignored), so "Whole Foods" and
+    "WHOLE  FOODS" are one merchant, shown by its most frequent merchant name (else its most
+    frequent description). ``category_ids`` are the categories its spending is in.
+    """
+    # The list filter's own key, so a merchant's link lists exactly the rows it adds up
+    # (imported here: services.transactions imports this module).
+    from budgetapp.services.transactions import merchant_key_expr
+
+    key = merchant_key_expr()
+    shown = func.coalesce(
+        func.mode().within_group(Transaction.merchant_name),
+        func.mode().within_group(Transaction.name),
+    )
     amount = func.sum(v_allocations.c.amount)
     query = (
         select(
-            merchant.label("merchant"),
+            shown.label("merchant"),
             amount.label("amount"),
             func.count(v_allocations.c.transaction_id.distinct()).label("transaction_count"),
+            func.array_agg(v_allocations.c.category_id.distinct()).label("category_ids"),
         )
         .select_from(v_allocations)
         .join(Transaction, Transaction.id == v_allocations.c.transaction_id)
         .join(Category, Category.id == v_allocations.c.category_id)
         .where(*_filters(start, end, basis, include_pending, kinds))
-        .group_by(merchant)
+        .group_by(key)
         .having(amount > 0)
-        .order_by(amount.desc(), merchant)
+        .order_by(amount.desc(), key)
         .limit(limit)
     )
     return [
-        MerchantSpending(r.merchant, to_money(r.amount), r.transaction_count)
+        MerchantSpending(
+            r.merchant, to_money(r.amount), r.transaction_count, tuple(sorted(r.category_ids))
+        )
         for r in session.execute(query)
     ]
 
@@ -290,3 +356,46 @@ def period_top_merchants(
         include_pending=settings.include_pending_in_budgets,
         limit=limit,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class DaySpending:
+    """Net spending on one day of :func:`daily_spending`."""
+
+    day: dt.date
+    amount: Decimal
+
+
+def daily_spending(session: Session, period: Period) -> list[DaySpending]:
+    """Net spending per day of a budget period, on the same date basis and pending setting as
+    :func:`period_spending` (the dashboard's day-by-day pace).
+
+    Every day of the period is listed, oldest first, days without spending as ``0.00``; the
+    amounts add up to ``period_spending(session, period).total``.
+    """
+    settings = get_app_settings(session)
+    basis = basis_for_mode(settings.budget_period_mode)
+    day = basis_date(basis)
+    query = (
+        select(day.label("day"), func.coalesce(func.sum(v_allocations.c.amount), 0).label("amount"))
+        .select_from(v_allocations)
+        .join(Category, Category.id == v_allocations.c.category_id)
+        .where(
+            *_filters(
+                period.start,
+                period.end,
+                basis,
+                settings.include_pending_in_budgets,
+                ("expense",),
+            )
+        )
+        .group_by(day)
+    )
+    amounts = {r.day: to_money(r.amount) for r in session.execute(query)}
+    return [
+        DaySpending(
+            period.start + dt.timedelta(days=i),
+            amounts.get(period.start + dt.timedelta(days=i), ZERO),
+        )
+        for i in range(period.days)
+    ]

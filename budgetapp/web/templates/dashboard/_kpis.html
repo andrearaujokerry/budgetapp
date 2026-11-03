@@ -1,0 +1,34 @@
+{#- The headline tiles: spent against budget and remaining (the Budgets page's overall card:
+    ov.overall), days left, and all spending so far against the same day of the previous
+    period (d.pace, like the pace chart: annual-budget categories included, so the tile says
+    "all spending" next to a Spent figure that may leave them out). -#}
+{%- import "components/ui.html" as ui -%}
+{%- set o = ov.overall -%}
+{%- set p = d.pace -%}
+<div class="grid grid--4 dash-kpis" id="dash-kpis">
+{%- if o.budget is not none %}
+{%- set spent_sub = 'of ' ~ ui.money_text(o.budget, cents=false) ~ (' target' if o.has_target else ' budgeted') %}
+{% call ui.stat('Spent', ui.money(o.spent, cents=false), sub=spent_sub, tone=o.status if o.status in ['warn', 'over'] else none, icon='credit-card', id='kpi-spent') %}
+{%- if o.percent_used is not none %}{{ ui.progress(o.percent_used, pace_pct=o.pace_percent, status=o.status, show_pct=false, size='sm', name=('Overall target used' if o.has_target else 'Monthly budgets used')) }}{% endif %}
+{% endcall %}
+{%- if o.remaining < 0 %}
+{%- set remaining_sub = 'over ' ~ ('the target' if o.has_target else 'budget') %}
+{%- elif ov.days_left > 0 %}
+{%- set remaining_sub = 'about ' ~ ui.money_text(o.remaining / ov.days_left, cents=false) ~ ' a day for ' ~ (ov.days_left|pluralize('day')) %}
+{%- else %}
+{%- set remaining_sub = (o.percent_used|pct ~ ' used') if o.percent_used is not none else none %}
+{%- endif %}
+{{ ui.stat('Remaining', ui.money(o.remaining, cents=false, tone='over' if o.remaining < 0 else 'neutral'), sub=remaining_sub, tone='over' if o.remaining < 0 else none, icon='target', id='kpi-remaining') }}
+{%- else %}
+{{ ui.stat('Spent', ui.money(ov.totals.spent, cents=false), sub='in all categories', icon='credit-card', id='kpi-spent') }}
+{{ ui.stat('Remaining', ui.money(none), sub='no budget set yet', icon='target', href='/budgets', id='kpi-remaining') }}
+{%- endif %}
+{{ ui.stat('Days left', (ov.days_left|string), sub='of ' ~ ov.period.days ~ ' · ' ~ words.ends, icon='calendar', id='kpi-days') }}
+{%- set ch = p.change %}
+{%- if ch is not none %}
+{%- set compare_sub = 'all spending: ' ~ ui.money_text(p.spent, cents=false) ~ ' so far, ' ~ ui.money_text(p.previous_spent, cents=false) ~ ' by ' ~ (p.previous_through|date_short) ~ (' (history starts mid-' ~ words.unit ~ ')' if p.previous_partial else '') %}
+{{ ui.stat('Compared with ' ~ words.previous, ui.money(ch.amount, signed=true, cents=false, tone='neutral'), sub=compare_sub, icon=('arrow-up' if ch.amount > 0 else ('arrow-down' if ch.amount < 0 else 'minus')), id='kpi-compare') }}
+{%- else %}
+{{ ui.stat('Compared with ' ~ words.previous, ui.money(none), sub='no spending history before this ' ~ words.unit, icon='clock', id='kpi-compare') }}
+{%- endif %}
+</div>

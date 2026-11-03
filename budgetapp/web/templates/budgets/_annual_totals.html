@@ -1,0 +1,11 @@
+{#- Annual budgets' totals row (#annual-totals, out of band after an edit). -#}
+{%- import "components/ui.html" as ui -%}
+<tfoot id="annual-totals"{% if oob is defined and oob %} hx-swap-oob="true"{% endif %}>
+<tr>
+<th scope="row" class="col-grow">Total</th>
+<td class="num">{{ ui.money(annual.budget_total, tone='neutral') }}</td>
+<td class="num">{{ ui.money(annual.spent_total, tone='neutral') }}</td>
+<td class="num">{{ ui.money(annual.remaining_total, tone='over' if annual.remaining_total < 0 else 'neutral') }}</td>
+<td class="col-optional-sm"></td>
+</tr>
+</tfoot>

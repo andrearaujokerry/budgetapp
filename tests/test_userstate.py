@@ -15,6 +15,12 @@ from tests.factories import (
 D = Decimal
 
 
+def userstate_card_payments_id(db):
+    from budgetapp.services.categorize import system_category_id
+
+    return system_category_id(db, "card_payments")
+
+
 def _splits(txn):
     return [(s.category_id, s.amount) for s in txn.splits]
 
@@ -162,6 +168,58 @@ class TestCaptureApply:
         )
         assert target.category_source == "default" and target.notes == "n"
 
+    def test_a_payment_target_never_takes_a_carried_category_or_splits(self, db):
+        groceries, home = get_category(db, "Groceries"), get_category(db, "Home")
+        payments = db.get(type(home), userstate_card_payments_id(db))
+        target = make_transaction(db, amount="-100.00", category=payments, category_source="system")
+        state = UserState(
+            category_id=home.id,
+            notes="carried",
+            splits=(SplitState(groceries.id, D("-60.00")), SplitState(home.id, D("-40.00"))),
+        )
+        assert userstate.apply(target, state) is True
+        db.flush()
+        assert (target.category_id, target.category_source) == (payments.id, "system")
+        assert target.splits == [] and target.notes == "carried"
+        assert "category you chose and the splits" in target.review_reason
+
+    def test_a_carried_card_payments_choice_on_a_payment_is_no_loss(self, db):
+        payments_id = userstate_card_payments_id(db)
+        target = make_transaction(
+            db,
+            amount="-100.00",
+            category=db.get(type(get_category(db, "Home")), payments_id),
+            category_source="system",
+        )
+        assert userstate.apply(target, UserState(category_id=payments_id)) is False
+        assert target.needs_review is False
+
+    def test_the_targets_own_splits_are_kept(self, db):
+        groceries, home = get_category(db, "Groceries"), get_category(db, "Home")
+        target = make_transaction(db, amount="100.00")
+        make_split(db, target, groceries, "70.00")
+        make_split(db, target, home, "30.00")
+        state = UserState(
+            category_id=home.id,
+            splits=(SplitState(groceries.id, D("50.00")), SplitState(home.id, D("50.00"))),
+        )
+        userstate.apply(target, state)
+        db.flush()
+        assert _splits(target) == [(groceries.id, D("70.00")), (home.id, D("30.00"))]
+        assert target.category_source == "default"
+
+    def test_splits_still_land_when_the_category_was_already_carried(self, db):
+        """decide(inherited=…) may have set the same user category first."""
+        groceries, home = get_category(db, "Groceries"), get_category(db, "Home")
+        target = make_transaction(db, amount="100.00", category=home, category_source="user")
+        state = UserState(
+            category_id=home.id,
+            splits=(SplitState(groceries.id, D("60.00")), SplitState(home.id, D("40.00"))),
+        )
+        userstate.apply(target, state)
+        db.flush()
+        assert _splits(target) == [(groceries.id, D("60.00")), (home.id, D("40.00"))]
+
     def test_apply_nothing(self, db):
         target = make_transaction(db)
         assert userstate.apply(target, None) is False
@@ -190,6 +248,42 @@ class TestCaptureApply:
         userstate.apply(plaid_row, userstate.capture(csv_row))
         db.delete(csv_row)
         db.flush()
+        assert _splits(plaid_row) == [(groceries.id, D("5.00")), (home.id, D("15.00"))]
+
+
+class TestPairingRecipe:
+    """The CSV ↔ Plaid pairing order from the ``services/reconcile.py`` contract."""
+
+    def test_documented_order_moves_state_and_reference(self, db):
+        from sqlalchemy.exc import IntegrityError
+
+        from budgetapp.services.categorize import Categorizer, apply_carried_state
+
+        groceries, home = get_category(db, "Groceries"), get_category(db, "Home")
+        account = make_account(db)
+        csv_row = make_transaction(db, account, source="csv", amount="20.00", notes="csv note")
+        make_split(db, csv_row, groceries, "5.00")
+        make_split(db, csv_row, home, "15.00")
+        plaid_row = make_transaction(db, account, amount="20.00")
+        reference = csv_row.csv_reference
+
+        # The tempting order (set the reference, delete, one flush) violates the unique key.
+        with (
+            pytest.raises(IntegrityError, match="uq_transactions_csv_reference"),
+            db.begin_nested(),
+        ):
+            plaid_row.csv_reference = reference
+            db.delete(csv_row)
+            db.flush()
+        db.expire_all()
+
+        state = userstate.capture(csv_row)  # 1. capture first (the delete removes the splits)
+        db.delete(csv_row)  # 2. delete and flush
+        db.flush()
+        plaid_row.csv_reference = reference  # 3. copy the reference, then move the state
+        apply_carried_state(Categorizer.load(db), plaid_row, state)
+        db.flush()
+        assert plaid_row.csv_reference == reference and plaid_row.notes == "csv note"
         assert _splits(plaid_row) == [(groceries.id, D("5.00")), (home.id, D("15.00"))]
 
 

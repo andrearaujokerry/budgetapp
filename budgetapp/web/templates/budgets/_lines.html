@@ -1,0 +1,31 @@
+{#- Monthly category budgets (BUD-1, BUD-4): one row per budget, most used first. -#}
+{%- import "components/ui.html" as ui -%}
+{%- set lines_actions %}{{ ui.button('Add budget', icon='plus', size='sm', data_dialog_open='add-monthly') }}{% endset -%}
+{% call ui.card('Monthly budgets', subtitle=labels.period ~ ' · sorted by how much is used', actions=lines_actions, flush=true, id='lines-card') %}
+{%- if ov.lines %}
+<div class="table-wrap">
+<table class="table budget-table" id="budget-lines">
+<thead><tr>
+<th scope="col" class="col-grow">Category</th>
+<th scope="col" class="num">Budget</th>
+<th scope="col" class="num">Spent</th>
+<th scope="col" class="num">Remaining</th>
+<th scope="col" class="budget-table__meter col-optional-sm">Used</th>
+<th scope="col" class="center">Rollover {{ ui.tip("Rollover carries what's left (or what you overspent) into the next " ~ labels.unit ~ '.', pos='bottom') }}</th>
+<th scope="col" class="shrink"><span class="sr-only">Suggest</span></th>
+</tr></thead>
+<tbody>
+{%- for line in ov.lines %}
+{%- set category = line.category %}
+{% include "budgets/_line_row.html" %}
+{%- endfor %}
+</tbody>
+{% include "budgets/_totals.html" %}
+</table>
+</div>
+{%- else %}
+{% call ui.empty_state('No monthly budgets yet', 'Give a category a monthly budget to see spent, remaining and percent used here. Categories you spend in without a budget are listed below.', icon='target') %}
+{{ ui.button('Add budget', icon='plus', variant='primary', data_dialog_open='add-monthly') }}
+{% endcall %}
+{%- endif %}
+{% endcall %}

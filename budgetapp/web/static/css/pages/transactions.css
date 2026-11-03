@@ -1,0 +1,583 @@
+/* Transactions page (TXN-1..5). Only what the design system has no component for: popover
+   menus (row actions, the category picker), the results summary with its sums, the table's
+   phone layout (Amount always in view), the split editor and the details layout. Tokens only. */
+
+/* Results ------------------------------------------------------------------ */
+.txn-results__body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.txn-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 20px;
+}
+
+.txn-summary__count {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.txn-summary__count strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.txn-summary__range {
+  color: var(--text-muted);
+}
+
+.txn-sums {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 18px;
+  margin: 0 0 0 auto;
+}
+
+.txn-sums__item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.txn-sums dt {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.txn-sums dd {
+  margin: 0;
+  font-weight: var(--fw-semibold);
+}
+
+.txn-sums__tip {
+  display: flex;
+}
+
+.txn-summary__actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Filter bar --------------------------------------------------------------- */
+.txn-dates {
+  display: none;
+  flex: 0 1 300px;
+  gap: 12px;
+}
+
+.txn-dates > .field {
+  flex: 1 1 0;
+}
+
+#txn-filters:has(#f-range option[value="custom"]:checked) .txn-dates {
+  display: flex;
+}
+
+.txn-catpick__button {
+  display: flex;
+  align-items: center;
+  text-align: left;
+}
+
+.txn-catpick__summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.txn-more {
+  flex: 1 1 100%;
+}
+
+.txn-more__summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+  list-style: none;
+}
+
+.txn-more__summary::-webkit-details-marker {
+  display: none;
+}
+
+.txn-more__summary:hover {
+  color: var(--text);
+}
+
+.txn-more__summary .badge {
+  height: 18px;
+}
+
+.txn-more__fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.txn-more__fields > .field {
+  flex: 0 1 170px;
+}
+
+.txn-more__check {
+  align-self: center;
+  margin-top: 18px;
+}
+
+/* Popovers: the row menu and the category picker. The browser shows them above everything
+   (top layer); transactions.js places them under their button (.is-anchored). Without it they
+   stay centred, the browser's default. */
+.txn-popover {
+  margin: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-md);
+  color: var(--text);
+}
+
+.txn-popover.is-anchored {
+  position: fixed;
+  inset: auto;
+  top: var(--pop-top, 0);
+  right: var(--pop-right, auto);
+  left: var(--pop-left, auto);
+  margin: 0;
+}
+
+.txn-menu {
+  min-width: 220px;
+}
+
+.txn-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.txn-menu__item:hover {
+  background: var(--surface-hover);
+}
+
+.txn-menu__item:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.txn-menu__item .icon {
+  color: var(--text-muted);
+}
+
+/* "Change category" is for phones; wider screens have the select in the row. */
+.txn-menu__item--phone {
+  display: none;
+}
+
+.txn-catpick__panel {
+  width: 270px;
+  max-height: min(440px, 70vh);
+  padding: 0;
+  overflow: hidden;
+}
+
+.txn-catpick__panel:popover-open {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The list scrolls in its own box: a fieldset doesn't clip its overflow reliably. */
+.txn-catpick__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.txn-catpick__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 6px;
+  border: 0;
+}
+
+.txn-catpick__option {
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.txn-catpick__option:hover {
+  background: var(--surface-hover);
+}
+
+.txn-popover__footer {
+  display: flex;
+  flex: none;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+
+/* Table -------------------------------------------------------------------- */
+.txn-desc__line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.txn-desc__line .badge {
+  flex: none;
+}
+
+.txn-desc__title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-weight: var(--fw-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.txn-desc__title:hover {
+  color: var(--accent-text);
+}
+
+.txn-row.is-muted .txn-desc__title {
+  color: var(--text-muted);
+}
+
+.txn-desc__phone {
+  display: none;
+}
+
+.txn-desc__review {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 4px;
+  color: var(--warn-text);
+  font-size: var(--fs-sm);
+  white-space: normal;
+}
+
+.txn-desc__review .icon {
+  flex: none;
+  margin-top: 3px;
+}
+
+.txn-splits {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.txn-splits li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.txn-splits__amount {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.txn-splits__note {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  white-space: normal;
+}
+
+.txn-member {
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+
+/* The Card member column only on pages where a row names a member (see _results.html). */
+.txn-table:not(.txn-table--members) .txn-col-member {
+  display: none;
+}
+
+/* Forms and dialogs -------------------------------------------------------- */
+.txn-form__context {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+}
+
+.txn-rule-preview {
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+}
+
+.txn-rule-preview__text {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.txn-rule-preview__text .icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--accent-text);
+}
+
+/* "Matches only CSV rows": new charges from Plaid may name the merchant differently. */
+.txn-rule-preview__hint {
+  margin-top: 8px;
+}
+
+.txn-rule-preview__hint .icon {
+  color: var(--warn-text);
+}
+
+.txn-split__head,
+.txn-split__part {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(7rem, 0.8fr) minmax(0, 1.3fr) 32px;
+  gap: 8px;
+  align-items: start;
+}
+
+.txn-split__head {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.txn-split__parts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.txn-split__remove {
+  margin-top: 2px;
+}
+
+.txn-split__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.txn-split__remaining {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.txn-split__remaining[data-state="ok"] { color: var(--ok-text); }
+.txn-split__remaining[data-state="warn"] { color: var(--warn-text); }
+.txn-split__remaining[data-state="over"] { color: var(--over-text); }
+
+.txn-split__clear {
+  margin-top: 16px;
+}
+
+/* Details ------------------------------------------------------------------ */
+.txn-detail {
+  display: grid;
+  gap: 22px;
+}
+
+.txn-detail__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.txn-detail__who {
+  min-width: 0;
+}
+
+.txn-detail__title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+  overflow-wrap: anywhere;
+}
+
+.txn-detail__sub {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.txn-detail__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+
+.txn-detail__badges:empty {
+  display: none;
+}
+
+.txn-detail__amount {
+  margin: 0;
+  font-size: var(--fs-2xl);
+  font-weight: var(--fw-semibold);
+  white-space: nowrap;
+}
+
+.txn-detail__section {
+  display: grid;
+  gap: 10px;
+}
+
+.txn-detail__heading {
+  margin: 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+}
+
+.txn-detail__notes {
+  white-space: pre-wrap;
+}
+
+.txn-splits--detail li {
+  flex-wrap: wrap;
+}
+
+/* One term column for every section, so the values line up down the page (the stacked
+   layout below 360px is the component's own). */
+@container (min-width: 360px) {
+  .txn-detail .kv {
+    grid-template-columns: 11rem minmax(0, 1fr);
+  }
+}
+
+/* Phones: Date and Category hide and the description cell shows both on a third line, so
+   the table fits a 390px screen with Amount in view (no sideways scrolling). ----------- */
+@media (max-width: 599.98px) {
+  .table-wrap > .txn-table {
+    min-width: 0;
+  }
+
+  .txn-table > thead > tr > th:first-child,
+  .txn-table .txn-col-date {
+    display: none;
+  }
+
+  .txn-table td.txn-desc {
+    padding-left: 16px;
+  }
+
+  /* Badges move under a long name instead of cutting it to a few letters. */
+  .txn-desc__line {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+
+  .txn-desc__phone {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 10px;
+    margin-top: 3px;
+    color: var(--text-muted);
+    font-size: var(--fs-sm);
+    white-space: nowrap;
+  }
+
+  .txn-menu__item--phone {
+    display: flex;
+  }
+
+  .txn-sums {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .txn-dates {
+    flex: 1 1 100%;
+  }
+
+  .txn-more__fields > .field {
+    flex: 1 1 100%;
+  }
+
+  .txn-split__head {
+    display: none;
+  }
+
+  .txn-split__parts {
+    gap: 12px;
+  }
+
+  .txn-split__part {
+    grid-template-columns: minmax(0, 1fr) 7.5rem 32px;
+  }
+
+  .txn-split__part + .txn-split__part {
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+
+  .txn-split__note {
+    grid-column: 1 / 3;
+  }
+
+  .txn-split__remove {
+    grid-row: 1;
+    grid-column: 3;
+  }
+
+  .txn-detail__head {
+    flex-direction: column;
+    gap: 8px;
+  }
+}

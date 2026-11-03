@@ -1,0 +1,270 @@
+/* Statements pages (INS-4, REL-3): the summary box, boundary lists and the printout.
+   Only what the shared components don't cover; tokens from app.css. */
+
+/* List ------------------------------------------------------------------- */
+/* Phones show the closing date as the label and the status in the second line. */
+.stmt-narrow {
+  display: none;
+}
+
+.stmt-badges {
+  --cluster-gap: 4px;
+  flex-wrap: nowrap;
+}
+
+.stmt-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 16px;
+}
+
+.stmt-add .field {
+  min-width: 12rem;
+}
+
+/* The summary box and the form beside it ---------------------------------- */
+.stmt-top {
+  align-items: start;
+}
+
+.stmt-box tbody th {
+  color: var(--text);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
+.stmt-box .stmt-box__row--total > * {
+  border-top: 1px solid var(--border-strong);
+  font-weight: var(--fw-semibold);
+}
+
+.stmt-box .stmt-box__row--total .amount {
+  font-weight: var(--fw-semibold);
+}
+
+/* A line that doesn't match: tinted, with an alert icon by its label (and the difference). */
+.table .stmt-box__row--off > *,
+.table tbody tr.stmt-box__row--off:hover > * {
+  background: var(--over-soft);
+}
+
+.stmt-box__row--off th .icon {
+  width: 14px;
+  height: 14px;
+  margin-right: 6px;
+  color: var(--over-text);
+  vertical-align: -2px;
+}
+
+.stmt-match,
+.stmt-diff {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: var(--fw-medium);
+}
+
+.stmt-match {
+  color: var(--ok-text);
+}
+
+.stmt-diff {
+  color: var(--over-text);
+}
+
+.stmt-match .icon,
+.stmt-diff .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* The statement's numbers ------------------------------------------------- */
+.stmt-fields {
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+
+.stmt-checked {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.stmt-checked__text {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.stmt-checked__text .icon {
+  color: var(--ok-text);
+}
+
+/* "Remove statement" (user-added statements only), under the check. */
+.stmt-remove {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.stmt-remove__text,
+.stmt-later {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.stmt-remove form {
+  margin: 0;
+}
+
+/* Boundaries ---------------------------------------------------------------- */
+.stmt-boundary + .stmt-boundary {
+  border-top: 1px solid var(--border);
+}
+
+.stmt-boundary__title {
+  margin: 0;
+  padding: 14px 20px 8px;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+}
+
+.stmt-boundary__empty {
+  margin: 0;
+  padding: 0 20px 16px;
+  font-size: var(--fs-sm);
+}
+
+.table .stmt-cut > td {
+  padding-top: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--border-strong);
+  background: var(--surface-sunken);
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.02em;
+}
+
+.stmt-cut span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.table tbody tr.stmt-cut:hover > * {
+  background: var(--surface-sunken);
+}
+
+/* Transactions, in the statement's sections -------------------------------- */
+.table .stmt-group > * {
+  background: var(--surface-sunken);
+  font-weight: var(--fw-semibold);
+}
+
+.table tbody tr.stmt-group:hover > * {
+  background: var(--surface-sunken);
+}
+
+.stmt-group th {
+  color: var(--text);
+}
+
+.stmt-group__count {
+  color: var(--text-muted);
+  font-weight: var(--fw-medium);
+}
+
+/* Phones: the lists fit the screen instead of scrolling sideways ----------- */
+@media (max-width: 599.98px) {
+  .stmt-wide {
+    display: none;
+  }
+
+  .stmt-narrow {
+    display: inline;
+  }
+
+  .table-wrap > .stmt-periods,
+  .table-wrap > .stmt-lines {
+    --grow-min: 6rem;
+    min-width: 0;
+  }
+
+  .stmt-periods th,
+  .stmt-periods td,
+  .stmt-box th,
+  .stmt-box td {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .stmt-periods th:first-child,
+  .stmt-periods td:first-child,
+  .stmt-box th:first-child,
+  .stmt-box td:first-child {
+    padding-left: 16px;
+  }
+
+  .stmt-periods th:last-child,
+  .stmt-periods td:last-child,
+  .stmt-box th:last-child,
+  .stmt-box td:last-child {
+    padding-right: 16px;
+  }
+
+  /* The Difference column is hidden here: the Statement column is the last one shown. */
+  .stmt-box th:nth-last-child(2),
+  .stmt-box td:nth-last-child(2) {
+    padding-right: 16px;
+  }
+
+  .stmt-box tbody th {
+    white-space: normal;
+  }
+}
+
+/* Print: a clean document of the period ------------------------------------ */
+@media print {
+  .stmt-transactions,
+  #boundaries {
+    break-inside: auto;
+  }
+
+  /* The form beside the summary box is not printed: the box gets the whole width. */
+  .stmt-top {
+    display: block;
+  }
+
+  /* "All statements" is a link back into the app, meaningless on paper. */
+  .page-header__eyebrow {
+    display: none;
+  }
+
+  .stmt-lines thead {
+    display: table-header-group;
+  }
+
+  .stmt-box .amount,
+  .stmt-match,
+  .stmt-diff {
+    color: #000000;
+  }
+
+  .table .stmt-group > *,
+  .table .stmt-cut > td {
+    background: #f2f2f2;
+  }
+}

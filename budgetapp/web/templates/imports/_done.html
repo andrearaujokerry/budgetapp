@@ -1,0 +1,9 @@
+{#- What the import just made did (?done=<id>). Needs `done` (an ImportRecord). -#}
+{% import "components/ui.html" as ui %}
+{% set d = done %}
+{% set text -%}
+{{ "{:,}".format(d.inserted_count) }} added{% if d.suspects %} ({{ "{:,}".format(d.suspects) }} held for review below){% endif %}, {{ "{:,}".format(d.matched_plaid_count) }} merged with Plaid transactions, {{ "{:,}".format(d.duplicate_count) }} already imported{% if d.error_count %}, {{ "{:,}".format(d.error_count) }} skipped (unreadable, or changed since an earlier import){% endif %}.
+{%- endset %}
+{% call ui.banner("ok", text, title="Imported " ~ d.filename ~ " into " ~ d.account_label ~ ".", id="import-done") %}
+{{ ui.button("View transactions", size="sm", href="/transactions") }}
+{% endcall %}
