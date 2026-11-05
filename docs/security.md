@@ -48,8 +48,8 @@ touch your money. This page lists what protects it, and the few things that are 
 
 - The only internet traffic is with Plaid (and the download of the app's Python packages: at the
   first `./run`, at the first install of the live app, and when their pinned versions change).
-- There are no analytics, trackers, web fonts or files from other websites. The one outside script
-  is Plaid's own, on the Connection page only.
+- There are no analytics or trackers, and no fonts or other files from other websites (the
+  app's font ships with it). The one outside script is Plaid's own, on the Connection page only.
 - Asking questions about your spending in plain English (AI-1) isn't part of this version, so
   nothing is ever sent to Anthropic.
 

@@ -161,7 +161,7 @@ The app has two separate environments, plus demo data. They never share a databa
 | Data | Plaid's Sandbox: fake banks and test users | your real American Express | made-up data, no Plaid at all |
 | Database | `budgetapp_sandbox` | `budgetapp` | `budgetapp_test_demo_NAME` |
 | Code that runs | this folder | the installed copy in `~/Library/Application Support/budgetapp/venv` | this folder |
-| In the browser | a purple "Sandbox — test data" bar | no bar; a green "Live" label | an orange "Demo data" bar |
+| In the browser | a purple "Sandbox — test data" bar | no bar; a "Live" label | an orange "Demo data" bar |
 | Plaid connections | unlimited and free | 1 of your 10, once | none |
 
 - **Every command uses Sandbox unless you say otherwise.** Real data is touched only by

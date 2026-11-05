@@ -316,6 +316,7 @@ def test_wrong_method_gets_a_405_page(probe_client):
         ("js/app.js", "text/javascript"),
         ("css/app.css", "text/css"),
         ("img/favicon.svg", "image/svg+xml"),
+        ("vendor/newsreader-latin-opsz-normal.woff2", "font/woff2"),
     ],
 )
 def test_static_and_vendored_files_are_served(raw_client, path, content_type):

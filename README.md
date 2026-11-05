@@ -10,9 +10,9 @@ budgets, trends, recurring charges and a statement check that matches Amex to th
   code allows only a fixed list of calls, none of which can move money, and a test fails if
   anything else appears.
 - **Stays on this Mac.** The web app and its database accept connections only from this Mac.
-  Your data goes only between this Mac and Plaid. There are no analytics, trackers, web fonts
-  or scripts from the internet; Plaid's own sign-in window on the Connection page is the one
-  exception.
+  Your data goes only between this Mac and Plaid. There are no analytics or trackers, and no
+  fonts or scripts from the internet (the app's font ships with it); Plaid's own sign-in
+  window on the Connection page is the one exception.
 - **Secrets in Keychain.** Plaid keys, the access token and the database passwords live in
   macOS Keychain, never in files, logs or git.
 - **Free to run.** Plaid's free Trial plan supplies the data.
