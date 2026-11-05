@@ -121,7 +121,7 @@ marked FAIL before you link. "Nothing is linked in production yet" is expected a
 Terminal shows a **LIVE DATA** banner. `./run live` upgrades the installed copy first when the
 code has changed since the last install, then opens http://127.0.0.1:8765: the web agent if you
 installed it, otherwise a server that runs until you press Ctrl-C. The live app has no coloured
-bar at the top; the green **Live** label tells you it is the real one.
+bar at the top; the **Live** label under the app's name tells you it is the real one.
 
 ## 4. Link your Amex
 

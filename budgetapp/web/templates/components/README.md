@@ -86,7 +86,7 @@ missing `env` hides the environment bar, so **every error handler must render th
 | `"sandbox"` | purple, stripes: "**Sandbox** — test data. Nothing here touches your real Amex account." | Sandbox (purple) | ` (Sandbox)` |
 | `"test"` | same purple bar with "**Test** — test data…" (pytest renders) | Test | ` (Test)` |
 | `"demo"` | burnt orange, stripes the other way, alert icon: "**Demo data** — nothing here is real. Made-up transactions in a throwaway database; your Amex account is never touched." | Demo (orange) | ` (Demo)` |
-| `"production"` | none | Live (green) | none |
+| `"production"` | none | Live (grey) | none |
 | any other string | none | the value, capitalised | none |
 | `None` / missing | none (never assumes Sandbox) | none | none |
 
@@ -110,7 +110,7 @@ The web shell passes `env="demo"` when it serves a demo database (`serve --demo 
 | base | `conn.items[*].consent_due_at` | aware datetime | banner date: `consent_due_at.astimezone().date()` then `\|date_long` |
 | partial | `conn.label` | str | pill text fallback |
 | partial | `conn.syncing` | bool (property) | "Syncing…" pill, polling, disabled Sync now |
-| partial | `conn.stale` | bool (property) | amber "Synced 2 days ago" pill |
+| partial | `conn.stale` | bool (property) | warning-toned "Synced 2 days ago" pill |
 | partial | `conn.last_sync_success_at` | aware datetime or `None` (property) | "Synced " + `\|relative_time` |
 | partial | `conn.primary` | `ItemStatus` or `None` (property) | the worst Item (its fields below) |
 | partial | `conn.primary.institution_name` | str or `None` | healthy tooltip "American Express via Plaid" |
@@ -146,7 +146,7 @@ The pill and the action are chosen independently (first match wins in each list)
 | `conn.needs_reconnect` (and state is not `not_linked`) | `needs_reconnect` "Reconnect needed" (tooltip: `primary.error_message` or `error_code`) |
 | `conn.state == "error"` | `error` "Sync problem" (tooltip: `primary.error_message` or `error_code`) |
 | `conn.state == "not_linked"` | `not_linked` "Not linked" (hollow dot) |
-| `conn.state == "stale"` or `conn.stale` | `stale` (amber) "Synced 2 days ago" (or `conn.label` when never synced) |
+| `conn.state == "stale"` or `conn.stale` | `stale` (warning tone) "Synced 2 days ago" (or `conn.label` when never synced) |
 | otherwise | `healthy` "Synced 5 min ago" (or `conn.label`; tooltip "American Express via Plaid") |
 
 | Action: situation | Action |
@@ -271,10 +271,14 @@ Every macro that takes a colour meaning uses the same names:
 
 | Tone | Meaning |
 | --- | --- |
-| `ok` | good / on track / credit (green) |
-| `warn` | needs attention soon (amber) |
+| `ok` | good / on track / credit (mid grey) |
+| `warn` | needs attention soon (strong ink: near-black, near-white in dark mode) |
 | `over` | over budget, error, danger (red) |
-| `info` | neutral information (blue) |
+| `info` | neutral information (grey) |
+
+The app is black, white and grey. Red (`over`, `--danger`) is the only status colour,
+and the categorical palette (charts and category dots) the only other colour; so the
+words, icons and bar fills must carry `ok`, `warn` and `info` on their own.
 
 Aliases, accepted everywhere and converted to the canonical class: `success` → `ok`,
 `warning` → `warn`, `danger` → `over`, `error` → `over`. Some macros add their own extra values:
@@ -284,7 +288,7 @@ Aliases, accepted everywhere and converted to the canonical class: `success` →
 | `banner(tone)` | `info` (default) · `ok` · `warn` · `over` · `sandbox` |
 | `badge(tone)` | `neutral` (default) · `accent` · `ok` · `warn` · `over` · `info` · `sandbox` · `muted` |
 | `stat(tone)` | `neutral` (default) · `ok` · `warn` · `over` · `info` |
-| `money(tone)` | `neutral` (plain ink, never green) · `ok` · `warn` · `over` · `muted` |
+| `money(tone)` | `neutral` (plain ink, never toned) · `ok` · `warn` · `over` · `muted` |
 | `progress(status)` | `ok` · `warn` · `over` · `none` (default: automatic from `pct`) |
 | `flash_message(level)` | lenient (levels come from Python): the four tones + aliases; anything else → `info` |
 
@@ -299,7 +303,7 @@ exists in CSS as an alias for hand-written markup). Connection states are not to
 `{{ ui.money(x) }}` / `{{ ui.money_text(x) }}` produce the **same text** for every `Decimal`, `int`
 and `None`: half-up rounding to the cent (`ROUND_HALF_UP`), a typographic minus U+2212 for
 negatives (`−$54.99`), `$`, thousands separators (`$1,234,567.89`), `+` with `signed=true`, `—` for
-`None`, and the sign taken from the **rounded** value (`-0.004` → `$0.00`, unsigned, not green).
+`None`, and the sign taken from the **rounded** value (`-0.004` → `$0.00`, unsigned, not toned).
 
 How `ui.money` achieves it without Python help: it computes the cents with integer arithmetic on
 the `Decimal` itself, `floor(|amount| × 100 + ½)`, which is exactly half-up (Decimal's own
@@ -628,10 +632,10 @@ toasts, buttons, filters, pagination and tabs (the statements page prints as a c
 | --- | --- |
 | Surfaces | `--bg` (page), `--surface` (cards), `--surface-raised` (dialogs, toasts), `--surface-sunken` (wells, table footers), `--surface-hover`, `--sidebar-bg`, `--border`, `--border-strong`, `--control-bg`, `--control-border`, `--control-border-hover`, `--track` (meter track), `--switch-off`, `--skeleton`, `--skeleton-hi`; field borders and off switches (`--control-border`, `--switch-off`) reach 3:1 on `--surface`, `--bg` and `--control-bg` in both themes (WCAG 1.4.11) |
 | Text | `--text`, `--text-secondary`, `--text-muted`, `--text-faint` (placeholders); all ≥ 4.5:1 on every surface in both themes |
-| Accent | `--accent` (fills, primary buttons), `--accent-hover`, `--accent-text` (links, selected nav), `--accent-soft` (selected backgrounds), `--accent-contrast` (text on accent), `--focus` (focus outlines and focused control borders), `--focus-ring` (box-shadow, derived from `--focus`), `--danger`, `--danger-hover`, `--danger-contrast` |
+| Accent | `--accent` (ink: black, white in dark mode; fills, primary buttons), `--accent-hover`, `--accent-text` (links, selected nav), `--accent-soft` (selected backgrounds), `--accent-contrast` (text on accent), `--focus` (focus outlines and focused control borders), `--focus-ring` (box-shadow, derived from `--focus`), `--danger`, `--danger-hover`, `--danger-contrast` |
 | Status | for each of `ok`, `warn`, `over`, `info`, `sandbox`, `demo`: `--<s>` (fill: bars, dots), `--<s>-text`, `--<s>-soft` (background), `--<s>-border`; plus `--over-deep` (overspend hatch) |
 | Charts | `--cat-1` … `--cat-16` (fixed order; validated for colour-blind separation on adjacent pairs; slots 1–8 strongest; each has a light and a dark value), `--chart-grid`, `--chart-axis`, `--chart-other`, `--chart-accent`, `--tooltip-bg`, `--tooltip-text` |
-| Type | `--font-sans` (system stack), `--font-mono`, `--fs-2xs` 11 · `--fs-xs` 12 · `--fs-sm` 13 · `--fs-md` 14 (body) · `--fs-lg` 16 · `--fs-xl` 20 · `--fs-2xl` 26 · `--fs-3xl` 32, `--lh-tight`, `--lh-normal`, `--fw-medium` 500, `--fw-semibold` 600, `--fw-bold` 650 |
+| Type | `--font-text` (Newsreader, vendored: all text and chart labels), `--font-mono`, `--fs-2xs` 11 · `--fs-xs` 12 · `--fs-sm` 13 · `--fs-md` 14 (body) · `--fs-lg` 16 · `--fs-xl` 20 · `--fs-2xl` 26 · `--fs-3xl` 32, `--lh-tight`, `--lh-normal`, `--fw-medium` 500, `--fw-semibold` 600, `--fw-bold` 650 |
 | Space | `--sp-1` 4 · `--sp-2` 8 · `--sp-3` 12 · `--sp-4` 16 · `--sp-5` 20 · `--sp-6` 24 · `--sp-8` 32 · `--sp-10` 40 · `--sp-12` 48 · `--sp-16` 64 |
 | Radii | `--radius-xs` 4 · `--radius-sm` 6 · `--radius-md` 8 (controls) · `--radius-lg` 12 (cards) · `--radius-xl` 16 (dialogs) · `--radius-pill` |
 | Shadows | `--shadow-xs`, `--shadow-sm` (cards), `--shadow-md` (popovers, tooltips), `--shadow-lg` (dialogs, toasts), `--dot-ring` |

@@ -7,6 +7,7 @@ headless Chrome against a demo.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -111,6 +112,15 @@ def test_the_mobile_menu_never_hides_keyboard_focus():
     assert any("details.mobile-nav[open]" in body and "relatedTarget" in body for body in leave)
 
 
+def test_charts_wait_for_the_text_face():
+    """Canvas text isn't redrawn when a web font arrives, so charts are drawn once Newsreader has
+    loaded, and in it."""
+    js = source("js/app.js")
+    assert 'cssVar("--font-text")' in function_body(js, "readTheme")
+    assert "doc.fonts.load(" in function_body(js, "textFontReady")
+    assert "textFontReady()" in function_body(js, "renderCharts")
+
+
 # --------------------------------------------------------------------------- app.css
 
 
@@ -150,19 +160,58 @@ def contrast(a: str, b: str) -> float:
     return (high + 0.05) / (low + 0.05)
 
 
-def test_field_borders_and_off_switches_stand_out_in_both_themes():
-    """WCAG 1.4.11: a field's border and an off switch's track reach 3:1 against the card and
-    the page, and the white knob 3:1 against the track, in light and dark."""
+def themes() -> tuple[dict[str, str], dict[str, str]]:
+    """The light and dark colour tokens (dark falls back to light for tokens it doesn't set)."""
     css = re.sub(r"/\*.*?\*/", "", source("css/app.css"), flags=re.S)
     light = tokens(re.search(r"^:root \{(.*?)^\}", css, re.M | re.S).group(1))
     dark_block = r"@media screen and \(prefers-color-scheme: dark\) \{\s*:root \{(.*?)\}"
-    dark = {**light, **tokens(re.search(dark_block, css, re.S).group(1))}
-    for name, theme in (("light", light), ("dark", dark)):
+    return light, {**light, **tokens(re.search(dark_block, css, re.S).group(1))}
+
+
+def test_field_borders_and_off_switches_stand_out_in_both_themes():
+    """WCAG 1.4.11: a field's border and an off switch's track reach 3:1 against the card and
+    the page, and the white knob 3:1 against the track, in light and dark."""
+    for name, theme in zip(("light", "dark"), themes(), strict=True):
         for token in ("--control-border", "--switch-off"):
             for behind in ("--surface", "--bg", "--control-bg"):
                 ratio = contrast(theme[token], theme[behind])
                 assert ratio >= 3.0, f"{name} {token} on {behind}: {ratio:.2f}:1"
         assert contrast("#ffffff", theme["--switch-off"]) >= 3.0, f"{name} switch knob"
+
+
+def test_a_switched_on_switch_keeps_its_knob_visible_in_both_themes():
+    """The accent is ink, black in light mode and white in dark mode, and fills a switched-on
+    switch, so the knob takes --accent-contrast there instead of staying white."""
+    rules = css_rules(source("css/app.css"))
+    knob = [body for sel, body in rules if sel == ".switch:checked::before"]
+    assert any("background: var(--accent-contrast)" in body for body in knob)
+    for name, theme in zip(("light", "dark"), themes(), strict=True):
+        ratio = contrast(theme["--accent-contrast"], theme["--accent"])
+        assert ratio >= 3.0, f"{name} knob on a switched-on switch: {ratio:.2f}:1"
+
+
+def test_links_in_running_text_are_underlined():
+    """Links are ink like the words around them, so a link inside a sentence needs its underline
+    (component links such as buttons and table rows style themselves)."""
+    plain = [body for sel, body in css_rules(source("css/app.css")) if sel == "a:not([class])"]
+    assert any("text-decoration: underline" in body for body in plain)
+
+
+def test_the_text_face_ships_with_the_app():
+    """Newsreader is served from static/vendor, never fetched from another site, and each file
+    matches the checksum VERSIONS.md records for it."""
+    css = source("css/app.css")
+    assert all(u.startswith(("data:", "../vendor/")) for u in re.findall(r'url\("([^"]+)"\)', css))
+    assert '--font-text: "Newsreader",' in css
+    versions = source("vendor/VERSIONS.md")
+    faces = re.findall(r"@font-face \{(.*?)\}", css, re.S)
+    assert len(faces) == 3  # latin, latin-ext, and the latin italic for pending amounts
+    for face in faces:
+        assert 'font-family: "Newsreader";' in face
+        name = re.search(r'url\("\.\./vendor/([^"]+)"\)', face).group(1)
+        digest = hashlib.sha256((STATIC / "vendor" / name).read_bytes()).hexdigest()
+        assert f"| `{name}` |" in versions and f"`{digest}`" in versions, name
+    assert (STATIC / "vendor" / "LICENSE-newsreader.txt").is_file()
 
 
 def test_swapped_results_are_announced_through_their_live_region():

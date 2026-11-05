@@ -628,7 +628,7 @@
       other: cssVar("--chart-other"),
       tooltipBg: cssVar("--tooltip-bg"),
       tooltipText: cssVar("--tooltip-text"),
-      font: cssVar("--font-sans") || "system-ui, sans-serif",
+      font: cssVar("--font-text") || "serif",
       series: series,
       named: {
         accent: cssVar("--chart-accent"),
@@ -1003,6 +1003,12 @@
     }
   }
 
+  // Canvas text isn't redrawn when a web font arrives, so charts wait for the text face.
+  function textFontReady() {
+    if (!doc.fonts || !doc.fonts.load) return Promise.resolve();
+    return doc.fonts.load("12px " + (cssVar("--font-text") || "serif")).catch(function () {});
+  }
+
   // Draw charts that are new or whose config changed; destroy charts whose
   // canvas left the page. force=true redraws everything (theme change).
   function renderCharts(force) {
@@ -1015,7 +1021,7 @@
     });
     var canvases = doc.querySelectorAll("canvas[data-chart]");
     if (!canvases.length) return;
-    ensureChartJs().then(function () {
+    Promise.all([ensureChartJs(), textFontReady()]).then(function () {
       forEach(canvases, function (canvas) {
         if (!canvas.isConnected) return;
         var chart = charts.get(canvas);

@@ -29,7 +29,7 @@
   min-width: 7.5rem;
   padding: 0 var(--sp-1);
   font-weight: var(--fw-semibold);
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums tabular-nums;
   white-space: nowrap;
 }
 

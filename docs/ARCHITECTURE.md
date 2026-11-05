@@ -202,7 +202,7 @@ budgetapp/
     deps.py, security.py, templating.py, flash.py
     routes/                 one module per page
     templates/              base layout, components (macros), one folder per page
-    static/                 css/app.css, js/app.js, page scripts, vendor/ (htmx, Chart.js)
+    static/                 css/app.css, js/app.js, page scripts, vendor/ (htmx, Chart.js, Newsreader font)
 tests/
   conftest.py               per-process test DB, rollback-per-test sessions, fakes
   fake_plaid.py             event-log FakePlaidGateway
@@ -749,7 +749,8 @@ sync_item(item_id, trigger):
 ## 9. Web layer
 
 FastAPI with server-rendered Jinja templates, HTMX for partial updates, Chart.js for charts.
-Vendored htmx 2.0.11 and Chart.js 4.5.1 in `static/vendor/` (no CDNs). htmx's injected
+Vendored htmx 2.0.11, Chart.js 4.5.1 and the Newsreader font (fontsource 5.3.0) in
+`static/vendor/` (no CDNs). htmx's injected
 indicator styles are disabled with `<meta name="htmx-config">`; those rules live in `app.css`.
 
 Security middleware (SEC-1, SEC-4):

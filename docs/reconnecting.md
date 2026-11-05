@@ -16,7 +16,7 @@ the sign-in, you withdrew the app's access in your Amex account, or the yearly c
 
 **How you notice:**
 
-- the top bar says **Reconnect needed** (red);
+- the top bar says **Reconnect needed**;
 - every page shows "Your Amex connection needs attention. Syncing is paused until you sign in to
   Amex again through Plaid. Your existing data is safe.";
 - a Mac notification, if sync problem alerts are on ([Alerts and notifications](alerts.md));

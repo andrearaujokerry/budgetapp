@@ -1,9 +1,42 @@
 /* ==========================================================================
    Budget Tracker design system
-   1. Tokens   2. Base   3. Layout   4. Components   5. Utilities
-   6. Responsive   7. Motion, contrast, print
+   0. Fonts   1. Tokens   2. Base   3. Layout   4. Components
+   5. Utilities   6. Responsive   7. Motion, contrast, print
    The class vocabulary is documented in templates/components/README.md.
    ========================================================================== */
+
+/* 0. FONTS ================================================================ */
+
+/* Newsreader, the text face: vendored in static/vendor (VERSIONS.md; SIL Open Font
+   License 1.1). Each file is variable in weight and optical size, so small text gets
+   sturdier letters and headings finer ones. latin-ext covers accented merchant names; the
+   italic is latin only and used just for pending amounts, so it loads only where one shows. */
+@font-face {
+  font-family: "Newsreader";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("../vendor/newsreader-latin-ext-opsz-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Newsreader";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("../vendor/newsreader-latin-opsz-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+
+@font-face {
+  font-family: "Newsreader";
+  font-style: italic;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("../vendor/newsreader-latin-opsz-italic.woff2") format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
 
 /* 1. TOKENS =============================================================== */
 
@@ -11,59 +44,60 @@
   color-scheme: light dark;
 
   /* Surfaces */
-  --bg: #f4f5f7;
+  --bg: #f4f4f4;
   --surface: #ffffff;
   --surface-raised: #ffffff;
-  --surface-sunken: #f6f7f9;
-  --surface-hover: #f1f3f6;
-  --sidebar-bg: #fafbfc;
-  --border: #e3e6eb;
-  --border-strong: #cfd5dd;
+  --surface-sunken: #f7f7f7;
+  --surface-hover: #f1f1f1;
+  --sidebar-bg: #fafafa;
+  --border: #e4e4e4;
+  --border-strong: #cfcfcf;
   --control-bg: #ffffff;
-  --control-border: #848d99; /* fields and off switches: 3:1 on cards and the page (WCAG 1.4.11) */
-  --control-border-hover: #6f7885;
-  --track: #e8ebef;
-  --switch-off: #848d99;
-  --skeleton: #eceff3;
-  --skeleton-hi: #f7f8fa;
+  --control-border: #868686; /* fields and off switches: 3:1 on cards and the page (WCAG 1.4.11) */
+  --control-border-hover: #6e6e6e;
+  --track: #e8e8e8;
+  --switch-off: #868686;
+  --skeleton: #ededed;
+  --skeleton-hi: #f7f7f7;
   --scroll-fade: 40px;
 
   /* Text */
-  --text: #161b22;
-  --text-secondary: #39414d;
-  --text-muted: #57606d;
-  --text-faint: #646d7a;
+  --text: #111111;
+  --text-secondary: #3b3b3b;
+  --text-muted: #585858;
+  --text-faint: #676767;
 
-  /* Accent (deep teal) */
-  --accent: #0f766e;
-  --accent-hover: #0b5f58;
-  --accent-text: #0e6b64;
-  --accent-soft: #e4f2ef;
+  /* Accent: ink (black here, white in dark mode) */
+  --accent: #111111;
+  --accent-hover: #2e2e2e;
+  --accent-text: #111111;
+  --accent-soft: #ebebeb;
   --accent-contrast: #ffffff;
-  --focus: #0f766e;
-  --focus-ring: 0 0 0 3px rgb(15 118 110 / 0.2);
+  --focus: #111111;
+  --focus-ring: 0 0 0 3px rgb(17 17 17 / 0.2);
   --danger: #c4322c;
   --danger-hover: #a52823;
   --danger-contrast: #ffffff;
 
-  /* Status: fill (bars, dots), text, soft background, border */
-  --ok: #22a061;
-  --ok-text: #17703f;
-  --ok-soft: #e7f5ed;
-  --ok-border: #bfe4cd;
-  --warn: #e09c00;
-  --warn-text: #885000;
-  --warn-soft: #fdf3da;
-  --warn-border: #f1d58b;
+  /* Status: fill (bars, dots), text, soft background, border. Greys get darker as a budget
+     nears its limit (ok → warn); red is kept for over budget, errors and danger. */
+  --ok: #7a7a7a;
+  --ok-text: #3b3b3b;
+  --ok-soft: #f0f0f0;
+  --ok-border: #d9d9d9;
+  --warn: #262626;
+  --warn-text: #111111;
+  --warn-soft: #ebebeb;
+  --warn-border: #c9c9c9;
   --over: #d93d38;
   --over-text: #b0251f;
   --over-soft: #fdeeed;
   --over-border: #f4c3bf;
   --over-deep: #a3201b;
-  --info: #3b6fe0;
-  --info-text: #234fb3;
-  --info-soft: #ebf1fd;
-  --info-border: #c5d5f6;
+  --info: #6b6b6b;
+  --info-text: #3b3b3b;
+  --info-soft: #f2f2f2;
+  --info-border: #dcdcdc;
   --sandbox: #7a5ad6;
   --sandbox-text: #5a3bb4;
   --sandbox-soft: #f2eefc;
@@ -75,16 +109,17 @@
   --demo-border: #f5cfb0;
 
   /* Charts */
-  --chart-grid: #eceef1;
-  --chart-axis: #d3d8df;
-  --chart-other: #9aa3af;
-  --chart-accent: #0f766e;
-  --tooltip-bg: #1c222a;
-  --tooltip-text: #f5f6f8;
+  --chart-grid: #ececec;
+  --chart-axis: #d4d4d4;
+  --chart-other: #b3b3b3;
+  --chart-accent: #111111;
+  --tooltip-bg: #111111;
+  --tooltip-text: #f5f5f5;
 
-  /* Categorical palette: fixed order, validated for colour-vision deficiency on
-     adjacent pairs (worst adjacent dE 9.1 light / 8.4 dark, OKLab x100). Slots 1-8
-     are the strongest set; past 8 series, fold the tail into "Other". */
+  /* Categorical palette: the one place colour stays (charts and category dots). Fixed
+     order, validated for colour-vision deficiency on adjacent pairs (worst adjacent dE
+     9.1 light / 8.4 dark, OKLab x100). Slots 1-8 are the strongest set; past 8 series,
+     fold the tail into "Other". */
   --cat-1: #2a78d6;
   --cat-2: #eb6834;
   --cat-3: #1baf7a;
@@ -103,7 +138,7 @@
   --cat-16: #00897d;
 
   /* Type */
-  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-text: "Newsreader", "Iowan Old Style", Georgia, serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --fs-2xs: 0.6875rem;
   --fs-xs: 0.75rem;
@@ -140,10 +175,10 @@
   --radius-pill: 999px;
 
   /* Shadows */
-  --shadow-xs: 0 1px 1px rgb(16 24 40 / 0.04);
-  --shadow-sm: 0 1px 2px rgb(16 24 40 / 0.05), 0 1px 3px rgb(16 24 40 / 0.03);
-  --shadow-md: 0 2px 4px -1px rgb(16 24 40 / 0.06), 0 6px 16px -4px rgb(16 24 40 / 0.1);
-  --shadow-lg: 0 4px 8px -2px rgb(16 24 40 / 0.06), 0 20px 40px -8px rgb(16 24 40 / 0.2);
+  --shadow-xs: 0 1px 1px rgb(0 0 0 / 0.04);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.05), 0 1px 3px rgb(0 0 0 / 0.03);
+  --shadow-md: 0 2px 4px -1px rgb(0 0 0 / 0.06), 0 6px 16px -4px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 4px 8px -2px rgb(0 0 0 / 0.06), 0 20px 40px -8px rgb(0 0 0 / 0.2);
   --dot-ring: inset 0 0 0 1px rgb(0 0 0 / 0.12);
 
   /* Layers */
@@ -170,60 +205,60 @@
   --dur-fast: 120ms;
   --dur: 200ms;
 
-  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2357606d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6.5 9.5 5.5 5.5 5.5-5.5'/%3E%3C/svg%3E");
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23585858' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6.5 9.5 5.5 5.5 5.5-5.5'/%3E%3C/svg%3E");
 }
 
 @media screen and (prefers-color-scheme: dark) {
   :root {
-    --bg: #0d1015;
-    --surface: #151a21;
-    --surface-raised: #1b2129;
-    --surface-sunken: #11151b;
-    --surface-hover: #1b2028;
-    --sidebar-bg: #11151b;
-    --border: #252c35;
-    --border-strong: #343c47;
-    --control-bg: #10141a;
-    --control-border: #636e7d;
-    --control-border-hover: #75808f;
-    --track: #262d37;
-    --switch-off: #636e7d;
-    --skeleton: #1d232b;
-    --skeleton-hi: #262d37;
+    --bg: #0b0b0b;
+    --surface: #141414;
+    --surface-raised: #1b1b1b;
+    --surface-sunken: #101010;
+    --surface-hover: #1c1c1c;
+    --sidebar-bg: #101010;
+    --border: #262626;
+    --border-strong: #363636;
+    --control-bg: #0f0f0f;
+    --control-border: #6d6d6d;
+    --control-border-hover: #7f7f7f;
+    --track: #2a2a2a;
+    --switch-off: #6d6d6d;
+    --skeleton: #1f1f1f;
+    --skeleton-hi: #2a2a2a;
 
-    --text: #e7eaee;
-    --text-secondary: #c5ccd4;
-    --text-muted: #9ca5b1;
-    --text-faint: #8a94a1;
+    --text: #ececec;
+    --text-secondary: #c9c9c9;
+    --text-muted: #a1a1a1;
+    --text-faint: #8f8f8f;
 
-    --accent: #0f7c72;
-    --accent-hover: #138177;
-    --accent-text: #5cc6b8;
-    --accent-soft: #10302c;
-    --accent-contrast: #ffffff;
-    --focus: #5cc6b8;
-    --focus-ring: 0 0 0 3px rgb(92 198 184 / 0.4);
+    --accent: #ececec;
+    --accent-hover: #d4d4d4;
+    --accent-text: #f2f2f2;
+    --accent-soft: #262626;
+    --accent-contrast: #0b0b0b;
+    --focus: #ececec;
+    --focus-ring: 0 0 0 3px rgb(236 236 236 / 0.35);
     --danger: #b8332d;
     --danger-hover: #c23a33;
     --danger-contrast: #ffffff;
 
-    --ok: #3fb871;
-    --ok-text: #62cf8f;
-    --ok-soft: #10281b;
-    --ok-border: #1d4a31;
-    --warn: #e3a92c;
-    --warn-text: #f0bf55;
-    --warn-soft: #2c2310;
-    --warn-border: #574217;
+    --ok: #8a8a8a;
+    --ok-text: #c9c9c9;
+    --ok-soft: #1c1c1c;
+    --ok-border: #333333;
+    --warn: #e6e6e6;
+    --warn-text: #f2f2f2;
+    --warn-soft: #232323;
+    --warn-border: #3d3d3d;
     --over: #ef5a52;
     --over-text: #ff8b82;
     --over-soft: #331718;
     --over-border: #5e2826;
     --over-deep: #b8302a;
-    --info: #6b95f2;
-    --info-text: #8fb1ff;
-    --info-soft: #152341;
-    --info-border: #263d6e;
+    --info: #8a8a8a;
+    --info-text: #c9c9c9;
+    --info-soft: #1c1c1c;
+    --info-border: #333333;
     --sandbox: #a08bf0;
     --sandbox-text: #c4b3ff;
     --sandbox-soft: #221a3a;
@@ -233,12 +268,12 @@
     --demo-soft: #2d1b10;
     --demo-border: #5c341c;
 
-    --chart-grid: #222932;
-    --chart-axis: #343c47;
-    --chart-other: #6c7684;
-    --chart-accent: #34b3a5;
-    --tooltip-bg: #2a313b;
-    --tooltip-text: #f2f4f7;
+    --chart-grid: #222222;
+    --chart-axis: #363636;
+    --chart-other: #5c5c5c;
+    --chart-accent: #ececec;
+    --tooltip-bg: #2a2a2a;
+    --tooltip-text: #f2f2f2;
 
     --cat-1: #3987e5;
     --cat-2: #d95926;
@@ -263,7 +298,7 @@
     --shadow-lg: 0 8px 16px -4px rgb(0 0 0 / 0.45), 0 24px 56px -8px rgb(0 0 0 / 0.65);
     --dot-ring: inset 0 0 0 1px rgb(255 255 255 / 0.14);
 
-    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239ca5b1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6.5 9.5 5.5 5.5 5.5-5.5'/%3E%3C/svg%3E");
+    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1a1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6.5 9.5 5.5 5.5 5.5-5.5'/%3E%3C/svg%3E");
   }
 }
 
@@ -289,8 +324,9 @@ html:has(.shell.has-envbar) {
 body {
   margin: 0;
   min-height: 100vh;
-  font-family: var(--font-sans);
+  font-family: var(--font-text);
   font-size: var(--fs-md);
+  font-variant-numeric: lining-nums; /* serif faces may default to old-style figures */
   line-height: var(--lh-normal);
   color: var(--text);
   background: var(--bg);
@@ -334,6 +370,19 @@ a:hover {
   text-underline-offset: 2px;
 }
 
+/* Links in running text are ink like the words around them, so a quiet underline marks
+   them (as .budget-spent and .trends-amount do). Component links set their own look. */
+a:not([class]) {
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+a:not([class]):hover {
+  text-decoration-color: currentColor;
+}
+
 button,
 input,
 select,
@@ -348,7 +397,7 @@ textarea {
 }
 
 ::selection {
-  background: rgb(15 118 110 / 0.22);
+  background: color-mix(in srgb, var(--text) 18%, transparent);
 }
 
 hr {
@@ -982,7 +1031,7 @@ a.stat:hover {
 }
 
 .stat__value .amount {
-  font-variant-numeric: normal;
+  font-variant-numeric: lining-nums;
 }
 
 .stat__sub {
@@ -1004,7 +1053,7 @@ a.stat:hover {
 
 /* Amount ------------------------------------------------------------------ */
 .amount {
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums tabular-nums;
   white-space: nowrap;
 }
 
@@ -1112,7 +1161,7 @@ a.cat:hover .cat__name {
   gap: 4px;
   color: var(--text-secondary);
   font-weight: var(--fw-semibold);
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums tabular-nums;
 }
 
 .progress__track {
@@ -1270,7 +1319,7 @@ a.cat:hover .cat__name {
 .table .num,
 .table--numbers td {
   text-align: right;
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums tabular-nums;
   white-space: nowrap;
 }
 
@@ -1361,7 +1410,7 @@ a.cat:hover .cat__name {
 
 .table__date {
   color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums tabular-nums;
   white-space: nowrap;
 }
 
@@ -1498,7 +1547,7 @@ select.inline-control {
 .inline-money .inline-control {
   width: 8em;
   padding-left: 18px;
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums tabular-nums;
   text-align: right;
 }
 
@@ -1597,7 +1646,7 @@ select.inline-control {
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums tabular-nums;
 }
 
 .pagination__link:hover {
@@ -1631,7 +1680,7 @@ select.inline-control {
 
 .pagination__info {
   color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums tabular-nums;
 }
 
 /* Empty state ------------------------------------------------------------- */
@@ -2133,7 +2182,7 @@ a.pill:hover {
 }
 
 .input[type="date"] {
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums tabular-nums;
 }
 
 .input[type="search"]::-webkit-search-cancel-button {
@@ -2197,7 +2246,7 @@ a.pill:hover {
 }
 
 .input--money {
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums tabular-nums;
 }
 
 .search {
@@ -2289,6 +2338,7 @@ a.pill:hover {
 }
 
 .switch:checked::before {
+  background: var(--accent-contrast); /* the accent is white in dark mode */
   transform: translateX(14px);
 }
 
@@ -2556,7 +2606,7 @@ a.pill:hover {
   color: var(--text-muted);
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums tabular-nums;
 }
 
 /* Dialog ------------------------------------------------------------------ */
@@ -2578,7 +2628,7 @@ a.pill:hover {
 }
 
 .dialog::backdrop {
-  background: rgb(9 12 16 / 0.5);
+  background: rgb(0 0 0 / 0.5);
   -webkit-backdrop-filter: blur(2px);
   backdrop-filter: blur(2px);
 }
@@ -2943,8 +2993,8 @@ a.pill:hover {
 .text-xs { font-size: var(--fs-xs); }
 .text-lg { font-size: var(--fs-lg); }
 .strong { font-weight: var(--fw-semibold); }
-.num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-.tabular { font-variant-numeric: tabular-nums; }
+.num { font-variant-numeric: lining-nums tabular-nums; text-align: right; white-space: nowrap; }
+.tabular { font-variant-numeric: lining-nums tabular-nums; }
 .nowrap { white-space: nowrap; }
 
 .truncate {
@@ -3201,8 +3251,8 @@ a.pill:hover {
 }
 
 @keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgb(15 118 110 / 0.45); }
-  50% { box-shadow: 0 0 0 5px rgb(15 118 110 / 0); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+  50% { box-shadow: 0 0 0 5px transparent; }
 }
 
 @keyframes shimmer {
@@ -3256,21 +3306,21 @@ a.pill:hover {
 
 @media (prefers-contrast: more) {
   :root {
-    --border: #b9c0ca;
-    --control-border: #7d8693;
-    --switch-off: #7d8693;
-    --text-muted: #424a55;
-    --text-faint: #4f5864;
+    --border: #bdbdbd;
+    --control-border: #7f7f7f;
+    --switch-off: #7f7f7f;
+    --text-muted: #474747;
+    --text-faint: #525252;
   }
 }
 
 @media screen and (prefers-color-scheme: dark) and (prefers-contrast: more) {
   :root {
-    --border: #4a5462;
-    --control-border: #6b7686;
-    --switch-off: #6b7686;
-    --text-muted: #c0c7d0;
-    --text-faint: #b0b8c2;
+    --border: #4d4d4d;
+    --control-border: #737373;
+    --switch-off: #737373;
+    --text-muted: #c4c4c4;
+    --text-faint: #b5b5b5;
   }
 }
 
