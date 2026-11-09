@@ -4,7 +4,10 @@
     stamp(value, now)       "Oct 29, 2026, 6:15 AM (4 h ago)"; "Never" for None
     clock_time(value)       "6:15 AM" in the Mac's time zone
     item_pill(item)         status pill for one connection (ItemView)
-    consent_text(s)         "Renew by Nov 23, 2026 (25 days left)" (ItemStatus)
+    accounts_summary(item)  "1 card", "2 bank accounts", "1 card and 2 bank accounts", the
+                            accounts Plaid still shares, then "(1 no longer shared)" (ItemView)
+    consent_text(s)         "Renew by Nov 23, 2026 (25 days left)" (ItemStatus with a due date)
+    consent_reason(item)    why the consent is due, naming the bank (ItemView)
     trigger_label(t)        sync_runs.trigger in words
     run_badge(run)          sync_runs.status as a badge
     ========================================================================== -#}
@@ -36,6 +39,27 @@
 {{ ui.status_pill('stale', ('Synced ' ~ (s.last_sync_success_at|relative_time)) if s.last_sync_success_at else 'Not synced yet') }}
 {%- else -%}
 {{ ui.status_pill('healthy', ('Synced ' ~ (s.last_sync_success_at|relative_time)) if s.last_sync_success_at else 'Connected') }}
+{%- endif -%}
+{%- endmacro -%}
+
+{%- macro accounts_summary(item) -%}
+{%- set shared = item.shared_accounts -%}
+{%- set cards = shared|selectattr('is_card')|list|length -%}
+{%- set banks = shared|length - cards -%}
+{%- set gone = item.accounts|length - shared|length -%}
+{%- if cards and banks -%}{{ cards|pluralize('card') }} and {{ banks|pluralize('bank account') }}
+{%- elif cards -%}{{ cards|pluralize('card') }}
+{%- elif banks -%}{{ banks|pluralize('bank account') }}
+{%- else -%}No accounts {{ 'shared' if gone else 'yet' }}
+{%- endif -%}
+{%- if gone %} ({{ gone }} no longer shared){% endif -%}
+{%- endmacro -%}
+
+{%- macro consent_reason(item) -%}
+{%- if item.is_amex -%}
+American Express asks you to confirm access once a year. Renewing takes a minute in a Plaid window and keeps this connection.
+{%- else -%}
+{{ item.institution }} asks you to confirm access again by this date. Renewing takes a minute in a Plaid window and keeps this connection.
 {%- endif -%}
 {%- endmacro -%}
 

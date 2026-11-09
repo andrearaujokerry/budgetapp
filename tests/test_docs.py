@@ -590,15 +590,19 @@ def test_settings_defaults_and_limits(db) -> None:
 
 
 def test_keychain_names() -> None:
-    """The Keychain table names exactly the accounts the code uses."""
+    """The Keychain table names exactly the accounts the code uses: one token per production
+    Item and their index (C6), and the v1 name the first sync moves (BANK-4)."""
     text = (REPO / "docs" / "setup.md").read_text()
     section = text.split("### What Keychain holds", 1)[1].split("\n## ", 1)[0]
     named = set(re.findall(r"`((?:plaid|db)\.[\w.<>]+)`", section))
+    per_item = secrets.production_access_token_key("ITEM").replace("ITEM", "<id>")
     expected = {
         secrets.PLAID_CLIENT_ID,
         secrets.plaid_secret_key("sandbox"),
         secrets.plaid_secret_key("production"),
-        secrets.PRODUCTION_ACCESS_TOKEN,
+        per_item,
+        secrets.PRODUCTION_ITEM_INDEX,
+        secrets.LEGACY_PRODUCTION_TOKEN,
         secrets.link_in_progress_key(),
         secrets.sandbox_access_token_key("ITEM").replace("ITEM", "<id>"),
         secrets.SANDBOX_ITEM_INDEX,
@@ -608,7 +612,7 @@ def test_keychain_names() -> None:
     assert named == expected
     assert f"under the name `{secrets.SERVICE}`" in text
     going_live = (REPO / "docs" / "going-live.md").read_text()
-    assert f"`{secrets.PRODUCTION_ACCESS_TOKEN}`" in going_live
+    assert f"`{per_item}`" in going_live and f"`{secrets.LEGACY_PRODUCTION_TOKEN}`" in going_live
     assert secrets.KEYCHAIN_FIX_COMMAND in text_of(REPO / "docs" / "reconnecting.md")
 
 

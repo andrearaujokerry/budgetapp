@@ -159,27 +159,54 @@ class TestAllowlist:
 
 
 class TestRequests:
-    def test_new_link_token_request(self, gateway):
+    def test_new_link_token_request(self, gateway, client):
         body = gateway.link_token_request().to_dict()
         assert body["products"] == ["transactions"]
         assert body["additional_consented_products"] == ["liabilities"]
         assert body["transactions"] == {"days_requested": 730}
-        assert body["client_name"] == "Amex Budget Tracker"
+        assert body["client_name"] == "Budget Tracker"  # C9
         assert body["user"] == {"client_user_id": "owner-1"}
         assert body["country_codes"] == ["US"] and body["language"] == "en"
         for absent in ("redirect_uri", "webhook", "access_token", "optional_products", "update"):
             assert absent not in body
+        # BANK-2: Link offers checking, savings and money market accounts and credit cards only.
+        wire = plaid.ApiClient(plaid.Configuration()).sanitize_for_serialization(
+            gateway.link_token_request()
+        )
+        assert wire["account_filters"] == {
+            "depository": {"account_subtypes": ["checking", "savings", "money market"]},
+            "credit": {"account_subtypes": ["credit card"]},
+        }
+        assert set(wire["account_filters"]) == {"depository", "credit"}  # no loan, no investment
+        with pytest.raises(ValueError, match="update-mode"):
+            gateway.link_token_request(account_selection=True)
 
     def test_update_mode_link_token_request(self, gateway):
         body = gateway.link_token_request(access_token=SANDBOX_TOKEN).to_dict()
         assert body["access_token"] == SANDBOX_TOKEN
-        for absent in ("products", "transactions", "additional_consented_products", "update"):
+        for absent in (
+            "products",
+            "transactions",
+            "additional_consented_products",
+            "update",
+            "account_filters",
+        ):
             assert absent not in body
         add = gateway.link_token_request(
             access_token=SANDBOX_TOKEN, additional_consented_products=["liabilities"]
         ).to_dict()
         assert add["additional_consented_products"] == ["liabilities"]
         assert "products" not in add
+
+    def test_add_accounts_is_update_mode_with_account_selection(self, gateway):
+        """BANK-5 "Add accounts" (RESEARCH T2.4): the same Item and token, account selection on,
+        and the same account filters as a new link; still no products."""
+        request = gateway.link_token_request(access_token=SANDBOX_TOKEN, account_selection=True)
+        wire = plaid.ApiClient(plaid.Configuration()).sanitize_for_serialization(request)
+        assert wire["update"] == {"account_selection_enabled": True}
+        assert wire["account_filters"]["credit"] == {"account_subtypes": ["credit card"]}
+        for absent in ("products", "transactions", "additional_consented_products"):
+            assert absent not in wire
 
     def test_sync_request(self, gateway):
         first = gateway.sync_request(SANDBOX_TOKEN, None).to_dict()

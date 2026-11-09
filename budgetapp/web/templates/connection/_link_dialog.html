@@ -1,0 +1,33 @@
+{#- The confirm dialog before Plaid Link opens for a new link (BANK-1, BANK-3), opened by any
+    "Link a bank or card" button (data-dialog-open="confirm-link"). Production: the 10-connection
+    warning with how many the app has created so far, and the Dashboard checklist, whose boxes
+    must all be ticked before its Link button turns on (link.js, [data-needs-checklist]). Both
+    environments: the choice "a different login at a bank I've already linked" (#link-different-
+    login), which link.js sends with the exchange; without it a bank that is already linked is
+    refused before the exchange. Context as for connection/index.html. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "components/forms.html" as form -%}
+{%- set o = overview -%}
+{% call ui.dialog("confirm-link", "Link a bank or card?", size="sm") %}
+<div class="stack">
+{%- if o.production %}
+<p><strong>This uses 1 of your 10 Plaid connections, permanently.</strong> The app has created {{ o.connections_used }} of {{ o.connection_limit }} so far. Make sure the checklist is done: tick each item once it is set in Plaid's Dashboard.</p>
+<fieldset class="stack stack--sm link-confirm" data-link-checklist>
+<legend class="sr-only">Checklist</legend>
+{%- for c in checklist %}
+{{ form.checkbox_field("confirm_" ~ c.key, c.label, id="confirm-" ~ c.key) }}
+{%- endfor %}
+</fieldset>
+{%- else %}
+<p>Sandbox test connections are free and never count toward your 10 real ones. In Plaid's window, pick First Platypus Bank and sign in with <code>user_good</code> and <code>pass_good</code>.</p>
+{%- endif %}
+<fieldset class="link-confirm link-confirm--choice">
+<legend class="sr-only">Which login</legend>
+{{ form.checkbox_field("different_login", "A different login at a bank I've already linked", id="link-different-login", help="For example someone else's login at the same bank. Leave it off to link a new bank. To add accounts from a login you already linked, use Add accounts on its connection instead.") }}
+</fieldset>
+<div class="dialog__footer">
+{{ ui.button("Cancel", variant="ghost", data_dialog_close=true) }}
+{{ ui.button("Link a bank or card", variant="primary", icon="link", data_link_mode="new", id="link-new", data_needs_checklist=o.production, disabled=o.production) }}
+</div>
+</div>
+{% endcall %}

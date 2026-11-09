@@ -536,22 +536,32 @@ class FakePlaidGateway:
     # ------------------------------------------------------------------ the PlaidGateway protocol
 
     def create_link_token(
-        self, *, access_token: str | None = None, additional_consented_products: Sequence[str] = ()
+        self,
+        *,
+        access_token: str | None = None,
+        additional_consented_products: Sequence[str] = (),
+        account_selection: bool = False,
     ) -> str:
+        # ``account_selection`` ("Add accounts", wave 3) is recorded only when set.
+        extra = {"account_selection": True} if account_selection else {}
         self._record(
             "create_link_token",
             access_token=access_token,
             additional_consented_products=tuple(additional_consented_products),
+            **extra,
         )
         self._maybe_fail("create_link_token")
         if access_token is not None:
             self.item_for_token(access_token)
+        elif account_selection:
+            raise ValueError("account selection is an update-mode option")
         token = f"link-{self.plaid_env}-{uuid.uuid4()}"
         self.link_tokens.append(
             {
                 "link_token": token,
                 "access_token": access_token,
                 "additional_consented_products": tuple(additional_consented_products),
+                "account_selection": account_selection,
             }
         )
         return token

@@ -15,9 +15,10 @@
       nav_items    [{key, label, href, icon, group}, …] in display order
       active_nav   key of the current page (None for none)
       conn         services.status.ConnectionStatus or None. Reads: state,
-                   needs_reconnect, consent_warning, items[*].consent_warning /
-                   consent_days_left / consent_due_at; the sync partial reads
-                   more (components/sync_status.html).
+                   needs_reconnect, reconnect_names, consent_items
+                   (each: .display_name, .is_amex, .consent_days_left,
+                   .consent_due_at); the sync partial reads more
+                   (components/sync_status.html).
       messages     [{level, text}, …] flash messages to show as toasts
       app_version  "0.1.0"
     Blocks: title, head, header_actions, content, scripts, charts
@@ -35,23 +36,60 @@
 {%- set ns = namespace(item=none) -%}
 {%- for item in nav_items if item.key == active_nav %}{% set ns.item = item %}{% endfor -%}
 
-{#- Notices. One Plaid update-mode session fixes both a reconnect and a consent
-    renewal, so the consent banner waits while the reconnect banner shows. The
-    Connection page shows neither: it carries the Reconnect / Renew actions
-    itself, and a banner there would only link to the page already open. -#}
+{#- Notices (BANK-6: they name the connections that need attention). The reconnect
+    banner names each connection that must be signed in again. The consent banner
+    names each connection whose consent is due (conn.consent_items), except one that
+    needs reconnecting: its own Reconnect renews its consent too (one Plaid
+    update-mode session). Another bank's reconnect renews nothing, so both banners
+    can show at once. The Connection page shows neither: it carries the Reconnect /
+    Renew actions itself, and a banner there would only link to the page already
+    open. -#}
 {%- set on_connection = active_nav == 'connection' -%}
 {%- set show_reconnect = (conn.state != 'not_linked' and (conn.needs_reconnect|default(conn.state == 'needs_reconnect'))) if conn and not on_connection else false -%}
-{%- set cs = namespace(show=false, item=none) -%}
-{%- if conn and not on_connection and not show_reconnect and conn.consent_warning|default(false) -%}
-{%- set cs.show = true -%}
-{%- for it in conn.items|default([]) if it.consent_warning|default(false) -%}
-{%- if cs.item is none or it.consent_days_left < cs.item.consent_days_left %}{% set cs.item = it %}{% endif -%}
-{%- endfor -%}
+{%- set reconnect_names = (conn.reconnect_names|default([]) or ['A bank connection'])|list if show_reconnect else [] -%}
+{%- set reconnect_who = reconnect_names[0] if reconnect_names|length == 1 else ((reconnect_names[:-1]|join(', ')) ~ ' and ' ~ reconnect_names[-1]) if reconnect_names else '' -%}
+{%- set consent_items = (conn.consent_items|default([]) or [])|list if conn and not on_connection else [] -%}
+
+{#- The consent banner for `items` (soonest first). One connection: its own sentences
+    ("Renew your TD Bank connection by Nov 20, 2026 (23 days left)."). Several: named
+    together, grouped by state ("Your American Express consent has expired. Renew your
+    TD Bank connection by …"). Only American Express's says it asks every 12 months. -#}
+{%- macro consent_banner(items) -%}
+{%- set one = items[0] -%}
+{%- set days = one.consent_days_left -%}
+{%- set due = one.consent_due_at -%}
+{%- if due is not none and due.astimezone is defined %}{% set due = due.astimezone().date() %}{% endif -%}
+{%- set name = one.display_name|default(none) or one.institution_name|default(none) or 'bank' -%}
+{%- if items|length == 1 -%}
+{%- if days < 0 -%}
+{{ ui.banner('over', ('Amex asks you to renew access every 12 months' if one.is_amex else 'Access to ' ~ name ~ ' needed renewing') ~ ((', and it lapsed on ' ~ (due|date_long)) if due else '') ~ '. Syncing stops until you renew.', title='Your ' ~ name ~ ' consent has expired.', action_href='/connection', action_label='Renew now', id='consent-banner') }}
+{%- elif days == 0 -%}
+{{ ui.banner('over', 'Renew now to keep syncing without a gap. It takes a minute.', title='Your ' ~ name ~ ' consent expires today.', action_href='/connection', action_label='Renew now', id='consent-banner') }}
+{%- else -%}
+{#- The essentials (by when, days left) are in the title: narrow windows show only the title. -#}
+{{ ui.banner('warn', ('Amex asks you to renew access every 12 months. ' if one.is_amex else '') ~ 'Renewing takes a minute and keeps syncing uninterrupted.', title='Renew your ' ~ name ~ ' connection' ~ ((' by ' ~ (due|date_long)) if due else '') ~ ((' (' ~ days ~ ' day' ~ ('' if days == 1 else 's') ~ ' left)') if days is not none else '') ~ '.', action_href='/connection', action_label='Renew now', id='consent-banner') }}
 {%- endif -%}
-{%- set consent_days = cs.item.consent_days_left|default(none) if cs.item else none -%}
-{%- set consent_due = cs.item.consent_due_at|default(none) if cs.item else none -%}
-{#- An aware datetime: show the local calendar date (the one consent_days_left counts to). -#}
-{%- if consent_due is not none and consent_due.astimezone is defined %}{% set consent_due = consent_due.astimezone().date() %}{% endif -%}
+{%- else -%}
+{%- set g = namespace(expired=[], today=[], soon=[], first=none, amex=false) -%}
+{%- for it in items -%}
+{%- set nm = it.display_name|default(none) or it.institution_name|default(none) or 'bank' -%}
+{%- if it.consent_days_left < 0 %}{% set g.expired = g.expired + [nm] %}
+{%- elif it.consent_days_left == 0 %}{% set g.today = g.today + [nm] %}
+{%- else %}{% set g.soon = g.soon + [nm] %}{% if g.first is none %}{% set g.first = it %}{% endif %}{% endif -%}
+{%- if it.is_amex %}{% set g.amex = true %}{% endif -%}
+{%- endfor -%}
+{%- set parts = [] -%}
+{%- if g.expired %}{% set _ = parts.append('Your ' ~ (g.expired[0] if g.expired|length == 1 else (g.expired[:-1]|join(', ') ~ ' and ' ~ g.expired[-1])) ~ (' consent has expired.' if g.expired|length == 1 else ' consents have expired.')) %}{% endif -%}
+{%- if g.today %}{% set _ = parts.append('Your ' ~ (g.today[0] if g.today|length == 1 else (g.today[:-1]|join(', ') ~ ' and ' ~ g.today[-1])) ~ (' consent expires today.' if g.today|length == 1 else ' consents expire today.')) %}{% endif -%}
+{%- if g.soon -%}
+{%- set soon_due = g.first.consent_due_at -%}
+{%- if soon_due is not none and soon_due.astimezone is defined %}{% set soon_due = soon_due.astimezone().date() %}{% endif -%}
+{%- set soon_days = g.first.consent_days_left -%}
+{%- set _ = parts.append('Renew your ' ~ (g.soon[0] if g.soon|length == 1 else (g.soon[:-1]|join(', ') ~ ' and ' ~ g.soon[-1])) ~ (' connection' if g.soon|length == 1 else ' connections') ~ ((' by ' ~ (soon_due|date_long)) if soon_due else '') ~ ' (' ~ soon_days ~ ' day' ~ ('' if soon_days == 1 else 's') ~ ' left).') -%}
+{%- endif -%}
+{{ ui.banner('over' if g.expired or g.today else 'warn', ('Amex asks you to renew access every 12 months. ' if g.amex else '') ~ ('Syncing stops where access has lapsed until you renew it.' if g.expired else 'Renewing takes a minute and keeps syncing uninterrupted.'), title=parts|join(' '), action_href='/connection', action_label='Renew now', id='consent-banner') }}
+{%- endif -%}
+{%- endmacro -%}
 
 {%- macro brand(env, env_label) -%}
 <a class="brand" href="/">
@@ -116,9 +154,9 @@
 
 <header class="masthead">
 {%- if env == 'demo' %}
-<div class="env-bar env-bar--demo" role="note">{{ ui.icon('alert', size='sm') }}<span class="env-bar__text"><strong>Demo data</strong> — nothing here is real<span class="env-bar__detail">. Made-up transactions in a throwaway database; your Amex account is never touched.</span></span></div>
+<div class="env-bar env-bar--demo" role="note">{{ ui.icon('alert', size='sm') }}<span class="env-bar__text"><strong>Demo data</strong> — nothing here is real<span class="env-bar__detail">. Made-up transactions in a throwaway database; your real accounts are never touched.</span></span></div>
 {%- elif show_envbar %}
-<div class="env-bar env-bar--{{ env }}" role="note">{{ ui.icon('info', size='sm') }}<span class="env-bar__text"><strong>{{ env_label }}</strong> — test data<span class="env-bar__detail">. Nothing here touches your real Amex account.</span></span></div>
+<div class="env-bar env-bar--{{ env }}" role="note">{{ ui.icon('info', size='sm') }}<span class="env-bar__text"><strong>{{ env_label }}</strong> — test data<span class="env-bar__detail">. Nothing here touches your real bank or card accounts.</span></span></div>
 {%- endif %}
 <div class="topbar">
 <div class="topbar__inner">
@@ -136,17 +174,13 @@
 </div>
 </header>
 
-{%- if show_reconnect or cs.show %}
+{%- if show_reconnect or consent_items %}
 <div class="notices">
 {%- if show_reconnect %}
-{{ ui.banner('over', 'Syncing is paused until you sign in to Amex again through Plaid. Your existing data is safe.', title='Your Amex connection needs attention.', action_href='/connection', action_label='Reconnect', id='reconnect-banner') }}
-{%- elif consent_days is not none and consent_days < 0 %}
-{{ ui.banner('over', 'Amex asks you to renew access every 12 months' ~ ((', and it lapsed on ' ~ (consent_due|date_long)) if consent_due else '') ~ '. Syncing stops until you renew.', title='Your Amex consent has expired.', action_href='/connection', action_label='Renew now', id='consent-banner') }}
-{%- elif consent_days == 0 %}
-{{ ui.banner('over', 'Renew now to keep syncing without a gap. It takes a minute.', title='Your Amex consent expires today.', action_href='/connection', action_label='Renew now', id='consent-banner') }}
-{%- else %}
-{#- The essentials (by when, days left) are in the title: narrow windows show only the title. -#}
-{{ ui.banner('warn', 'Amex asks you to renew access every 12 months. It takes a minute and keeps syncing uninterrupted.', title='Renew your Amex connection' ~ ((' by ' ~ (consent_due|date_long)) if consent_due else '') ~ ((' (' ~ consent_days ~ ' day' ~ ('' if consent_days == 1 else 's') ~ ' left)') if consent_days is not none else '') ~ '.', action_href='/connection', action_label='Renew now', id='consent-banner') }}
+{{ ui.banner('over', 'Syncing ' ~ ('it' if reconnect_names|length == 1 else 'them') ~ ' is paused until you sign in again through Plaid. Your existing data is safe.', title=(reconnect_who ~ ' needs attention.') if reconnect_names|length == 1 else (reconnect_who ~ ' need attention.'), action_href='/connection', action_label='Reconnect', id='reconnect-banner') }}
+{%- endif %}
+{%- if consent_items %}
+{{ consent_banner(consent_items) }}
 {%- endif %}
 </div>
 {%- endif %}

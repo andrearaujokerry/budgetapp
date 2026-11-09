@@ -1,16 +1,19 @@
 /* Plaid Link on the Connection page (ARCHITECTURE §7, §9; RESEARCH T2.2). Loaded only there.
  *
- * Buttons with data-link-mode="new" | "update" | "liabilities" (update modes also carry
- * data-item-id) open Plaid Link. The page asks the app for a Link token
- * (POST /connection/link-token → {link_token, attempt}), opens Link (OAuth opens Amex's own pop-up
- * on desktop: no redirect URI), then posts the result back and goes where the app says:
- *   a new link    POST /connection/exchange        {public_token, metadata, attempt}
+ * Buttons with data-link-mode="new" | "update" | "liabilities" | "accounts" (update modes also
+ * carry data-item-id) open Plaid Link. The page asks the app for a Link token
+ * (POST /connection/link-token → {link_token, attempt}), opens Link (an OAuth bank opens its own
+ * pop-up on desktop: no redirect URI), then posts the result back and goes where the app says:
+ *   a new link    POST /connection/exchange        {public_token, metadata, attempt,
+ *                                                  different_login}
  *   update mode   POST /connection/update-complete {item_id, mode, metadata}  (never exchanged)
  *   Link closed   POST /connection/link-exit       {event: "EXIT", attempt, ...}  (onExit)
  *   OAuth events  POST /connection/link-exit       {event: "CLOSE_OAUTH" | "FAIL_OAUTH", ...}
  * `attempt` ties the production link-in-progress marker to this Link session: only its own onExit
- * or exchange clears it. CLOSE_OAUTH / FAIL_OAUTH mean the Amex window closed or timed out while
- * Link itself stays open (it can still succeed), so they are only logged.
+ * or exchange clears it. CLOSE_OAUTH / FAIL_OAUTH mean the bank's window closed or timed out while
+ * Link itself stays open (it can still succeed), so they are only logged. `different_login` is
+ * the confirm dialog's "A different login at a bank I've already linked" (#link-different-login),
+ * read when the link starts; without it the app refuses a bank that is already linked.
  *
  * Errors show inline in #link-error, in the page (a dialog closes first: nothing shows above a
  * modal). While Link runs, the clicked button and the button that opened its dialog both show the
@@ -158,10 +161,17 @@
     window.location.assign(data.redirect || "/connection");
   }
 
+  /* The confirm dialog's choice, read once when a new link starts. */
+  function differentLogin() {
+    var box = document.getElementById("link-different-login");
+    return !!(box && box.checked);
+  }
+
   function start(button) {
     var mode = button.getAttribute("data-link-mode");
     var rawId = button.getAttribute("data-item-id");
     var itemId = rawId ? parseInt(rawId, 10) : null;
+    var different = mode === "new" && differentLogin();
     var dialog = button.closest("dialog");
     var opener = dialog && dialog.id ? document.querySelector('[data-dialog-open="' + dialog.id + '"]') : null;
     clearError();
@@ -189,6 +199,7 @@
                     public_token: publicToken,
                     metadata: slim(metadata),
                     attempt: attempt,
+                    different_login: different,
                   })
                 : postJSON("/connection/update-complete", {
                     item_id: itemId,
@@ -216,7 +227,7 @@
             handler.destroy();
           },
           onEvent: function (eventName, metadata) {
-            // The Amex window closed or timed out; Link stays open and can still succeed.
+            // The bank's window closed or timed out; Link stays open and can still succeed.
             if (eventName === "CLOSE_OAUTH" || eventName === "FAIL_OAUTH") {
               report(mode, itemId, attempt, eventName, null, metadata);
             }

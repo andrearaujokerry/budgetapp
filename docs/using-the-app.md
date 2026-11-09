@@ -10,15 +10,17 @@ guide walks through each page in the order of the menu:
 
 ## Everywhere
 
-- **The status in the top bar** shows the connection: Connected, Syncing…, Data is stale (no
-  successful sync for 36 hours), Sync problem, Reconnect needed, or Not linked. Click it for the
-  Connection page.
-- **Sync now** (next to it) asks Plaid to fetch fresh data from Amex, syncs at once and again
-  after about 15 seconds, 45 seconds and 2 minutes, while Plaid catches up. You rarely need it:
-  the background agent syncs four times a day. When the connection needs you, the button becomes
-  **Reconnect** or **Renew access** and opens the Connection page.
+- **The status in the top bar** shows your connections: Connected, Syncing…, Data is stale (no
+  successful sync for 36 hours), Sync problem, Reconnect needed, or Not linked. With several
+  connections it shows the one that needs you most, and its tooltip lists each bank with its
+  state. Click it for the Connection page.
+- **Sync now** (next to it) asks Plaid to fetch fresh data from your banks and cards, syncs at
+  once and again after about 15 seconds, 45 seconds and 2 minutes, while Plaid catches up. You
+  rarely need it: the background agent syncs four times a day. A connection that needs
+  reconnecting waits for you while the others sync. When no connection can sync, the button
+  becomes **Reconnect** or **Renew access** and opens the Connection page.
 - **Banners** at the top of every page (except Connection, which shows the same things in more
-  detail) tell you when Amex needs you to reconnect or when the yearly consent renewal is due.
+  detail) name each bank that needs you to reconnect and each one whose consent renewal is due.
   See [Reconnecting and renewing](reconnecting.md).
 - **`/`** jumps to the search box on pages that have one.
 - Pages work in light and dark mode, follow your Mac's setting, and fit a narrow window.
@@ -304,23 +306,30 @@ from. Delete the downloaded file when you are done with it: it holds your real t
 
 ## Connection
 
-Your Amex connection through Plaid, read-only.
+Your banks and cards through Plaid, read-only, one section per connection (each bank login you
+linked).
 
-- When nothing is linked: what linking does, and the **Link American Express** button (in Sandbox,
-  **Link with Plaid Link** and the test tools). [Going live](going-live.md#4-link-your-amex)
+- **Link a bank or card** opens a dialog first. In production it says the link uses 1 of your 10
+  Plaid connections, how many the app has created so far, and lists the Dashboard checklist. It
+  also has "A different login at a bank I've already linked", for a second login at a bank you
+  linked before; without it, that bank is refused. In the Sandbox, test connections can also be
+  made without Plaid's window. [Going live](going-live.md#4-link-your-first-bank-or-card)
   describes the production link.
-- When linked: the status, **Last successful sync**, **Plaid's last update from Amex**,
-  **History** (whether Plaid has sent everything), **Consent** (when the yearly renewal is due)
-  and **Statement details** (whether Amex shares them).
-- Your card: current balance, statement balance, minimum payment and due date, credit limit and
-  last payment, as Amex reports them through Plaid. Charge cards have no preset limit.
-- **Reconnect**, **Renew consent** and **Grant access to statement details** appear when needed
+- Each connection: the bank's name and status, **Last successful sync**, **Plaid's last update
+  from** the bank, **History** (whether Plaid has sent everything), **Consent** (when a renewal is
+  due, or "No end date") and, for cards, **Statement details** (whether the bank shares them).
+- Its accounts: a card shows the current balance, statement balance, minimum payment and due date,
+  credit limit and last payment; a checking or savings account shows its current and available
+  balance. Charge cards have no preset limit.
+- Each connection's **Add accounts** and **Reconnect**, **Renew consent** when a renewal date is
+  known, and **Grant access to statement details** for a card connection that doesn't share them
   ([Reconnecting and renewing](reconnecting.md)).
 - **Recent syncs:** the last 20 syncs with how they started (scheduled, Sync now, …), the result
   and the counts of new, changed and removed transactions.
 - **Edits we couldn't carry over:** when Plaid removes a charge you had edited and no replacement
   matches it, your edits are kept here for 90 days in case it comes back. **Dismiss** forgets them.
-- **Imported CSV history:** shown when imported rows still need to be moved onto a linked card.
+- **Imported CSV history:** shown when rows imported from Amex CSV files still need to be moved
+  onto a linked American Express card.
 
 ## Settings
 

@@ -1,13 +1,15 @@
 {#- ==========================================================================
-    Connection page (SYNC-1 … SYNC-7). Route: web/routes/connection.py.
-    Context: overview (linking.ConnectionOverview), demo, plaid_problem,
-    link_enabled, plaid_script, busy, poll, checklist, sandbox_users, now,
-    today; conn = overview.status (the layout reuses it).
-    Not linked: what linking does, the production checklist and confirm
-    dialog, re-attach / recover. Linked: the live region (_live.html: status,
-    update-mode actions, cards, recent syncs), edits that couldn't be carried
-    over, the CSV-attach choice, and the Sandbox tools.
-    Plaid Link runs from static/js/link.js (buttons with data-link-mode).
+    Connection page (SYNC-1 … SYNC-7, BANK-1 … BANK-6). Route:
+    web/routes/connection.py. Context: overview (linking.ConnectionOverview),
+    demo, plaid_problem, link_enabled, plaid_script, busy, poll, checklist,
+    sandbox_users, now, today; conn = overview.status (the layout reuses it).
+    Always: "Link a bank or card" (header, or the not-linked card) opening the
+    confirm dialog (_link_dialog.html), and the production "Linking is
+    paused" / re-attach banners. Not linked: what linking does and the
+    production checklist. Linked: the live region (_live.html: each
+    connection's status, update-mode actions and accounts, recent syncs),
+    edits that couldn't be carried over, the CSV-attach choice, and the
+    Sandbox tools. Plaid Link runs from static/js/link.js (data-link-mode).
     ========================================================================== -#}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
@@ -17,8 +19,11 @@
 {% block content %}
 {%- set o = overview %}
 {%- set lost_edits = o.lost_edits %}
-{% call ui.page_header("Connection", "American Express through Plaid, read-only: nothing here can move money.") %}
+{%- set subtitle = "Your banks and cards through Plaid, read-only: nothing here can move money." %}
+{%- if o.production and o.connections_used is not none %}{% set subtitle = subtitle ~ " " ~ o.connections_used ~ " of your " ~ o.connection_limit ~ " Plaid connections used." %}{% endif %}
+{% call ui.page_header("Connection", subtitle) %}
 {%- if o.linked %}
+{{ ui.button("Link a bank or card", icon="plus", data_dialog_open="confirm-link", id="link-open", disabled=not (link_enabled and o.can_link)) }}
 {% include "connection/_sync_button.html" %}
 {%- endif %}
 {% endcall %}
@@ -45,6 +50,19 @@
 </div>
 </div>
 
+{%- if o.production and o.reattach_available %}
+{% call ui.banner("warn", "Keychain holds the access token of a connection that this database doesn't show (it was restored or rebuilt). Re-attach it: Plaid says which bank it is, and no new Plaid connection is used.", title="A saved connection was found.") %}
+<form method="post" action="/connection/recover">{{ ui.button("Re-attach existing connection", variant="primary", size="sm", type="submit", icon="link", disabled=not link_enabled) }}</form>
+{% endcall %}
+{%- elif o.production and o.link_blockers %}
+{{ ui.banner("warn", o.link_blockers|join(" "), title="Linking is paused.") }}
+{%- endif %}
+{%- if o.orphaned_ids %}
+{% call ui.banner("info", "Keychain holds " ~ (o.orphaned_ids|length|pluralize("Sandbox test connection")) ~ " that this database doesn't know (it was recreated). Recover them to sync their data again; nothing new is linked.", title="Saved test connections found.") %}
+<form method="post" action="/connection/recover">{{ ui.button("Recover", size="sm", type="submit", icon="refresh", disabled=not link_enabled) }}</form>
+{% endcall %}
+{%- endif %}
+
 {%- if o.linked %}
 {% include "connection/_live.html" %}
 {% include "connection/_lost_edits.html" %}
@@ -56,6 +74,9 @@
 {%- endif %}
 {%- else %}
 {% include "connection/_not_linked.html" %}
+{%- endif %}
+{%- if o.can_link and not demo %}
+{% include "connection/_link_dialog.html" %}
 {%- endif %}
 {% endblock %}
 

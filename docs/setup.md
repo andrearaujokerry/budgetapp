@@ -1,7 +1,7 @@
 # Setting up
 
 This guide takes you from a fresh checkout to the app running on Plaid's Sandbox test data. Your
-real card comes later, once, in [Going live](going-live.md).
+real banks and cards come later, in [Going live](going-live.md).
 
 Every command here runs in Terminal from the app's folder:
 
@@ -28,7 +28,8 @@ cd ~/Desktop/budgetapp
   missing). The production copy of the app is built from git.
 - **A Plaid account on the free Trial plan.** Sign up as a new team at
   https://dashboard.plaid.com/trial-plan. The Trial plan includes Transactions and Liabilities
-  and allows 10 real connections ([what that means](going-live.md#one-of-your-10-plaid-connections-permanently)).
+  and allows 10 real connections, one per bank login
+  ([what that means](going-live.md#one-of-your-10-plaid-connections-permanently)).
 - **An internet connection** for the first run (it downloads the app's Python packages) and for
   Plaid. Nothing else is downloaded or uploaded.
 
@@ -69,7 +70,7 @@ You need three values from Plaid's Dashboard, under **Developers → Keys**
 | --- | --- |
 | Client ID | every environment |
 | Sandbox secret | the Sandbox app (test data) |
-| Production secret | your real Amex; optional now, needed when you [go live](going-live.md) |
+| Production secret | your real banks and cards; optional now, needed when you [go live](going-live.md) |
 
 Setup asks for them one at a time:
 
@@ -101,10 +102,18 @@ database, files, logs or git.
 | --- | --- |
 | `plaid.client_id` | your Plaid client ID |
 | `plaid.secret.sandbox`, `plaid.secret.production` | your Plaid secrets |
-| `plaid.access_token.production` | the token for your linked Amex (written once, at the link) |
+| `plaid.access_token.production.<id>` | the token of one linked bank login (one item per connection, written once, at its link; `<id>` is Plaid's id for it) |
+| `plaid.item_ids.production` | the list of those connections (Keychain can't list items by itself) |
 | `plaid.link_in_progress.production` | a short-lived marker while a production link is open |
 | `plaid.access_token.sandbox.<id>`, `plaid.item_ids.sandbox` | Sandbox test connections |
 | `db.password.budgetapp_dev`, `db.password.budgetapp_live` | the generated database passwords |
+
+Versions before banks were supported kept the one token as `plaid.access_token.production`. The
+first sync after the upgrade moves it to its connection's own item (it writes the new item, reads
+it back, then deletes the old one); if that can't happen, the old item keeps working and
+`./run doctor --env production` says what to do. If only the old item couldn't be deleted, it is
+a leftover copy: every later sync tries again, and `./run sync --env production` in Terminal
+deletes it once you click **Always Allow**.
 
 Let the app create and change these items itself, through `./run setup`. Don't create or edit
 them with Keychain Access or the `security` command: macOS trusts the program that created an
@@ -158,11 +167,11 @@ The app has two separate environments, plus demo data. They never share a databa
 | --- | --- | --- | --- |
 | Start it with | `./run` | `./run live` | `./run serve --demo NAME` |
 | Address | http://127.0.0.1:8766 | http://127.0.0.1:8765 | http://127.0.0.1:8800 (or `--port N`) |
-| Data | Plaid's Sandbox: fake banks and test users | your real American Express | made-up data, no Plaid at all |
+| Data | Plaid's Sandbox: fake banks and test users | your real banks and cards | made-up data, no Plaid at all |
 | Database | `budgetapp_sandbox` | `budgetapp` | `budgetapp_test_demo_NAME` |
 | Code that runs | this folder | the installed copy in `~/Library/Application Support/budgetapp/venv` | this folder |
 | In the browser | a purple "Sandbox — test data" bar | no bar; a "Live" label | an orange "Demo data" bar |
-| Plaid connections | unlimited and free | 1 of your 10, once | none |
+| Plaid connections | unlimited and free | 1 of your 10 per bank login, for good | none |
 
 - **Every command uses Sandbox unless you say otherwise.** Real data is touched only by
   `./run live` and by commands you give `--env production` (for example
@@ -179,30 +188,35 @@ The app has two separate environments, plus demo data. They never share a databa
 Open **Connection** in the Sandbox app (http://127.0.0.1:8766/connection). With your Sandbox
 keys saved you can:
 
-- click **Link with Plaid Link**, pick **First Platypus Bank** and sign in with `user_good` and
-  `pass_good`: the same Plaid window your real link will use;
+- click **Link a bank or card**, then in the dialog **Link a bank or card** again, pick **First
+  Platypus Bank** and sign in with `user_good` and `pass_good`: the same Plaid window your real
+  links will use. Linking First Platypus Bank a second time is refused, as it would be for a real
+  bank, unless you tick "A different login at a bank I've already linked";
 - or choose test data under **Sandbox** and click **Create a test Item without Link**. "Amex-like
-  card, known totals" gives a credit card with a known set of purchases, a refund and payments.
+  card, known totals" gives a credit card with a known set of purchases, a refund and payments;
+  "Bank login: checking, savings and a card" gives a checking account with paychecks, rent, a
+  debit purchase, an ATM withdrawal and a transfer, a savings account with interest, and a card.
 
 The same things from Terminal:
 
 ```sh
 ./run sandbox-link                  # a test connection without Plaid's window
 ./run sandbox-link --user custom    # the Amex-like test card
+./run sandbox-link --user bank      # a test bank login: checking, savings and a card
 ./run sandbox-refresh               # ask Plaid for new test transactions, then sync
 ./run sandbox-reset-login           # break the test sign-in, to try Reconnect
 ./run sync                          # sync every connection now
 ```
 
 `./run sandbox-link` uses the test user `user_transactions_dynamic` unless you pass `--user`
-(`custom`, `user_transactions_dynamic` or `user_good`); that user's pending charges post on the
+(`custom`, `bank`, `user_transactions_dynamic` or `user_good`); that user's pending charges post on the
 first `./run sandbox-refresh` on or after their posting date, so not on the day you link. Sandbox
 connections are free and never count toward your 10 real ones.
 These commands refuse to run in production.
 
 ## Demo data
 
-Demo data lets you explore every page with two years of realistic, made-up card activity, without
+Demo data lets you explore every page with two years of realistic, made-up activity, without
 Plaid keys or a link. It needs only the app's database server: run `./run setup` first
 (`--skip-plaid` if you have no keys yet), and `./run db start` if the server isn't running.
 
@@ -215,9 +229,10 @@ Plaid keys or a link. It needs only the app's database server: run `./run setup`
 
 - A demo is its own database (`budgetapp_test_demo_try`) in the app's PostgreSQL server. It never
   touches your Sandbox or real data, Keychain or Plaid, and sends no notifications.
-- It holds one linked Amex card with about 2,500 transactions over two years, budgets (with
-  rollover, annual budgets and an overall target), statements (one deliberately off by $0.01),
-  recurring charges, rules, CSV rows held for review and a consent renewal due soon.
+- It holds a linked Amex card with about 2,500 transactions over two years and a made-up bank
+  login with checking and savings, budgets (with rollover, annual budgets and an overall target),
+  statements (one deliberately off by $0.01), recurring charges, rules, CSV rows held for review
+  and a consent renewal due soon.
 - Linking, syncing and renewing are turned off; the Connection page says so.
 - Names use `a-z`, `0-9` and `_`, up to 20 characters. `--seed N` gives different data of the
   same shape, and `--today YYYY-MM-DD` pretends today is another date. The same seed and date
@@ -230,5 +245,5 @@ Plaid keys or a link. It needs only the app's database server: run `./run setup`
 ## Next
 
 - Learn the pages: [Using the app](using-the-app.md).
-- Link your real card: [Going live](going-live.md).
+- Link your real banks and cards: [Going live](going-live.md).
 - Check everything: `./run doctor` ([Maintenance and troubleshooting](maintenance.md)).

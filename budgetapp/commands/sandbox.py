@@ -1,10 +1,11 @@
 """Sandbox-only test helpers (ARCHITECTURE §10; RESEARCH T3). They refuse to run in production.
 
-* ``./run sandbox-link [--user user_good|user_transactions_dynamic|custom] [--institution ID]``
+* ``./run sandbox-link [--user user_good|user_transactions_dynamic|custom|bank] [--institution ID]``
   creates a test Item without Plaid Link (``/sandbox/public_token/create``), saves it through the
   same exchange path as a real link, then syncs until Plaid has sent the full history.
   ``custom`` is an Amex-like credit card with known totals (RESEARCH T3.7,
-  ``linking.custom_user_config``).
+  ``linking.custom_user_config``); ``bank`` a bank login with checking, savings and a card
+  (``linking.bank_user_config``).
 * ``./run sandbox-refresh [--item ID]``: what "Sync now" does — ``/transactions/refresh``, then a
   sync now and after about 15 s, 45 s and 2 minutes (``user_transactions_dynamic`` then moves its
   pending charges to posted).
@@ -55,7 +56,8 @@ def register(subparsers: Any) -> None:
         "--user",
         choices=USERS,
         default="user_transactions_dynamic",
-        help="Sandbox test user (custom = an Amex-like credit card with known totals)",
+        help="Sandbox test user (custom = an Amex-like credit card with known totals; bank = "
+        "checking, savings and a credit card)",
     )
     link.add_argument(
         "--institution",

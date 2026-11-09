@@ -845,7 +845,6 @@ def _keychain_items(ctx: DoctorContext) -> list[_Item]:
         _Item(
             secrets.db_password_key("budgetapp_live"), "production", "production database password"
         ),
-        _Item(secrets.PRODUCTION_ACCESS_TOKEN, "production", "production access token"),
     ]
     return items
 
@@ -856,6 +855,110 @@ def _item_count(ctx: DoctorContext) -> int | None:
         return None
     with ctx.session() as session:
         return int(session.execute(text("SELECT count(*) FROM plaid_items")).scalar() or 0)
+
+
+def _linked_items(ctx: DoctorContext) -> list[tuple[str, str]]:
+    """``(plaid item id, institution name)`` of every Item in this environment's database."""
+    reachable, _ = ctx.database()
+    if not reachable:
+        return []
+    with ctx.session() as session:
+        rows = session.execute(
+            text("SELECT plaid_item_id, institution_name FROM plaid_items ORDER BY id")
+        ).all()
+    return [(row[0], row[1] or f"Item {row[0]}") for row in rows]
+
+
+def _production_token_checks(ctx: DoctorContext, present: dict[str, bool]) -> list[Check]:
+    """BANK-4/BANK-7: every production Item's own token, tokens without a connection, and the
+    v1 token (C6). Run only for production, where the database is the production one."""
+    section = "Keychain"
+    problems: list[Check] = []
+    linked = _linked_items(ctx)
+    known = {pid for pid, _ in linked}
+    names = dict(linked)
+    legacy = present.get(secrets.LEGACY_PRODUCTION_TOKEN, False)
+    where: secrets.LegacyTokenState | None = None
+    if legacy and ctx.database()[0]:
+        try:
+            where = secrets.legacy_token_state([pid for pid, _ in linked], store=ctx.store)
+        except secrets.SecretStoreError:
+            where = None  # an unreadable item is reported above; nothing to say about it here
+    for pid, name in linked:
+        account = secrets.production_access_token_key(pid)
+        if present.get(account, True):
+            continue
+        if where is not None and where.state == "movable" and pid == where.item_id:
+            continue  # the v1 token is this Item's; reported below
+        problems.append(
+            Check(
+                section,
+                FAIL,
+                f"The access token of {name} is missing",
+                detail=f"Keychain item {account}",
+                fix="Re-enter your saved token: ./run setup --env production --access-token",
+            )
+        )
+    try:
+        indexed = secrets.production_item_ids(store=ctx.store)
+    except secrets.SecretStoreError:
+        indexed = []
+    orphans = [
+        pid
+        for pid in indexed
+        if pid not in known and present.get(secrets.production_access_token_key(pid))
+    ]
+    if orphans and ctx.database()[0]:
+        problems.append(
+            Check(
+                section,
+                WARN,
+                f"{len(orphans)} saved access token(s) have no connection in the database",
+                detail="Items " + ", ".join(orphans),
+                fix="Connection page → Re-attach existing connection (never link again).",
+            )
+        )
+    if where is not None and where.state != "none":
+        name = names.get(where.item_id or "") or f"Item {where.item_id}"
+        if where.state == "movable" and where.item_id is not None:
+            problems.append(
+                Check(
+                    section,
+                    WARN,
+                    f"The access token of {name} still uses its v1 Keychain name",
+                    detail=f"{secrets.LEGACY_PRODUCTION_TOKEN} → "
+                    f"{secrets.production_access_token_key(where.item_id)}",
+                    fix="./run sync --env production moves it (click Always Allow if macOS asks); "
+                    "if it stays, the sync log says why.",
+                )
+            )
+        elif where.state == "copy":
+            # The move saved and read back the new item; only deleting the old one failed. Every
+            # production sync tries again (sync.access_token_for); in Terminal macOS can ask.
+            problems.append(
+                Check(
+                    section,
+                    INFO,
+                    f"An old copy of the access token of {name} is still saved",
+                    detail=secrets.LEGACY_PRODUCTION_TOKEN,
+                    fix="./run sync --env production in Terminal deletes it (click Always Allow "
+                    "if macOS asks).",
+                )
+            )
+        else:
+            # No Item, several, or the one Item has a different token of its own: the v1 token
+            # may be the only token of a connection the database lost. Never suggest deleting it.
+            problems.append(
+                Check(
+                    section,
+                    WARN,
+                    f"Keychain still holds the v1 access token ({secrets.LEGACY_PRODUCTION_TOKEN})"
+                    " and the app can't tell which connection it belongs to",
+                    fix="Connection page → Re-attach existing connection: Plaid says whose it is "
+                    "(never link again).",
+                )
+            )
+    return problems
 
 
 def check_keychain_items(ctx: DoctorContext) -> Iterable[Check]:
@@ -874,6 +977,20 @@ def check_keychain_items(ctx: DoctorContext) -> Iterable[Check]:
         _Item(secrets.sandbox_access_token_key(i), "sandbox", f"Sandbox access token ({i})")
         for i in sandbox_ids
     ]
+    # Every production token too (BANK-4: one per Item), so Always Allow covers each of them.
+    try:
+        production_ids = secrets.production_item_ids(store=ctx.store)
+    except secrets.SecretStoreError:
+        production_ids = []
+    if ctx.settings.is_production:
+        production_ids += [pid for pid, _ in _linked_items(ctx) if pid not in production_ids]
+    items += [
+        _Item(
+            secrets.production_access_token_key(i), "production", f"production access token ({i})"
+        )
+        for i in production_ids
+    ]
+    items.append(_Item(secrets.LEGACY_PRODUCTION_TOKEN, "production", "v1 production access token"))
     for item in items:
         try:
             value = secrets.get_secret(item.account, store=ctx.store)
@@ -908,17 +1025,8 @@ def check_keychain_items(ctx: DoctorContext) -> Iterable[Check]:
             problems.append(
                 Check(section, status, f"The {item.label} is missing", fix="./run setup")
             )
-        elif item.account == secrets.PRODUCTION_ACCESS_TOKEN:
-            if linked:
-                problems.append(
-                    Check(
-                        section,
-                        FAIL,
-                        "The production access token is missing, but Amex is linked",
-                        fix="Re-enter your saved token: "
-                        "./run setup --env production --access-token",
-                    )
-                )
+        elif item.account.startswith("plaid.access_token.production"):
+            continue  # per connection, below (production only)
         elif item.account.startswith("plaid.access_token.sandbox."):
             problems.append(
                 Check(section, WARN, f"The {item.label} is missing", fix="./run sandbox-link")
@@ -933,20 +1041,8 @@ def check_keychain_items(ctx: DoctorContext) -> Iterable[Check]:
                     fix="./run setup --keys-only",
                 )
             )
-    if (
-        env == "production"
-        and not linked
-        and present.get(secrets.PRODUCTION_ACCESS_TOKEN)
-        and _item_count(ctx) == 0
-    ):
-        problems.append(
-            Check(
-                section,
-                WARN,
-                "A production access token is saved but the database has no connection",
-                fix="Connection page → Re-attach existing connection (never link again).",
-            )
-        )
+    if env == "production":
+        problems += _production_token_checks(ctx, present)
     yield from problems
     if readable:
         yield Check(section, PASS, f"{readable} Keychain item(s) readable (values never shown)")
@@ -1342,15 +1438,17 @@ def check_connection(ctx: DoctorContext) -> Iterable[Check]:
         yield Check(section, INFO, f"Nothing is linked in {ctx.settings.env} yet")
         return
     for item in status.items:
-        name = item.institution_name or "The connection"
-        due = item.consent_due_at.astimezone().date()
+        # Every line names its connection (with several, "Chase (Freedom ··5678)" tells two
+        # logins at one bank apart), and each fix names the button on that connection.
+        name = item.display_name or "The connection"
+        due = item.consent_due_at.astimezone().date() if item.consent_due_at else None
         if item.item_status == "needs_reconnect":
             yield Check(
                 section,
                 FAIL,
                 f"{name} needs you to reconnect",
                 detail=item.error_code,
-                fix="Connection page → Reconnect",
+                fix=f"Connection page → Reconnect on {name}",
             )
         elif item.item_status == "error":
             yield Check(
@@ -1361,49 +1459,57 @@ def check_connection(ctx: DoctorContext) -> Iterable[Check]:
                 if item.error_code == "INVALID_API_KEYS"  # Plaid refused the client ID or secret
                 else "Connection page → Sync now; see the log if it repeats",
             )
-        if item.consent_days_left < 0:
+        if due is None:
+            yield Check(section, INFO, f"{name} consent has no end date (Plaid reports none)")
+        elif item.consent_expired:
             yield Check(
                 section,
                 FAIL,
                 f"{name} consent expired on {due:%b %-d, %Y}",
-                fix="Connection page → Renew",
+                fix=f"Connection page → Renew consent on {name}",
             )
         elif item.consent_warning:
             yield Check(
                 section,
                 WARN,
                 f"Renew {name} consent by {due:%b %-d, %Y} ({item.consent_days_left} days left)",
-                fix="Connection page → Renew",
+                fix=f"Connection page → Renew consent on {name}",
             )
         else:
             yield Check(section, PASS, f"{name} consent is valid until {due:%b %-d, %Y}")
         liabilities = item.liabilities_status
-        if liabilities == "ok":
-            yield Check(section, PASS, "Liabilities (statement balance, due date) are synced")
+        if not item.has_cards:
+            # BANK-7: a bank login without cards has no statement details (never a warning).
+            yield Check(section, INFO, f"Statement details don't apply to {name} (no cards)")
+        elif liabilities == "ok":
+            yield Check(
+                section, PASS, f"Statement details of {name} (balance, due date) are synced"
+            )
         elif liabilities == "not_consented":
             yield Check(
                 section,
                 WARN,
-                "Liabilities wasn't consented (no statement balance or due date)",
-                fix="Connection page → add Liabilities (a short Plaid update session)",
+                f"{name} doesn't share statement details (no statement balance or due date)",
+                fix=f"Connection page → Grant access to statement details on {name} (a short "
+                "Plaid window)",
             )
         elif liabilities == "error":
             yield Check(
                 section,
                 WARN,
-                "Liabilities failed at the last sync",
+                f"Reading the statement details of {name} failed at the last sync",
                 fix="Connection page → Sync now",
             )
         elif liabilities == "unsupported":
-            yield Check(section, INFO, "Plaid doesn't offer Liabilities for this card")
+            yield Check(section, INFO, f"Plaid doesn't offer statement details for {name}'s cards")
         else:
-            yield Check(section, INFO, "Liabilities hasn't been fetched yet")
+            yield Check(section, INFO, f"The statement details of {name} haven't been read yet")
         if item.stale:
             since = item.last_sync_success_at or item.linked_at
             yield Check(
                 section,
                 WARN,
-                f"No successful sync for {_hours(ctx.now - since)}",
+                f"No successful sync of {name} for {_hours(ctx.now - since)}",
                 fix=f"./run sync --env {ctx.settings.env}; check the sync agent with ./run doctor",
             )
 

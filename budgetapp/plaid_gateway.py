@@ -29,12 +29,20 @@ import urllib3
 from plaid.api import plaid_api
 from plaid.model.accounts_get_request import AccountsGetRequest
 from plaid.model.country_code import CountryCode
+from plaid.model.credit_account_subtype import CreditAccountSubtype
+from plaid.model.credit_account_subtypes import CreditAccountSubtypes
+from plaid.model.credit_filter import CreditFilter
 from plaid.model.custom_sandbox_transaction import CustomSandboxTransaction
+from plaid.model.depository_account_subtype import DepositoryAccountSubtype
+from plaid.model.depository_account_subtypes import DepositoryAccountSubtypes
+from plaid.model.depository_filter import DepositoryFilter
 from plaid.model.institutions_search_request import InstitutionsSearchRequest
 from plaid.model.item_get_request import ItemGetRequest
 from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
 from plaid.model.liabilities_get_request import LiabilitiesGetRequest
+from plaid.model.link_token_account_filters import LinkTokenAccountFilters
 from plaid.model.link_token_create_request import LinkTokenCreateRequest
+from plaid.model.link_token_create_request_update import LinkTokenCreateRequestUpdate
 from plaid.model.link_token_create_request_user import LinkTokenCreateRequestUser
 from plaid.model.link_token_transactions import LinkTokenTransactions
 from plaid.model.personal_finance_category_version import PersonalFinanceCategoryVersion
@@ -61,9 +69,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-CLIENT_NAME = "Amex Budget Tracker"
+CLIENT_NAME = "Budget Tracker"
 CLIENT_USER_ID = "owner-1"
 DAYS_REQUESTED = 730
+#: The accounts Plaid Link offers (BANK-2): checking, savings and money market accounts, and
+#: credit cards. Investment, loan and mortgage accounts are never offered.
+DEPOSITORY_SUBTYPES = ("checking", "savings", "money market")
+CREDIT_SUBTYPES = ("credit card",)
 SYNC_PAGE_SIZE = 500
 HOSTS = {"sandbox": plaid.Environment.Sandbox, "production": plaid.Environment.Production}
 
@@ -255,7 +267,11 @@ class PlaidGateway(Protocol):
     plaid_env: str
 
     def create_link_token(
-        self, *, access_token: str | None = None, additional_consented_products: Sequence[str] = ()
+        self,
+        *,
+        access_token: str | None = None,
+        additional_consented_products: Sequence[str] = (),
+        account_selection: bool = False,
     ) -> str: ...
 
     def exchange_public_token(self, public_token: str) -> ExchangeResult: ...
@@ -448,37 +464,57 @@ class RealPlaidGateway:
     # -- link ------------------------------------------------------------------------------
 
     def link_token_request(
-        self, *, access_token: str | None = None, additional_consented_products: Sequence[str] = ()
+        self,
+        *,
+        access_token: str | None = None,
+        additional_consented_products: Sequence[str] = (),
+        account_selection: bool = False,
     ) -> LinkTokenCreateRequest:
         """The ``/link/token/create`` request (exposed so tests can check its exact shape).
 
         New link: ``products=['transactions']`` only, ``additional_consented_products`` always
-        includes ``liabilities``, ``transactions.days_requested=730``. Update mode
-        (``access_token`` given): the basic fields only, plus ``additional_consented_products`` when
-        asked (to add Liabilities consent). Never a ``redirect_uri`` or ``webhook``.
+        includes ``liabilities``, ``transactions.days_requested=730`` and the account filters
+        (:func:`link_account_filters`). Update mode (``access_token`` given): the basic fields only,
+        plus ``additional_consented_products`` when asked (to add Liabilities consent), or, with
+        ``account_selection`` ("Add accounts"), ``update.account_selection_enabled`` and the same
+        account filters (RESEARCH T2.4: that flag is required to pass filters in update mode).
+        Never a ``redirect_uri`` or ``webhook``.
         """
         fields = self._base_link_fields()
         if access_token is None:
+            if account_selection:
+                raise ValueError("account selection is an update-mode option")
             extra = list(dict.fromkeys(["liabilities", *additional_consented_products]))
             return LinkTokenCreateRequest(
                 **fields,
                 products=[Products("transactions")],
                 additional_consented_products=[Products(p) for p in extra],
                 transactions=LinkTokenTransactions(days_requested=DAYS_REQUESTED),
+                account_filters=link_account_filters(),
             )
         fields["access_token"] = self._token(access_token)
         if additional_consented_products:
             fields["additional_consented_products"] = [
                 Products(p) for p in dict.fromkeys(additional_consented_products)
             ]
+        if account_selection:
+            fields["update"] = LinkTokenCreateRequestUpdate(account_selection_enabled=True)
+            fields["account_filters"] = link_account_filters()
         return LinkTokenCreateRequest(**fields)
 
     def create_link_token(
-        self, *, access_token: str | None = None, additional_consented_products: Sequence[str] = ()
+        self,
+        *,
+        access_token: str | None = None,
+        additional_consented_products: Sequence[str] = (),
+        account_selection: bool = False,
     ) -> str:
-        """A Link token for a new Item (no ``access_token``) or update mode (with one)."""
+        """A Link token for a new Item (no ``access_token``) or update mode (with one);
+        ``account_selection`` lets update mode add accounts to the Item."""
         request = self.link_token_request(
-            access_token=access_token, additional_consented_products=additional_consented_products
+            access_token=access_token,
+            additional_consented_products=additional_consented_products,
+            account_selection=account_selection,
         )
         body = call_raw(self._client.link_token_create, request)
         token = body["link_token"]
@@ -623,6 +659,23 @@ class RealPlaidGateway:
             access_token=self._token(access_token), transactions=custom
         )
         call_raw(self._client.sandbox_transactions_create, request)
+
+
+def link_account_filters() -> LinkTokenAccountFilters:
+    """Link's ``account_filters``: only checking, savings and money market accounts and credit
+    cards (BANK-2). Used for new links and for "Add accounts" in update mode."""
+    return LinkTokenAccountFilters(
+        depository=DepositoryFilter(
+            account_subtypes=DepositoryAccountSubtypes(
+                [DepositoryAccountSubtype(s) for s in DEPOSITORY_SUBTYPES]
+            )
+        ),
+        credit=CreditFilter(
+            account_subtypes=CreditAccountSubtypes(
+                [CreditAccountSubtype(s) for s in CREDIT_SUBTYPES]
+            )
+        ),
+    )
 
 
 def gateway_methods(obj: object) -> set[str]:

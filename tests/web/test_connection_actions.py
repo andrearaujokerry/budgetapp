@@ -176,7 +176,7 @@ def test_sync_now_while_a_sync_runs_starts_nothing(db, client, jobs, fake_plaid,
 def test_sync_now_with_nothing_linked(client, jobs):
     response = client.post("/connection/sync", headers=HTMX)
     assert pill(response.text) == ("not_linked", "Not linked")
-    assert toasts(response.text) == ["Nothing is linked yet. Link your card first."]
+    assert toasts(response.text) == ["Nothing is linked yet. Link a bank or card first."]
     assert jobs.waiting_keys() == []
 
 
@@ -310,11 +310,15 @@ def test_production_issues_one_new_link_token_under_the_guard(db, prod_client, p
     assert len(prod_plaid.calls_to("create_link_token")) == 1
 
 
-def test_production_refuses_a_new_link_while_an_item_exists(db, prod_client, prod_plaid, secrets):
-    make_item(db)
+def test_production_offers_a_new_link_while_connections_exist(
+    db, prod_client, prod_plaid, production, secrets
+):
+    """BANK-1: a connection that exists no longer blocks a link to another bank."""
+    make_item(db, plaid_item_id="item-amex")
+    app_secrets.store_access_token(production, "item-amex", "access-production-a", store=secrets)
     response = prod_client.post("/connection/link-token", json={"mode": "new"})
-    assert response.status_code == 409 and "already linked" in response.json()["error"]
-    assert prod_plaid.calls_to("create_link_token") == []
+    assert response.status_code == 200 and response.json()["attempt"]
+    assert len(prod_plaid.calls_to("create_link_token")) == 1
 
 
 def test_demo_data_never_asks_plaid_for_a_token(demo_client, fake_plaid):
@@ -391,18 +395,23 @@ def test_an_exchange_without_a_public_token(client, jobs, fake_plaid):
     assert fake_plaid.calls_to("exchange_public_token") == []
 
 
-def test_production_never_exchanges_a_second_link(db, prod_client, prod_plaid, secrets):
+def test_production_never_exchanges_a_bank_that_is_already_linked(
+    db, prod_client, prod_plaid, secrets
+):
+    """BANK-3: refused before the exchange; the answer points to Add accounts and Reconnect."""
     make_item(db, institution_id="ins_10")
     fake_item = prod_plaid.add_item(item_id="second")
     response = prod_client.post(
         "/connection/exchange",
         json={"public_token": prod_plaid.public_token_for(fake_item), "metadata": AMEX},
     )
-    assert response.status_code == 409 and "already linked" in response.json()["error"]
+    error = response.json()["error"]
+    assert response.status_code == 409 and "American Express is already linked" in error
+    assert "Add accounts" in error and "Reconnect" in error
     assert prod_plaid.calls_to("exchange_public_token") == []
 
 
-def test_a_production_link_clears_the_marker_and_blocks_the_next(
+def test_a_production_link_clears_the_marker_and_refuses_the_same_bank_next(
     db, prod_client, prod_plaid, secrets
 ):
     attempt = prod_client.post("/connection/link-token", json={"mode": "new"}).json()["attempt"]
@@ -417,9 +426,21 @@ def test_a_production_link_clears_the_marker_and_blocks_the_next(
     )
     assert response.status_code == 200
     assert app_secrets.get_link_in_progress(store=secrets) is None
-    assert secrets.values[app_secrets.PRODUCTION_ACCESS_TOKEN] == fake_item.access_token
+    key = app_secrets.production_access_token_key("the-amex")
+    assert secrets.values[key] == fake_item.access_token
     again = prod_client.post("/connection/link-token", json={"mode": "new"})
-    assert again.status_code == 409
+    assert again.status_code == 200  # another bank may be linked …
+    twin = prod_plaid.add_item(item_id="twin")
+    same = prod_client.post(
+        "/connection/exchange",
+        json={
+            "public_token": prod_plaid.public_token_for(twin),
+            "metadata": AMEX,
+            "attempt": again.json()["attempt"],
+        },
+    )
+    assert same.status_code == 409  # … but not the same one again
+    assert len(prod_plaid.calls_to("exchange_public_token")) == 1
 
 
 def test_after_linking_a_lone_csv_account_is_attached(db, client, jobs, fake_plaid, monkeypatch):
@@ -485,7 +506,8 @@ def test_update_mode_marks_the_item_healthy_and_syncs_twice(
     )
     assert response.status_code == 200 and response.json()["redirect"] == "/connection"
     assert flashed(response)[0]["text"] == (
-        "Your Amex connection is working again. Syncing now. Access is renewed until Oct 19, 2027."
+        "Your American Express connection is working again. Syncing now. Access is renewed "
+        "until Oct 19, 2027."
     )
     db.expire_all()
     row = db.get(PlaidItem, item.id)
@@ -588,7 +610,7 @@ def test_recovering_sandbox_items_the_database_lost(
 
 def test_production_re_attaches_the_saved_token(db, prod_client, prod_app, prod_plaid, secrets):
     fake_item = prod_plaid.add_item(item_id="restored")
-    secrets.set(app_secrets.PRODUCTION_ACCESS_TOKEN, fake_item.access_token)
+    secrets.set(app_secrets.LEGACY_PRODUCTION_TOKEN, fake_item.access_token)
     response = prod_client.post("/connection/recover", follow_redirects=False)
     assert flashed(response)[0]["level"] == "success"
     assert db.scalars(select(PlaidItem)).one().plaid_item_id == "restored"
@@ -786,7 +808,8 @@ def test_an_exit_report_of_another_attempt_leaves_the_marker(prod_client, secret
     assert app_secrets.get_link_in_progress(store=secrets) is not None
 
 
-def test_the_exchange_endpoint_refuses_another_bank_in_production(prod_client, prod_plaid, secrets):
+def test_the_exchange_endpoint_links_another_bank_in_production(prod_client, prod_plaid, secrets):
+    """BANK-1: the v1 "not American Express" refusal is gone."""
     attempt = prod_client.post("/connection/link-token", json={"mode": "new"}).json()["attempt"]
     chase = prod_plaid.add_item(item_id="chase", institution_id="ins_3", institution_name="Chase")
     response = prod_client.post(
@@ -797,16 +820,16 @@ def test_the_exchange_endpoint_refuses_another_bank_in_production(prod_client, p
             "attempt": attempt,
         },
     )
-    assert response.status_code == 409 and "not American Express" in response.json()["error"]
-    assert prod_plaid.calls_to("exchange_public_token") == []
+    assert response.status_code == 200
+    assert len(prod_plaid.calls_to("exchange_public_token")) == 1
     assert app_secrets.get_link_in_progress(store=secrets) is None
+    assert "Chase is linked." in flashed(response)[0]["text"]
 
 
 def test_a_parked_token_never_comes_back_in_the_exchange_answer(prod_client, prod_plaid, secrets):
     fake_item = prod_plaid.add_item(item_id="amex")
-    secrets.fail_on[("set", app_secrets.PRODUCTION_ACCESS_TOKEN)] = app_secrets.SecretStoreError(
-        "locked"
-    )
+    key = app_secrets.production_access_token_key("amex")
+    secrets.fail_on[("set", key)] = app_secrets.SecretStoreError("locked")
     response = prod_client.post(
         "/connection/exchange",
         json={"public_token": prod_plaid.public_token_for(fake_item), "metadata": AMEX},
@@ -815,7 +838,7 @@ def test_a_parked_token_never_comes_back_in_the_exchange_answer(prod_client, pro
     assert fake_item.access_token not in response.text
     error = response.json()["error"]
     assert "readable only by you" in error and "--access-token" in error
-    assert "Don't link again" in error and "show it to the user" not in error
+    assert "Don't link this login again" in error and "show it to the user" not in error
 
 
 def test_a_token_nothing_could_save_is_shown_once_by_the_exchange_answer(
@@ -824,9 +847,8 @@ def test_a_token_nothing_could_save_is_shown_once_by_the_exchange_answer(
     """The documented exception: Keychain and both recovery files failed, so the token exists
     only in this answer; link.js shows it once for the user to copy."""
     fake_item = prod_plaid.add_item(item_id="amex")
-    secrets.fail_on[("set", app_secrets.PRODUCTION_ACCESS_TOKEN)] = app_secrets.SecretStoreError(
-        "locked"
-    )
+    key = app_secrets.production_access_token_key("amex")
+    secrets.fail_on[("set", key)] = app_secrets.SecretStoreError("locked")
 
     def unwritable(*_args, **_kwargs):
         raise OSError("read-only")
@@ -868,3 +890,160 @@ def test_a_second_re_attach_at_the_same_time_gets_a_plain_answer(client, monkeyp
     assert flashed(response) == [
         {"level": "info", "text": "Another window is re-attaching or linking right now."}
     ]
+
+
+# ------------------------------------------------------------------------- wave 3 (BANK-1 … BANK-5)
+
+
+def test_add_accounts_asks_for_an_update_mode_token_with_account_selection(
+    db, client, fake_plaid, secrets, settings
+):
+    fake_item, item = linked(db, fake_plaid, secrets, settings)
+    response = client.post("/connection/link-token", json={"mode": "accounts", "item_id": item.id})
+    assert response.status_code == 200 and response.json()["attempt"] is None
+    assert fake_plaid.calls_to("create_link_token") == [
+        {
+            "access_token": fake_item.access_token,
+            "additional_consented_products": (),
+            "account_selection": True,
+        }
+    ]
+
+
+def test_finishing_add_accounts_syncs_and_says_so(db, client, jobs, fake_plaid, secrets, settings):
+    fake_item, item = linked(db, fake_plaid, secrets, settings)
+    fake_plaid.add_account(
+        fake_item, name="Savings", mask="0002", type="depository", subtype="savings"
+    )
+    response = client.post(
+        "/connection/update-complete", json={"item_id": item.id, "mode": "accounts"}
+    )
+    assert response.status_code == 200
+    assert flashed(response)[0]["text"].startswith(
+        "Your account choice at American Express is saved. Syncing now"
+    )
+    assert fake_plaid.calls_to("exchange_public_token") == []
+    jobs.run_all()
+    db.expire_all()
+    kinds = sorted(a.subtype for a in db.scalars(select(Account).where(Account.item_id == item.id)))
+    assert kinds == ["credit card", "savings"]  # the added account arrived with the sync
+
+
+def test_statement_details_are_refused_for_a_bank_without_cards(
+    db, client, fake_plaid, secrets, settings
+):
+    fake_item = fake_plaid.add_item(
+        item_id="td", institution_id="ins_14", institution_name="TD Bank"
+    )
+    app_secrets.store_access_token(settings, "td", fake_item.access_token, store=secrets)
+    item = make_item(db, plaid_item_id="td", institution_id="ins_14", institution_name="TD Bank")
+    make_account(db, item, type="depository", subtype="checking")
+    response = client.post(
+        "/connection/link-token", json={"mode": "liabilities", "item_id": item.id}
+    )
+    assert response.status_code == 409 and "TD Bank has none" in response.json()["error"]
+
+
+@pytest.mark.parametrize(
+    ("choice", "status"), [(True, 200), ("true", 409), (None, 409)], ids=["ticked", "text", "off"]
+)
+def test_a_different_login_needs_the_dialogs_choice(
+    db, client, jobs, fake_plaid, secrets, settings, choice, status
+):
+    """BANK-3: only a JSON true counts as "a different login at a bank I've already linked"."""
+    linked(db, fake_plaid, secrets, settings)  # American Express, card ··3005
+    other = fake_plaid.add_item(item_id="amex-2")
+    body = {
+        "public_token": fake_plaid.public_token_for(other),
+        "metadata": {
+            **AMEX,
+            "accounts": [{"id": "a", "name": "Gold Card", "mask": "4006", "type": "credit"}],
+        },
+    }
+    if choice is not None:
+        body["different_login"] = choice
+    response = client.post("/connection/exchange", json=body)
+    assert response.status_code == status
+    assert len(fake_plaid.calls_to("exchange_public_token")) == (1 if status == 200 else 0)
+
+
+def test_the_page_shows_a_bank_connection_with_its_kind_of_tiles(
+    db, client, fake_plaid, secrets, settings
+):
+    """BANK-5: a bank connection's accounts show current and available balance; no statement
+    details or "Grant access" for a connection without cards; its consent has no end date."""
+    linked(db, fake_plaid, secrets, settings)
+    td = make_item(
+        db,
+        plaid_item_id="td",
+        institution_id="ins_14",
+        institution_name="TD Bank",
+        consented_products=["transactions"],
+        last_sync_success_at=NOW - dt.timedelta(hours=1),
+    )
+    make_account(
+        db,
+        td,
+        name="Everyday Checking",
+        mask="0101",
+        type="depository",
+        subtype="checking",
+        official_name=None,
+        current_balance=Decimal("2480.40"),
+        available_balance=Decimal("2400.00"),
+    )
+    html = client.get("/connection").text
+    section = html[html.index(f'aria-labelledby="item-{td.id}-title"') :]
+    section = section[: section.index("</section>")]
+    words = " ".join(html_lib.unescape(re.sub(r"<[^>]+>", " ", section)).split())
+    assert "TD Bank" in words and "1 bank account · linked" in words
+    assert "Everyday Checking ··0101 Checking" in words
+    assert "Current balance $2,480.40" in words and "Available balance $2,400.00" in words
+    assert "Statement balance" not in words and "Minimum payment" not in words
+    assert "Statement details" not in words and 'data-link-mode="liabilities"' not in section
+    assert "Consent No end date (Plaid reports none for TD Bank)" in words
+    assert f'id="accounts-{td.id}"' in section and f'id="renew-{td.id}"' not in section
+
+
+# ------------------------------------------------------------------ W3-BANK review fixes (UX)
+
+
+def test_sync_now_leaves_out_a_bank_that_needs_reconnecting(
+    db, client, jobs, fake_plaid, secrets, settings
+):
+    """UX review: Sync now stays in the top bar while a healthy connection can sync; pressing
+    it syncs that one and doesn't keep retrying the bank only Reconnect can fix."""
+    _, amex = linked(db, fake_plaid, secrets, settings)
+    _, td = linked(
+        db,
+        fake_plaid,
+        secrets,
+        settings,
+        item_id="item-td",
+        institution_id="ins_14",
+        institution_name="TD Bank",
+        status="needs_reconnect",
+        error_code="ITEM_LOGIN_REQUIRED",
+    )
+    response = client.post("/connection/sync", headers=HTMX)
+    assert toasts(response.text) == ["Sync started. TD Bank waits for you to reconnect first."]
+    assert jobs.waiting_keys() == [f"refresh:{amex.id}"]
+    assert [(r.item_id, r.status) for r in runs(db)] == [(amex.id, "running")]
+
+
+def test_sync_now_tries_every_connection_when_none_can_sync(
+    db, client, jobs, fake_plaid, secrets, settings
+):
+    """With every connection waiting for a reconnect the Connection page's Sync now still tries
+    them all, as before (it shows Plaid's current answer)."""
+    _, item = linked(
+        db,
+        fake_plaid,
+        secrets,
+        settings,
+        status="needs_reconnect",
+        error_code="ITEM_LOGIN_REQUIRED",
+    )
+    response = client.post("/connection/sync", headers=HTMX)
+    assert toasts(response.text) == ["Sync started"]
+    assert jobs.waiting_keys() == [f"refresh:{item.id}"]

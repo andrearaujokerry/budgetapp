@@ -13,7 +13,8 @@ from budgetapp import clock, logsetup
 from budgetapp import secrets as sec
 from budgetapp.config import load_settings
 from budgetapp.secrets import (
-    PRODUCTION_ACCESS_TOKEN,
+    LEGACY_PRODUCTION_TOKEN,
+    PRODUCTION_ITEM_INDEX,
     SANDBOX_ITEM_INDEX,
     AccessTokenConflict,
     KeychainApprovalNeeded,
@@ -27,6 +28,8 @@ from budgetapp.secrets import (
 PROD_TOKEN = "access-production-11111111-2222-3333-4444-555555555555"
 OTHER_TOKEN = "access-production-99999999-2222-3333-4444-555555555555"
 SANDBOX_TOKEN = "access-sandbox-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+#: Where store_access_token puts the production token of Item "item-1" (C6: one key per Item).
+ITEM_1_KEY = "plaid.access_token.production.item-1"
 
 
 @pytest.fixture
@@ -67,8 +70,14 @@ class TestStores:
 
     def test_key_names(self):
         assert sec.plaid_secret_key("sandbox") == "plaid.secret.sandbox"
-        assert sec.access_token_key("production", "anything") == PRODUCTION_ACCESS_TOKEN
+        assert sec.access_token_key("production", "abc") == "plaid.access_token.production.abc"
+        assert sec.production_access_token_key("item-1") == ITEM_1_KEY
         assert sec.access_token_key("sandbox", "abc") == "plaid.access_token.sandbox.abc"
+        assert sec.item_index_key("production") == PRODUCTION_ITEM_INDEX
+        assert sec.item_index_key("sandbox") == SANDBOX_ITEM_INDEX
+        for bad in ("", "a.b", "../x", None):
+            with pytest.raises(ValueError):
+                sec.access_token_key("production", bad)
         assert sec.db_password_key("budgetapp_live") == "db.password.budgetapp_live"
         with pytest.raises(ValueError):
             sec.db_password_key("postgres")
@@ -81,23 +90,33 @@ class TestStores:
 class TestAccessTokens:
     def test_production_token_is_written_once_and_read_back(self, prod, secrets):
         sec.store_access_token(prod, "item-1", PROD_TOKEN)
-        assert secrets.values[PRODUCTION_ACCESS_TOKEN] == PROD_TOKEN
+        assert secrets.values[ITEM_1_KEY] == PROD_TOKEN
         sec.store_access_token(prod, "item-1", PROD_TOKEN)  # same token: no-op
-        assert sec.get_access_token("production") == PROD_TOKEN
+        assert sec.get_access_token("production", "item-1") == PROD_TOKEN
+        assert sec.production_item_ids() == ["item-1"]
+        assert LEGACY_PRODUCTION_TOKEN not in secrets.values  # the v1 name is never written
+
+    def test_each_production_item_keeps_its_own_token(self, prod, secrets):
+        """BANK-4 (C6): several production Items, one key each; no token reaches another Item."""
+        sec.store_access_token(prod, "item-1", PROD_TOKEN)
+        sec.store_access_token(prod, "item-2", OTHER_TOKEN)
+        assert sec.get_access_token("production", "item-1") == PROD_TOKEN
+        assert sec.get_access_token("production", "item-2") == OTHER_TOKEN
+        assert sec.get_access_token("production", "item-3") is None
+        assert sec.production_item_ids() == ["item-1", "item-2"]
+        assert sec.sandbox_item_ids() == []
 
     def test_a_different_token_is_never_overwritten(self, prod, secrets):
         sec.store_access_token(prod, "item-1", PROD_TOKEN)
         with pytest.raises(AccessTokenConflict) as info:
-            sec.store_access_token(prod, "item-2", OTHER_TOKEN)
-        assert secrets.values[PRODUCTION_ACCESS_TOKEN] == PROD_TOKEN
+            sec.store_access_token(prod, "item-1", OTHER_TOKEN)
+        assert secrets.values[ITEM_1_KEY] == PROD_TOKEN
         recovery = list((prod.state_dir / "recovery").iterdir())
         assert len(recovery) == 1 and OTHER_TOKEN in recovery[0].read_text()
         assert OTHER_TOKEN not in str(info.value)
 
     def test_failed_write_goes_to_a_private_recovery_file(self, prod, secrets):
-        secrets.fail_on[("set", PRODUCTION_ACCESS_TOKEN)] = KeychainApprovalNeeded(
-            PRODUCTION_ACCESS_TOKEN, -25308
-        )
+        secrets.fail_on[("set", ITEM_1_KEY)] = KeychainApprovalNeeded(ITEM_1_KEY, -25308)
         with pytest.raises(TokenNotSavedError) as info:
             sec.store_access_token(prod, "item-1", PROD_TOKEN)
         path = info.value.recovery_path
@@ -106,7 +125,7 @@ class TestAccessTokens:
         content = path.read_text()
         assert PROD_TOKEN in content and "item-1" in content and "--access-token" in content
         assert PROD_TOKEN not in str(info.value)
-        assert PRODUCTION_ACCESS_TOKEN not in secrets.values
+        assert ITEM_1_KEY not in secrets.values
 
     def test_any_unexpected_error_still_saves_the_token(self, prod, secrets):
         secrets.fail_on[("set", None)] = RuntimeError("no keyring backend")
@@ -115,7 +134,7 @@ class TestAccessTokens:
         assert PROD_TOKEN in info.value.recovery_path.read_text()
 
     def test_read_back_mismatch_goes_to_the_recovery_file(self, prod, secrets):
-        secrets.corrupt_reads.add(PRODUCTION_ACCESS_TOKEN)
+        secrets.corrupt_reads.add(ITEM_1_KEY)
         with pytest.raises(TokenNotSavedError):
             sec.store_access_token(prod, "item-1", PROD_TOKEN)
 
@@ -137,7 +156,7 @@ class TestAccessTokens:
 
     @pytest.mark.parametrize("interrupt", [KeyboardInterrupt(), SystemExit(1)])
     def test_ctrl_c_during_the_keychain_write_still_saves_the_token(self, prod, secrets, interrupt):
-        secrets.fail_on[("set", PRODUCTION_ACCESS_TOKEN)] = interrupt
+        secrets.fail_on[("set", ITEM_1_KEY)] = interrupt
         with pytest.raises(type(interrupt)):
             sec.store_access_token(prod, "item-1", PROD_TOKEN)
         [path] = sec.unsaved_production_tokens(prod)
@@ -173,7 +192,14 @@ class TestAccessTokens:
         assert info.value.recovery_path is None
         assert PROD_TOKEN not in str(info.value) and "only in this process" in str(info.value)
 
-    def test_sandbox_index_is_written_before_the_token(self, sandbox, secrets):
+    @pytest.mark.parametrize(
+        ("env", "index", "key"),
+        [
+            ("sandbox", SANDBOX_ITEM_INDEX, "plaid.access_token.sandbox.item-a"),
+            ("production", PRODUCTION_ITEM_INDEX, "plaid.access_token.production.item-a"),
+        ],
+    )
+    def test_the_index_is_written_before_the_token(self, tmp_path, secrets, env, index, key):
         order = []
         original = secrets.set
 
@@ -182,8 +208,9 @@ class TestAccessTokens:
             original(account, value)
 
         secrets.set = recording_set
-        sec.store_access_token(sandbox, "item-a", SANDBOX_TOKEN)
-        assert order == [SANDBOX_ITEM_INDEX, "plaid.access_token.sandbox.item-a"]
+        settings = load_settings(env, state_dir=tmp_path / "state")
+        sec.store_access_token(settings, "item-a", SANDBOX_TOKEN)
+        assert order == [index, key]
 
     def test_failed_index_write_never_leaves_an_unfindable_token(self, sandbox, secrets):
         secrets.fail_on[("set", SANDBOX_ITEM_INDEX)] = RuntimeError("index write failed")
@@ -197,15 +224,18 @@ class TestProductionLinkGuard:
     def test_nothing_blocks_a_first_link(self, prod):
         assert sec.production_link_blockers(prod) == []
 
-    def test_a_saved_token_or_a_live_marker_blocks(self, prod, secrets, freeze_today):
+    def test_a_live_marker_blocks_but_a_saved_token_no_longer_does(
+        self, prod, secrets, freeze_today
+    ):
+        """BANK-1: several production Items are allowed now; one link at a time still holds."""
         start = dt.datetime(2026, 10, 15, 12, 0, tzinfo=dt.UTC)
         freeze_today(now=start)
         sec.set_link_in_progress()
         assert ["started" in r for r in sec.production_link_blockers(prod)] == [True]
         freeze_today(now=start + dt.timedelta(hours=4, minutes=1))
         assert sec.production_link_blockers(prod) == []
-        secrets.values[PRODUCTION_ACCESS_TOKEN] = PROD_TOKEN
-        assert ["re-attach" in r for r in sec.production_link_blockers(prod)] == [True]
+        sec.store_access_token(prod, "item-1", PROD_TOKEN)
+        assert sec.production_link_blockers(prod) == []
 
     def test_a_token_stuck_in_a_recovery_file_blocks_after_the_marker_expires(
         self, prod, secrets, freeze_today
@@ -213,29 +243,163 @@ class TestProductionLinkGuard:
         start = dt.datetime(2026, 10, 15, 12, 0, tzinfo=dt.UTC)
         freeze_today(now=start)
         sec.set_link_in_progress()
-        secrets.fail_on[("set", PRODUCTION_ACCESS_TOKEN)] = RuntimeError("Keychain refused")
+        secrets.fail_on[("set", ITEM_1_KEY)] = RuntimeError("Keychain refused")
         with pytest.raises(TokenNotSavedError):
             sec.store_access_token(prod, "item-1", PROD_TOKEN)
         freeze_today(now=start + dt.timedelta(hours=4, minutes=1))
-        assert sec.get_link_in_progress() is None and sec.get_access_token("production") is None
+        assert sec.get_link_in_progress() is None
+        assert sec.get_access_token("production", "item-1") is None
         [reason] = sec.production_link_blockers(prod)
         assert "recovery file" in reason and PROD_TOKEN not in reason
+        assert sec.recovery_item_ids(prod) == {"item-1"}
 
-        del secrets.fail_on[("set", PRODUCTION_ACCESS_TOKEN)]
+        del secrets.fail_on[("set", ITEM_1_KEY)]
         sec.store_access_token(prod, "item-1", PROD_TOKEN)
         [saved] = sec.mark_recovery_saved(prod, PROD_TOKEN)
         assert saved.suffix == ".saved" and _mode(saved) == 0o600
         assert sec.unsaved_production_tokens(prod) == []
-        assert ["re-attach" in r for r in sec.production_link_blockers(prod)] == [True]
+        assert sec.recovery_item_ids(prod) == set()
+        assert sec.production_link_blockers(prod) == []
 
     def test_only_files_holding_that_token_are_marked_saved(self, prod, secrets):
-        secrets.fail_on[("set", PRODUCTION_ACCESS_TOKEN)] = RuntimeError("Keychain refused")
-        for token in (PROD_TOKEN, OTHER_TOKEN):
+        secrets.fail_on[("set", None)] = RuntimeError("Keychain refused")
+        for item_id, token in (("item-1", PROD_TOKEN), ("item-2", OTHER_TOKEN)):
             with pytest.raises(TokenNotSavedError):
-                sec.store_access_token(prod, "item-1", token)
+                sec.store_access_token(prod, item_id, token)
+        assert sec.recovery_item_ids(prod) == {"item-1", "item-2"}
         assert len(sec.mark_recovery_saved(prod, PROD_TOKEN)) == 1
         [left] = sec.unsaved_production_tokens(prod)
         assert OTHER_TOKEN in left.read_text()
+
+
+class TestLegacyTokenMove:
+    """C6: the v1 key is moved once to its Item's key; on any doubt it stays and keeps working."""
+
+    def test_nothing_to_move(self, secrets):
+        assert sec.move_legacy_production_token("item-1") == sec.LegacyTokenMove("none")
+        assert secrets.values == {}
+
+    def test_the_v1_token_moves_to_its_items_key_and_the_old_key_goes(self, secrets):
+        secrets.values[LEGACY_PRODUCTION_TOKEN] = PROD_TOKEN
+        order = []
+        original_set, original_delete = secrets.set, secrets.delete
+        secrets.set = lambda a, v: (order.append(("set", a)), original_set(a, v))[1]
+        secrets.delete = lambda a: (order.append(("delete", a)), original_delete(a))[1]
+        move = sec.move_legacy_production_token("item-1")
+        assert move == sec.LegacyTokenMove("moved", "item-1")
+        assert order == [
+            ("set", PRODUCTION_ITEM_INDEX),
+            ("set", ITEM_1_KEY),
+            ("delete", LEGACY_PRODUCTION_TOKEN),
+        ]
+        assert secrets.values[ITEM_1_KEY] == PROD_TOKEN
+        assert sec.legacy_production_token() is None
+        assert sec.production_item_ids() == ["item-1"]
+        assert sec.move_legacy_production_token("item-1").status == "none"  # once
+
+    def test_a_failed_write_keeps_the_old_key(self, secrets):
+        secrets.values[LEGACY_PRODUCTION_TOKEN] = PROD_TOKEN
+        secrets.fail_on[("set", ITEM_1_KEY)] = KeychainApprovalNeeded(ITEM_1_KEY, -25308)
+        move = sec.move_legacy_production_token("item-1")
+        assert move.status == "kept" and "KeychainApprovalNeeded" in move.reason
+        assert secrets.values[LEGACY_PRODUCTION_TOKEN] == PROD_TOKEN
+        assert ITEM_1_KEY not in secrets.values
+        assert PROD_TOKEN not in repr(move)
+
+    def test_a_read_back_mismatch_removes_the_bad_copy_and_keeps_the_old_key(self, secrets):
+        secrets.values[LEGACY_PRODUCTION_TOKEN] = PROD_TOKEN
+        secrets.corrupt_reads.add(ITEM_1_KEY)
+        move = sec.move_legacy_production_token("item-1")
+        assert move.status == "kept" and "read back" in move.reason
+        assert ITEM_1_KEY not in secrets.values  # it can't shadow the good token
+        assert secrets.values[LEGACY_PRODUCTION_TOKEN] == PROD_TOKEN
+
+    def test_a_different_token_under_the_new_key_keeps_both(self, secrets):
+        secrets.values[LEGACY_PRODUCTION_TOKEN] = PROD_TOKEN
+        secrets.values[ITEM_1_KEY] = OTHER_TOKEN
+        move = sec.move_legacy_production_token("item-1")
+        assert move.status == "kept" and "different token" in move.reason
+        assert (secrets.values[LEGACY_PRODUCTION_TOKEN], secrets.values[ITEM_1_KEY]) == (
+            PROD_TOKEN,
+            OTHER_TOKEN,
+        )
+
+    def test_an_old_copy_that_could_not_be_deleted_goes_next_time(self, secrets):
+        secrets.values[LEGACY_PRODUCTION_TOKEN] = PROD_TOKEN
+        secrets.fail_on[("delete", LEGACY_PRODUCTION_TOKEN)] = RuntimeError("locked")
+        move = sec.move_legacy_production_token("item-1")
+        assert move.status == "moved" and "couldn't be deleted" in move.reason
+        assert secrets.values[ITEM_1_KEY] == secrets.values[LEGACY_PRODUCTION_TOKEN]
+        del secrets.fail_on[("delete", LEGACY_PRODUCTION_TOKEN)]
+        assert sec.move_legacy_production_token("item-1") == sec.LegacyTokenMove("moved", "item-1")
+        assert LEGACY_PRODUCTION_TOKEN not in secrets.values
+
+    @pytest.mark.parametrize(
+        ("db_ids", "values", "expected"),
+        [
+            (["item-1"], {}, ("none", None)),
+            (["item-1"], {LEGACY_PRODUCTION_TOKEN: PROD_TOKEN}, ("movable", "item-1")),
+            (  # the move's delete failed: a copy, however many Items exist
+                ["item-1", "item-2"],
+                {LEGACY_PRODUCTION_TOKEN: PROD_TOKEN, ITEM_1_KEY: PROD_TOKEN},
+                ("copy", "item-1"),
+            ),
+            (  # a copy of a token whose Item row is lost (in the index only)
+                [],
+                {LEGACY_PRODUCTION_TOKEN: PROD_TOKEN, ITEM_1_KEY: PROD_TOKEN},
+                ("copy", "item-1"),
+            ),
+            (  # the one Item has another token: the v1 one may be a lost connection's
+                ["item-1"],
+                {LEGACY_PRODUCTION_TOKEN: PROD_TOKEN, ITEM_1_KEY: OTHER_TOKEN},
+                ("unplaced", None),
+            ),
+            (["item-1", "item-2"], {LEGACY_PRODUCTION_TOKEN: PROD_TOKEN}, ("unplaced", None)),
+            ([], {LEGACY_PRODUCTION_TOKEN: PROD_TOKEN}, ("unplaced", None)),
+        ],
+        ids=["none", "movable", "copy", "copy-of-orphan", "beside-own", "several", "no-item"],
+    )
+    def test_where_the_v1_token_stands(self, secrets, db_ids, values, expected):
+        secrets.values.update(values)
+        if ITEM_1_KEY in values:
+            secrets.values[PRODUCTION_ITEM_INDEX] = '["item-1"]'
+        assert sec.legacy_token_state(db_ids) == sec.LegacyTokenState(*expected)
+
+    def test_a_copy_is_deleted_only_when_it_holds_that_token(self, secrets):
+        """Safety review: the retry of a failed delete (every production use of a token)."""
+        secrets.values[LEGACY_PRODUCTION_TOKEN] = PROD_TOKEN
+        assert sec.delete_legacy_copy("item-2", OTHER_TOKEN) == sec.LegacyTokenMove("none")
+        assert secrets.values[LEGACY_PRODUCTION_TOKEN] == PROD_TOKEN
+        secrets.fail_on[("delete", LEGACY_PRODUCTION_TOKEN)] = KeychainApprovalNeeded(
+            LEGACY_PRODUCTION_TOKEN, -25308
+        )
+        move = sec.delete_legacy_copy("item-1", PROD_TOKEN)
+        assert move.status == "moved" and "KeychainApprovalNeeded" in move.reason
+        assert PROD_TOKEN not in repr(move)
+        del secrets.fail_on[("delete", LEGACY_PRODUCTION_TOKEN)]
+        assert sec.delete_legacy_copy("item-1", PROD_TOKEN) == sec.LegacyTokenMove(
+            "moved", "item-1"
+        )
+        assert LEGACY_PRODUCTION_TOKEN not in secrets.values
+        assert sec.delete_legacy_copy("item-1", PROD_TOKEN) == sec.LegacyTokenMove("none")
+
+    def test_deleting_a_copy_never_raises(self, secrets):
+        secrets.fail_on[("get", LEGACY_PRODUCTION_TOKEN)] = KeychainApprovalNeeded(
+            LEGACY_PRODUCTION_TOKEN, -25308
+        )
+        assert sec.delete_legacy_copy("item-1", PROD_TOKEN) == sec.LegacyTokenMove("none")
+
+    def test_approval_needed_for_the_old_key_is_not_swallowed(self, secrets):
+        secrets.fail_on[("get", LEGACY_PRODUCTION_TOKEN)] = KeychainApprovalNeeded(
+            LEGACY_PRODUCTION_TOKEN, -25308
+        )
+        with pytest.raises(KeychainApprovalNeeded):
+            sec.move_legacy_production_token("item-1")
+
+    def test_an_index_that_is_not_a_list_of_ids_reads_as_empty(self, secrets):
+        for raw in ("{}", '"item-1"', "[1, null]", '["ok", "bad id"]', "not json"):
+            secrets.values[PRODUCTION_ITEM_INDEX] = raw
+            assert sec.production_item_ids() in ([], ["ok"])
 
 
 class TestLinkMarker:
@@ -332,7 +496,13 @@ class TestKeychainErrorMapping:
 
     @pytest.mark.parametrize(
         "account",
-        [PRODUCTION_ACCESS_TOKEN, "plaid.secret.production", "db.password.budgetapp_live"],
+        [
+            LEGACY_PRODUCTION_TOKEN,
+            "plaid.access_token.production.item-1",
+            PRODUCTION_ITEM_INDEX,
+            "plaid.secret.production",
+            "db.password.budgetapp_live",
+        ],
     )
     def test_live_sandbox_tests_cannot_touch_production_items(self, monkeypatch, account):
         monkeypatch.setenv("BUDGETAPP_LIVE_SANDBOX", "1")
@@ -347,6 +517,8 @@ class TestKeychainErrorMapping:
         assert sec.is_sandbox_account("plaid.access_token.sandbox.item-1")
         assert sec.is_sandbox_account(SANDBOX_ITEM_INDEX)
         assert not sec.is_sandbox_account("plaid.link_in_progress.production")
+        assert not sec.is_sandbox_account("plaid.access_token.production.item-1")
+        assert not sec.is_sandbox_account(PRODUCTION_ITEM_INDEX)
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
     def test_unattended_mode_binds_the_security_framework(self):

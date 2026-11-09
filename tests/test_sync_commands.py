@@ -124,7 +124,7 @@ def runs(db) -> list[SyncRun]:
 
 def test_sync_with_nothing_linked_says_so(make_rt, out):
     assert sync_cmd.sync_command(args(), make_rt()) == 0
-    assert out == ["Nothing is linked yet. Link your Amex card on the Connection page."]
+    assert out == ["Nothing is linked yet. Link a bank or card on the Connection page."]
 
 
 def test_sync_syncs_every_item_and_reports_the_counts(
@@ -170,6 +170,30 @@ def test_one_item_by_id_and_an_unknown_id(db, make_rt, out, fake_plaid, secrets,
     assert [r.item_id for r in runs(db)] == [second.id]
     assert sync_cmd.sync_command(args(item=999999), make_rt()) == 2
     assert "there is no Item 999999" in out.text
+
+
+def test_two_logins_at_one_bank_are_told_apart(db, make_rt, out, fake_plaid, secrets, settings):
+    """W3-BANK UX review: every place that names a connection uses the label that tells two
+    logins at one bank apart (and Sandbox test Items at one test bank), the sync output too."""
+    from tests.factories import make_account
+
+    ids = []
+    for item_id, card, mask in (("one", "Sapphire", "1234"), ("two", "Freedom", "5678")):
+        _, item = link(
+            db,
+            fake_plaid,
+            secrets,
+            settings,
+            item_id=item_id,
+            institution_name="Chase",
+            institution_id="ins_3",
+        )
+        make_account(db, item, name=card, mask=mask)
+        ids.append(item.id)
+    names = ["Chase (Sapphire ··1234)", "Chase (Freedom ··5678)"]
+    assert make_rt().item_names() == dict(zip(ids, names, strict=True))
+    assert sync_cmd.sync_command(args(), make_rt()) == 0
+    assert [line.split(":")[0] for line in out] == names
 
 
 def test_a_negative_age_is_a_usage_error(make_rt):
@@ -305,7 +329,7 @@ def test_each_missing_secret_names_the_command_that_saves_it():
             app_secrets.PLAID_CLIENT_ID,
             app_secrets.plaid_secret_key("sandbox"),
             app_secrets.db_password_key("budgetapp_dev"),
-            app_secrets.PRODUCTION_ACCESS_TOKEN,
+            app_secrets.production_access_token_key("item-amex"),
         )
     }
     assert list(commands.values()) == [
