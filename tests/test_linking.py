@@ -600,6 +600,7 @@ def linked_item(db, fake_plaid, secrets, settings, **values):
 
 def test_update_mode_tokens_reuse_the_items_access_token(db, fake_plaid, secrets, settings):
     fake_item, item = linked_item(db, fake_plaid, secrets, settings)
+    make_account(db, item)  # a card: statement details apply
     linking.update_link_token(db, fake_plaid, item, store=secrets, settings=settings)
     linking.update_link_token(
         db, fake_plaid, item.id, add_liabilities=True, store=secrets, settings=settings
@@ -1569,6 +1570,17 @@ def test_add_accounts_is_update_mode_with_account_selection(db, fake_plaid, secr
             store=secrets,
             settings=settings,
         )
+
+
+def test_statement_details_are_offered_to_card_connections_only(db, fake_plaid, secrets, settings):
+    """BANK-5: "Grant access to statement details" is for card connections only."""
+    _fake, item = linked_item(db, fake_plaid, secrets, settings, institution_name="TD Bank")
+    make_account(db, item, type="depository", subtype="checking")
+    with pytest.raises(LinkRefused, match="TD Bank has none"):
+        linking.update_link_token(
+            db, fake_plaid, item, add_liabilities=True, store=secrets, settings=settings
+        )
+    assert fake_plaid.calls_to("create_link_token") == []
 
 
 def test_update_mode_on_the_v1_item_uses_and_moves_its_token(db, production, prod_plaid, secrets):

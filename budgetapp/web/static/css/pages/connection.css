@@ -129,3 +129,9 @@
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
 }
+
+/* The confirm dialog's "different login" choice, set apart from the checklist above it. */
+.link-confirm--choice {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}

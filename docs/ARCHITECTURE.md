@@ -16,9 +16,11 @@ design was then reviewed adversarially for data integrity, money math and securi
    models (which use `float`) are never used for responses.
 3. **Sync is idempotent and atomic.** Re-running a sync never duplicates anything; a failed
    sync leaves the database exactly as it was (REL-1).
-4. **One Plaid link, ever.** Each real link permanently uses one of the Trial plan's 10
-   connections, and a second Amex link can also break the first. The app never offers a new
-   production link while any trace of an existing one exists (section 7).
+4. **One Plaid link per bank login, ever.** Each real link permanently uses one of the Trial
+   plan's 10 connections, and linking the same login again can also break the first (at some
+   OAuth banks the original Item goes to `ITEM_LOGIN_REQUIRED`). Any bank can be linked, but the
+   app refuses a duplicate login before the exchange, repairs and extends connections in place
+   (update mode), re-attaches saved tokens instead of linking again, and stops at 10 (section 7).
 5. **Services are UI-agnostic.** Business logic lives in `budgetapp/services/` and takes a
    SQLAlchemy `Session`; it never imports FastAPI or Jinja. Web routes are thin. This is
    what lets a future mobile app reuse the backend through a JSON API.
@@ -119,7 +121,8 @@ All secrets are stored with `keyring` under service name **`budgetapp`**:
 | --- | --- |
 | `plaid.client_id` | Plaid client ID (the same for every Plaid environment) |
 | `plaid.secret.sandbox` / `plaid.secret.production` | Plaid secrets |
-| `plaid.access_token.production` | THE production access token (v1 allows one production Item) |
+| `plaid.access_token.production.<item_id>` + `plaid.item_ids.production` | production tokens, one per Item, and their index (keyring cannot list items) |
+| `plaid.access_token.production` | the v1 name of the one production token: moved once to its Item's key (below) |
 | `plaid.link_in_progress.production` | marker written when a production new-link token is issued |
 | `plaid.access_token.sandbox.<item_id>` + `plaid.item_ids.sandbox` | Sandbox tokens and their index |
 | `db.password.budgetapp_dev` / `db.password.budgetapp_live` | Generated DB role passwords |
@@ -144,12 +147,24 @@ Rules:
   a database password (it creates the roles and their passwords), `./run doctor` otherwise. The
   web app shows it on a "Setup isn't finished" page; the sync agent notifies once a day (marker
   file: no sync runs, so no other alert can) and exits 1.
-- The production access token is written once and read back to verify; it is never
-  rewritten. If the Keychain write fails after a successful exchange, the token goes to a
-  0600 recovery file under `state/` and the app stops with instructions. `./run setup --env
-  production --access-token` re-enters a saved token (via `getpass`), verified with
-  `/item/get`. The user guide (`docs/going-live.md`) suggests keeping a copy in the user's
-  password manager.
+- Each access token is written once, under its own Item's key, and read back to verify; it is
+  never rewritten, and no token can reach another Item (`sync.access_token_for` reads only the
+  Item's own key). The index entry is written before the token (an index entry without a token
+  is harmless; a token nobody can find is an orphan). If the Keychain write fails after a
+  successful exchange, the token goes to a 0600 recovery file under `state/` and the app stops
+  with instructions. `./run setup --env production --access-token` re-enters a saved token of
+  any connection (via `getpass`): `/item/get` verifies it and names its Item, and it is saved
+  under that Item's key. The user guide (`docs/going-live.md`) suggests keeping a copy of each
+  in the user's password manager.
+- **The v1 token** (`plaid.access_token.production`, from before several Items were allowed) is
+  moved once, on the first run of the new code that needs it (a sync, a link, update mode), when
+  exactly one production Item exists: write the Item's key, read it back and compare, then delete
+  the old key (`secrets.move_legacy_production_token`). On any doubt the old key stays and keeps
+  working for that one Item (a failed or mismatched write — a bad copy is deleted again so it
+  can't shadow the good one — or a different token already under the new key), linking another
+  bank waits, and `./run doctor --env production` says what to do. With no Item or several, only
+  Plaid can say whose it is: Re-attach calls `/item/get` and moves it to that Item. Doctor reads
+  and reports; it never moves anything.
 
 ## 4. Repository layout
 
@@ -635,7 +650,7 @@ rows or completed Plaid's history, after every CSV import and after attaching a 
 (an allowlist — nothing that can move money exists, SEC-3):
 
 ```python
-create_link_token(*, access_token=None, additional_consented_products=()) -> str
+create_link_token(*, access_token=None, additional_consented_products=(), account_selection=False) -> str
 exchange_public_token(public_token) -> ExchangeResult(access_token, item_id)
 transactions_sync(access_token, cursor) -> dict      # raw JSON with Decimal amounts
 transactions_refresh(access_token) -> None
@@ -652,11 +667,15 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
 - **New-link token:** `products=['transactions']` only (Auth, Transfer or Signal would hide
   credit cards), `additional_consented_products=['liabilities']`,
   `transactions.days_requested=730` (fixed forever after linking), `country_codes=['US']`,
-  `language='en'`, `client_name='Amex Budget Tracker'`, `user.client_user_id='owner-1'`. No
-  `redirect_uri` (desktop pop-up OAuth), no `webhook`.
-- **Update-mode token** (reconnect, consent renewal): `access_token` plus the basic fields, no
-  products and no flags; `additional_consented_products=['liabilities']` when Liabilities consent
-  is missing.
+  `language='en'`, `client_name='Budget Tracker'`, `user.client_user_id='owner-1'`, and
+  `account_filters` limited to `depository` (`checking`, `savings`, `money market`) and `credit`
+  (`credit card`): investment, loan and mortgage accounts are never offered. No `redirect_uri`
+  (desktop pop-up OAuth), no `webhook`.
+- **Update-mode token** (Reconnect, Renew consent, statement details, Add accounts):
+  `access_token` plus the basic fields, no products; `additional_consented_products=
+  ['liabilities']` to ask for statement details (card connections only); for **Add accounts**,
+  `update.account_selection_enabled=true` with the same `account_filters` (RESEARCH T2.4: that flag
+  is required to pass filters in update mode). The Item and its token stay the same.
 - **Sync request:** `count=500`, cursor omitted when none is stored,
   `include_original_description=True`, `personal_finance_category_version='v2'`.
 - **Calls** use `_preload_content=False` and an explicit `_request_timeout` (sync `(10, 180)`,
@@ -670,38 +689,65 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   `INTERNAL_SERVER_ERROR`, transport errors → `error` (retried next run);
   `TRIAL_CONNECTION_LIMIT` → shown plainly and never retried.
 
-### Linking safety (SYNC-1)
-- **The guard.** A production new-link token is issued only when there is no `plaid_items` row,
-  no `plaid.access_token.production` in Keychain, no unexpired
-  `plaid.link_in_progress.production` marker and no unsaved production token in a recovery file
-  (`secrets.production_link_blockers`) — checked and the marker set under the link lock.
+### Linking safety (SYNC-1, BANK-1 … BANK-8)
+- **Any institution.** Banks and card companies alike, in production and the Sandbox. Each
+  production Item uses one of the Trial plan's 10 for good; the app counts the ones it has created
+  (`linking.connections_used`: Item rows, the Keychain index and unsaved recovery files) and
+  offers no link once 10 exist (`TRIAL_ITEM_LIMIT`).
+- **The guard.** A production new-link token is issued only while no unexpired
+  `plaid.link_in_progress.production` marker exists (one link at a time), no unsaved production
+  token waits in a recovery file, no token in Keychain lacks its Item row and no v1 token is left
+  (re-attach first, so the duplicate check knows every bank), and fewer than 10 Items exist
+  (`linking.link_blocks`, with `secrets.production_link_blockers` for the Keychain-only facts) —
+  checked and the marker set under the link lock. A v1 token of the one Item is moved first.
   The marker records a random attempt id that goes back to the page with the Link token; only
   that attempt clears it: after its successful exchange (once `store_access_token` has returned
   normally), a definite refusal, or Link's `onExit`. Otherwise it expires after 4 hours (a Link
   token's lifetime). `./run setup --env production --access-token` marks a stored token's
   recovery files `*.saved`.
-- **Re-attach.** If Keychain holds a production token but the database has no Item (lost or
-  restored database), the Connection page offers "Re-attach existing connection" (rebuild the row
-  from `/item/get` and `/accounts/get`, sync from a null cursor, reconcile) — never a new link.
-- **Pre-flight.** Before the first production link the Connection page shows Plaid's checklist
-  (a Data Transparency use case selected; American Express access, which the Trial plan grants
-  automatically: the Dashboard's OAuth institutions tab says no action is needed) and
-  `search_institutions('American Express', ['liabilities'])`. A Link attempt that fails these
-  checks creates no access token and uses no connection.
-- **Exchange.** In production a public token is not exchanged while any trace of a connection
-  exists (an Item row, the Keychain token, an unsaved recovery file) or when `onSuccess` names an
-  institution that clearly isn't American Express. One exchange or re-attach runs at a time (a
-  session-level advisory lock held until the Item row is committed; a second one is refused), and
-  it keeps the link-in-progress marker while it runs. The public token stays in memory until the
-  access token is in Keychain (read back) and the Item row is committed; transport failures are
-  retried within the token's 30-minute life; one code path only; recovery file if the Keychain
-  write fails (section 3), and if no file can be written either, the token is shown once for the
-  user to keep.
-- **After linking:** `/item/get` (consent expiry, `consented_products`), `/accounts/get`,
-  attach a manual CSV account if one exists, `/liabilities/get` only if Liabilities was consented
-  (otherwise the page offers an update-mode session to add it), then the first sync and backfill.
+- **Duplicates are refused before the exchange** (BANK-3; plaid.com/docs/link/duplicate-items/:
+  "Do not exchange a public token for an access token if you detect a duplicate Item"). When
+  Link's `onSuccess` names an institution that is already linked (Plaid's `institution_id`, or
+  the name for an Item saved without one), the public token is not exchanged and the page points
+  to **Add accounts** (update mode with account selection) or **Reconnect** on that connection —
+  unless the user started the link as "a different login at a bank I've already linked" (a
+  checkbox in the confirm dialog, sent as `different_login`). Even then the link is refused when
+  any picked account's name and mask match an account already linked at that institution. Masks
+  are compared with masks only, never with account numbers (the app has none). With connections
+  in place, metadata without an institution (or, with the choice, without accounts) is refused
+  too. The Sandbox applies the same check to Link; its test Items made without Link don't.
+  Whether a public token that is never exchanged counts toward the 10 is not documented; the
+  app treats the exchange as the step that creates the Item.
+- **Re-attach.** A token in Keychain whose Item row is missing (lost or restored database, or a
+  crash between the Keychain write and the commit), and a v1 token the app can't place, are
+  re-attached per token: `/item/get` names the Item, its row is rebuilt from `/item/get` and
+  `/accounts/get`, it syncs from a null cursor and reconciles — never a new link.
+- **Pre-flight.** Before a production link the Connection page shows Plaid's checklist (a Data
+  Transparency use case selected; OAuth banks, which the Trial plan grants automatically: the
+  Dashboard's OAuth institutions tab says no action is needed) and a live `/institutions/search`
+  that shows Plaid answers with the Production keys. A Link attempt that fails these checks
+  creates no access token and uses no connection.
+- **Exchange.** In production a public token is not exchanged while the guard says no (a v1
+  token is moved first) or when it would duplicate a login. One exchange or re-attach runs at a
+  time (a session-level advisory lock held until the Item row is committed; a second one is
+  refused), and it keeps the link-in-progress marker while it runs. The public token stays in
+  memory until the access token is in Keychain under the Item's key (read back) and the Item row
+  is committed; transport failures are retried within the token's 30-minute life; one code path
+  only; recovery file if the Keychain write fails (section 3), and if no file can be written
+  either, the token is shown once for the user to keep.
+- **After linking:** `/item/get` (consent expiry, `consented_products`), `/accounts/get`, attach
+  a manual CSV account when the new Item is American Express (`ins_10`) and has exactly one card
+  for it (the CSV files are Amex's: BANK-8), `/liabilities/get` only if the Item has a credit card
+  and Liabilities was consented (otherwise a card connection offers an update-mode session to add
+  it), then the first sync and backfill.
+- **Each connection** on the Connection page shows its institution, status and accounts (cards:
+  balance, statement balance, minimum payment, credit limit and due date; bank accounts: current
+  and available balance) and its own actions: Reconnect, Renew consent (when a consent date is
+  known: Plaid's, or the American Express estimate), Add accounts, and "Grant access to statement
+  details" for card connections only. Those actions always need Plaid Link, so a page with a
+  connection loads Plaid's script whenever linking is possible.
 - Link's `onExit` (Link closed without linking) clears its own attempt's marker. The
-  `CLOSE_OAUTH` and `FAIL_OAUTH` events are logged as "not linked" but never clear it: the Amex
+  `CLOSE_OAUTH` and `FAIL_OAUTH` events are logged as "not linked" but never clear it: the bank's
   window closed or timed out while Link itself stays open and can still succeed.
 
 ## 8. Sync engine (SYNC-2, SYNC-5, SYNC-6, SYNC-7, REL-1)
@@ -712,6 +758,7 @@ sync_item(item_id, trigger):
   schema guard
   take the sync lock (busy → record 'skipped', return); mark older 'running' runs 'interrupted'
   record sync_run 'running' (own transaction)
+  the Item's own access token (a v1 token of the one Item is moved to its key here, section 3)
   start = item.transactions_cursor            # None → omit cursor
   fetch every page until has_more is false; on TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION
      or a transport error, discard the pages and restart from `start` (bounded retries)
@@ -724,7 +771,10 @@ sync_item(item_id, trigger):
   best effort, each in its own transaction:
      /accounts/get → balances (SYNC-7)
      /item/get → consent_expires_at, consented_products, item error, Plaid freshness
-     /liabilities/get when consented → liabilities columns + statements snapshot (SYNC-7)
+     /liabilities/get when the Item has a credit card and Liabilities was consented →
+        liabilities columns + statements snapshot (SYNC-7); an Item without cards is "not
+        applicable": Plaid isn't asked and liabilities_status is cleared (never "unsupported",
+        never a warning)
   on PlaidError: roll back, set item status/error per classification, record the run
   on any other exception: roll back, record the run as error 'INTERNAL' with the exception
      class, set item status 'error'
@@ -742,8 +792,12 @@ sync_item(item_id, trigger):
   and after about 15 s, 45 s and 2 min.
 - **After linking or update mode:** the web process re-syncs with backoff until
   `HISTORICAL_UPDATE_COMPLETE` (cap about 1 hour), and once shortly after update mode.
-- **Consent (SYNC-6):** read on every run; if Amex leaves it null, the due date is
-  `last_consented_at + 365 days`. Renewal is update mode.
+- **Consent (SYNC-6, BANK-6):** read on every run. Only American Express (`ins_10`) asks every 12
+  months, so only it falls back to `last_consented_at + 365 days` when Plaid leaves the date
+  null; another bank uses Plaid's `consent_expiration_time` or has no due date (no reminder, no
+  banner). Renewal is update mode. The top-bar pill shows the worst connection and names each
+  institution in its tooltip; the reconnect and consent banners and the connection alerts name
+  the institution(s).
 - Sandbox Items expire after 30 days (`ITEM_LOGIN_REQUIRED`); handled like any reconnect.
 
 ## 9. Web layer

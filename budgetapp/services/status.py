@@ -78,6 +78,11 @@ class ItemStatus:
         return self.institution_name or "A bank connection"
 
     @property
+    def is_amex(self) -> bool:
+        """American Express (``ins_10``): its consent is renewed every 12 months."""
+        return is_amex(self)
+
+    @property
     def consent_estimated(self) -> bool:
         """The due date is the app's estimate (American Express, no date from Plaid)."""
         return self.consent_expires_at is None and self.consent_due_at is not None
@@ -141,7 +146,7 @@ class ConnectionStatus:
         return min(stamps) if stamps else None
 
 
-def is_amex(item: PlaidItem) -> bool:
+def is_amex(item: PlaidItem | ItemStatus) -> bool:
     """American Express: Plaid's ``ins_10``. An Item saved without an institution id (never by
     this app, but a database is kept for years) counts when its name says American Express."""
     if item.institution_id:

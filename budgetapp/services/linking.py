@@ -1175,6 +1175,15 @@ def update_link_token(
         raise LinkRefused("That connection no longer exists.")
     if add_liabilities and add_accounts:
         raise ValueError("one update-mode change at a time")
+    if add_liabilities and not session.scalar(
+        select(func.count())
+        .select_from(Account)
+        .where(Account.item_id == row.id, Account.type == status_service.CARD_TYPE)
+    ):
+        raise LinkRefused(
+            f"Statement details are for credit cards, and {row.institution_name or 'this bank'} "
+            "has none linked here."
+        )
     token = sync_service.access_token_for(
         settings, row.plaid_item_id, store or secrets.get_store(), source=session
     )
