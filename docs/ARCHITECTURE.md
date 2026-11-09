@@ -1,11 +1,14 @@
 # Architecture
 
-This is the technical design for the Amex Budget Tracker described in
-`Amex Budget Tracker — Requirements & Workplan.md`. Requirement IDs (SYNC-1, REL-3, …)
-refer to that document. Anything here that conflicts with the requirements is a bug in
-this document. Facts about Plaid, Amex and macOS were verified against primary sources in
-October 2026; where a behaviour is undocumented, the design says how it is checked. The
-design was then reviewed adversarially for data integrity, money math and security.
+This is the technical design for Budget Tracker, which tracks credit cards and bank accounts
+linked through Plaid. It began as the Amex-only tracker described in
+`Amex Budget Tracker — Requirements & Workplan.md`: requirement IDs (SYNC-1, REL-3, …) refer to
+that document; the wave-3 IDs (BANK-n, MON-n, INC-n, and contracts C1–C9 as "W3-PLAN") refer to
+the wave-3 plan that added bank accounts and income. Anything here that conflicts with the
+requirements is a bug in this document. Facts about Plaid, Amex and macOS were verified against
+primary sources in October and November 2026; where a behaviour is undocumented, the design says
+how it is checked. The design was then reviewed adversarially for data integrity, money math and
+security.
 
 ## 1. Principles
 
@@ -196,6 +199,7 @@ budgetapp/
   periods.py                calendar months, statement cycles, years, days left
   plaid_gateway.py          PlaidGateway protocol, RealPlaidGateway, PlaidError
   services/
+    accounts.py             kinds of account: cards and bank accounts (W3-PLAN C1)
     userstate.py            the user-owned state of a transaction and how it moves
     categorize.py           categorization: payments → rules → Plaid/Amex mapping → Uncategorized
     spending.py             period_spending() and other aggregation over v_allocations
@@ -210,7 +214,7 @@ budgetapp/
     rules.py                rule CRUD, preview, re-apply (CAT-3/4)
     transactions.py         search/filter, edit, tags, splits, CSV export
     budgets.py              budget amounts, rollover, annual budgets, overall target
-    insights.py             dashboard and trends data
+    insights.py             dashboard and trends data: spending, income and net, account balances
     recurring.py            recurring-charge detection
     statements.py           statement cycles and reconciliation
     alerts.py               alert evaluation with de-duplication
@@ -228,6 +232,7 @@ tests/
   conftest.py               per-process test DB, rollback-per-test sessions, fakes
   fake_plaid.py             event-log FakePlaidGateway
   factories.py              model and Plaid-JSON builders
+  bank_factories.py         bank Items and checking/savings accounts (wave 3)
 docs/ARCHITECTURE.md        this file
 ```
 
@@ -285,7 +290,7 @@ imports are for cards only (CSV imports for American Express cards, §6).
 | liabilities_as_of | timestamptz | |
 | statement_closing_day | smallint | 1–31; used only to extend known closing dates (section 6) |
 | plaid_history_start | date | earliest Plaid posted date, set once history is complete (CSV cutover) |
-| notice | text | a message for the user (e.g. "Plaid re-issued this account; please confirm") |
+| notice | text | a message for the user (e.g. "Plaid re-issued this account; please confirm", or that Plaid stopped sharing it: `sync.no_longer_shared`, §8) |
 | is_hidden | bool not null default false | hides the account in pickers; its money still counts |
 
 `CHECK ((item_id IS NULL) = (plaid_account_id IS NULL))`: an account is manual or linked, never
@@ -539,7 +544,9 @@ broken down (Trends' Every month table).
 `insights.dashboard` adds `IncomeAndNet` (the period's `period_income`, all spending and the net)
 while the switch shows income, and `AccountBalances`: every visible card and bank account
 (`services.accounts`, C1) with Plaid's cached balances, cash (bank accounts' current balances)
-and owed (cards' current balances: positive is owed, negative a credit, RESEARCH T2.7).
+and owed (cards' current balances: positive is owed, negative a credit, RESEARCH T2.7). An
+account Plaid no longer shares (`sync.no_longer_shared`, §8) is listed, marked, but left out of
+cash, owed and "as of": its balance is only the last one Plaid sent.
 `insights.trends(..., income=True)` adds `TrendsIncome`: income per income category per month,
 all income, and the net per month, with the same months, statuses and complete-month averages as
 spending. An income figure's link lists every income category's rows for its dates
@@ -575,11 +582,13 @@ tries the `|bank` mappings first (section 5): `INCOME_SALARY` (and PFC v1's `INC
 Paycheck; `INCOME_INTEREST_EARNED` and `INCOME_DIVIDENDS` → Interest; every other `INCOME` code
 → Other Income; `TRANSFER_IN` and `TRANSFER_OUT` codes → Transfers, except
 `TRANSFER_OUT_WITHDRAWAL` (ATM and cash) → Cash & ATM (spending);
-`LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, positive on the bank side, → Card Payments, so paying the
-card from checking is never spending and never counted twice; any other loan payment is spending
-(the car, mortgage, student loan, personal loan and buy-now-pay-later codes keep their card
-category, Transportation, Home, Education, Utilities & Bills and Shopping; `LOAN_PAYMENTS` and its
-other codes → Other); and money a lender deposits (`LOAN_DISBURSEMENTS` codes) → Transfers,
+`LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, positive on the bank side, → Card Payments, so a card
+payment from checking that Plaid codes this way is never spending and never counts the card's
+charges twice (one coded `TRANSFER_OUT_*` lands in Transfers, not spending either, but rules
+apply to it; which code Plaid gives such a payment is unverified); any other loan payment is
+spending (the car, mortgage, student loan, personal loan and buy-now-pay-later codes keep their
+card category, Transportation, Home, Education, Utilities & Bills and Shopping; `LOAN_PAYMENTS`
+and its other codes → Other); and money a lender deposits (`LOAN_DISBURSEMENTS` codes) → Transfers,
 neither income nor spending. The cards' mappings of these codes are card-sided (on a card, money
 in under a loan code is the card's payment, Card Payments, and a cash advance is spending), so
 every loan code has a bank key and no bank row reaches them. Every other code maps as for cards,
@@ -677,12 +686,13 @@ rows or completed Plaid's history, after every CSV import and after attaching a 
   reported values winning), re-points `app_settings.budget_cycle_account_id` when it names the
   manual account (its ON DELETE SET NULL would otherwise silently turn statement-cycle budgets
   into calendar months), copies `statement_closing_day` and `notice` when the Plaid account has
-  none, deletes the manual account, then runs the full pass. Linking calls it when exactly one
-  manual account and one credit account exist; otherwise the Connection page asks. An Amex CSV
-  file only goes to an American Express card: a linked credit account of an Amex Item
-  (`ins_10`) or the manual account, never a bank account or another bank's card. Once a
-  production Amex Item exists, CSV import may only target its linked cards (an Item at another
-  bank doesn't block the manual account).
+  none, deletes the manual account, then runs the full pass. It accepts only a linked American
+  Express card, and so do the import targets, the attach offers and attaching after linking: one
+  rule, `status.is_amex_card` (a credit account of an American Express Item, `status.is_amex`),
+  so an Amex CSV file never goes to a bank account or another bank's card. Linking calls it when
+  exactly one manual account and one linked Amex card exist (BANK-8); otherwise the Connection
+  page asks. Once a production Amex Item exists, CSV import may only target its linked cards (an
+  Item at another bank doesn't block the manual account).
 
 ### Locks (REL-1)
 - **Sync lock** (per Item): `pg_try_advisory_lock` on a dedicated connection held for the whole
@@ -1052,8 +1062,10 @@ that called it.
   healthy, then renamed, so the next occurrence alerts); stale data after 36 h once a day (folded
   into a failure or reconnect alert sent in the same run); Keychain approval needed and a
   Keychain item missing (marker files).
-- **Consent (SYNC-6):** renewal due within `consent_reminder_days`, once per due date; not while
-  the Item needs reconnecting (update mode renews the consent too).
+- **Consent (SYNC-6, BANK-6):** renewal due within `consent_reminder_days`, once per due date,
+  for a connection that has a due date (Plaid's, or American Express's 12-month estimate, §8); not
+  while the Item needs reconnecting (update mode renews the consent too). Titles and messages name
+  the connection.
 - **Large charges (ALR-3):** only Plaid rows inserted by a sync for more than
   `large_charge_threshold` whose category is spending (`kind = 'expense'`) after categorization,
   on any account (paying the card from checking, a transfer or a paycheck never alerts), dated
@@ -1085,7 +1097,15 @@ that called it.
   with `/transactions/refresh` for pending → posted. They produce the Gate A evidence. Plaid posts
   a pending charge only on a refresh on or after its posting date, which is still ahead for an
   Item created that day, so the pending → posted test then skips and says why; the fake-Plaid
-  tests cover the carry-over. Tests never drive the Link UI.
+  tests cover the carry-over. Wave 3 (BANK-9) adds a First Platypus Bank login (Sandbox user
+  `bank`) that syncs checking, savings and its credit card, a bank-only login with no
+  statement-details warning, and the same bank linked again, refused before the exchange. Tests
+  never drive the Link UI.
+- Wave-3 integration: `tests/test_w3_upgrade.py` rehearses the owner's upgrade on a scratch
+  database (a customized v1 install at `0003_f1_verification_fixes` with the v1 Keychain token:
+  upgrade, every page, the figures before and after, the token's move, downgrade and upgrade
+  again); `tests/test_w3_seams.py` and `tests/web/test_w3_seams.py` pin the seams between the
+  wave-3 packages.
 
 ## 13. Toward a mobile app
 

@@ -34,11 +34,12 @@ The same rules apply on every page and in every alert:
   Rewards") never count as spending.
 - **Bank accounts count the same way.** Rent, debit-card purchases, loan payments (a car,
   mortgage or student loan) and ATM withdrawals ("Cash & ATM") from checking are spending; paying
-  your card from checking is a card payment, so the money counts once, as the card's charges;
-  moving money between your own accounts, or money a lender puts in your account ("Transfers"), is
-  neither spending nor income; paychecks, interest and other money coming in go to "Paycheck",
-  "Interest" and "Other Income".
-- **A budget period** is a calendar month, or your Amex statement cycle if you choose that in
+  your card from checking is a card payment when Plaid marks it as one (else usually a transfer),
+  so the money counts once, as the card's charges; moving money between your own accounts, or
+  money a lender puts in your account ("Transfers"), is neither spending nor income; paychecks,
+  interest and other money coming in go to "Paycheck", "Interest" and "Other Income". A
+  transaction's details say how it counts (**Counts as**).
+- **A budget period** is a calendar month, or a card's statement cycle if you choose that in
   [Settings](#settings).
 - **Which date counts:** in calendar-month mode, the day you made the charge; in statement-cycle
   mode, the day it posted, exactly as on your statement.
@@ -74,8 +75,9 @@ it open those pages.
   accounts with their balance (and, under it, the available balance when the bank sends one),
   their balances added up as **Cash**, and cards with what you owe, added up as **Owed on
   cards** (a negative balance is a credit in your favour; an overdrawn bank account shows in
-  red). An account imported from a CSV file has no balance. Each name opens that account's
-  transactions.
+  red). An account imported from a CSV file has no balance. An account Plaid no longer shares
+  (see [Connection](#connection)) keeps the last balance Plaid sent, marked "no longer shared", and
+  is left out of **Cash** and **Owed on cards**. Each name opens that account's transactions.
 - **Budgets:** your six most-used monthly budgets with what is left; **All budgets** opens the
   Budgets page.
 - **Top categories:** where the money went this period, with each category's share (hidden
@@ -102,8 +104,8 @@ Every charge, refund, credit, payment and transfer on your cards and bank accoun
 
 **Finding things**
 
-- **Search** looks in the description, the merchant, Amex's original description, your notes and
-  tags, and amounts.
+- **Search** looks in the description, the merchant, the original description (as the bank or an
+  Amex CSV file gave it), your notes and tags, and amounts.
 - **Dates:** All dates, This month (or **This statement period** in statement-cycle mode, by
   posting date, matching the Budgets page), Last month, Last 90 days, This year, or a custom range.
 - **Categories:** one or several; **Status:** pending or posted; **More filters:** merchant, an
@@ -220,8 +222,8 @@ years for yearly ones).
 
 ## Statements
 
-One row per statement period of your card, checked against Amex to the cent. With more than one
-card, each has its own tab. Checking and savings accounts have no statements here, and the
+One row per statement period of your card, checked against the printed statement to the cent.
+With more than one card, each has its own tab. Checking and savings accounts have no statements here, and the
 **Card whose statement cycle sets the periods** in [Settings](#settings) is always a card.
 
 - A period runs from the day after one closing date to the next closing date. A transaction
@@ -229,18 +231,19 @@ card, each has its own tab. Checking and savings accounts have no statements her
   dated on the closing date belong to that statement.
 - **Status:** "Open" for the current period; "Final" a few days after the closing date (the
   "Days a statement settles" setting, 3 by default), once late charges have posted.
-- **Check:** "Matches" when the app's activity equals the change in Amex's New Balance to the
-  cent; "Off by $…" otherwise. The New Balance comes from Amex through Plaid, or from you.
-- Open a period for its **Summary**, laid out like the box at the top of your Amex statement
+- **Check:** "Matches" when the app's activity equals the change in the statement's New Balance
+  to the cent; "Off by $…" otherwise. The New Balance comes from the card company through Plaid,
+  or from you.
+- Open a period for its **Summary**, laid out like the summary box at the top of your statement
   (Previous Balance, Payments/Credits, New Charges, Fees, Interest Charged, New Balance), with the
   app's number, the statement's and the difference. Type the numbers from your PDF statement under
   **Your statement** and **Save statement**; **Mark as checked** records that you compared them.
 - **Near the closing dates** lists the transactions posted within 3 days of each end of the
   period: a charge on the wrong side of a closing date is the usual cause of a difference.
-- **Closing dates** come from Amex through Plaid. Before that, they are estimated from the card's
-  closing day (set it in [Settings](#settings)) and marked "estimated". **Add a statement** adds
-  one by the closing date printed on it; **Remove statement** removes one added by mistake; and
-  moving a mistyped date onto Amex's date combines the two.
+- **Closing dates** come from the card company through Plaid. Before that, they are estimated
+  from the card's closing day (set it in [Settings](#settings)) and marked "estimated". **Add a
+  statement** adds one by the closing date printed on it; **Remove statement** removes one added by
+  mistake; and moving a mistyped date onto the card company's date combines the two.
 - **Print** gives a clean printout of a statement page.
 
 ## Categories
@@ -292,10 +295,10 @@ Charges no rule matches go by Plaid's or Amex's category (above).
 - **Move up** and **Move down** change the order; the switch turns a rule off (it is kept but
   categorizes nothing); **Edit** and **Delete** do what they say.
 - Rules never touch two things: card payments, and a category you set yourself on a transaction.
-  A payment on your card always goes to Card Payments, and paying your card from checking goes
-  where its **Bank accounts** row on the Plaid & Amex categories tab says (Card Payments), so no
-  rule can count it as spending. Otherwise your rules come first on a bank account too, so a rule
-  can, for example, turn a regular transfer into income.
+  A payment on your card always goes to Card Payments, and a payment from checking that Plaid
+  marks as a card payment goes where its **Bank accounts** row on the Plaid & Amex categories tab
+  says (Card Payments), so no rule can count it as spending. Otherwise your rules come first on a
+  bank account too, so a rule can, for example, turn a regular transfer into income.
 
 **Re-apply rules to past transactions** runs card payments, your rules and the category mappings
 again on every past transaction, all of them, since a date, or only Uncategorized ones. **Preview
@@ -339,9 +342,10 @@ file itself is read in memory and never saved.
   **Delete**. Rows marked "pending in Plaid" match a charge that hasn't posted yet and merge on
   their own once it posts. A row you delete is held again if you import its file again.
 - **Past imports** lists every file with what it added.
-- Before you link, imported rows go to an account named "American Express (CSV)". Linking moves
-  them onto your card ([Going live](going-live.md#5-import-older-history)). Linking a bank account
-  first changes nothing here: only a linked Amex card takes over.
+- Before you link, imported rows go to an account named "American Express (CSV)". Linking
+  American Express moves them onto your Amex card
+  ([Going live](going-live.md#5-import-older-history)). Linking a bank account first changes
+  nothing here: only a linked Amex card takes over.
 
 From Terminal, the same preview and import:
 
@@ -387,11 +391,12 @@ linked).
 - **Budget period:** calendar month or statement cycle, and the card whose cycle sets the periods;
   **Count pending charges in budgets**.
 - **Statements:** each card's **statement closing day** (the day of the month printed on your
-  statement; dates from Amex come first when known) and **Days a statement settles** (0–14,
-  default 3).
+  statement; dates the card company sends through Plaid come first when known) and **Days a
+  statement settles** (0–14, default 3).
 - **Alerts:** budget alerts and their percentages (default 80, 100), sync problem alerts, an
-  optional large-charge amount, and how many days before the yearly consent runs out to start
-  reminding you (default 30). See [Alerts and notifications](alerts.md).
+  optional large-charge amount, and how many days before a connection's consent runs out to start
+  reminding you (default 30; American Express asks once a year). See
+  [Alerts and notifications](alerts.md).
 - **Mac notifications:** **Send test notification** and the one-time Script Editor permission.
 - **This app:** the environment, database, data folder, logs and backups folders, and the version.
 

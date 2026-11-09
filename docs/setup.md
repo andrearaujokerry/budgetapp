@@ -229,10 +229,11 @@ Plaid keys or a link. It needs only the app's database server: run `./run setup`
 
 - A demo is its own database (`budgetapp_test_demo_try`) in the app's PostgreSQL server. It never
   touches your Sandbox or real data, Keychain or Plaid, and sends no notifications.
-- It holds a linked Amex card with about 2,500 transactions over two years and a made-up bank
-  login with checking and savings, budgets (with rollover, annual budgets and an overall target),
-  statements (one deliberately off by $0.01), recurring charges, rules, CSV rows held for review
-  and a consent renewal due soon.
+- It holds a linked Amex card with about 2,500 transactions over two years and a made-up bank,
+  Harbor Bank, with checking and savings (paychecks every other Friday, rent, an ATM withdrawal,
+  transfers to savings, savings interest, and each card payment's other side on checking), budgets
+  (with rollover, annual budgets and an overall target), statements (one deliberately off by
+  $0.01), recurring charges, rules, CSV rows held for review and an Amex consent renewal due soon.
 - Linking, syncing and renewing are turned off; the Connection page says so.
 - Names use `a-z`, `0-9` and `_`, up to 20 characters. `--seed N` gives different data of the
   same shape, and `--today YYYY-MM-DD` pretends today is another date. The same seed and date

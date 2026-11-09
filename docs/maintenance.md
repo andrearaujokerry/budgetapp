@@ -28,7 +28,7 @@ skip, so backups stay about a day apart. To back up by hand:
   day) and `./run doctor --env production` reports it. The sync agent checks too, so you also hear
   about it when the backup agent itself stops running.
 - Backups hold the database only. Your keys and each connection's access token stay in Keychain;
-  keep a copy of each token in your password manager ([Going live](going-live.md#keep-a-copy-of-the-access-token-recommended)).
+  keep a copy of each token in your password manager ([Going live](going-live.md#keep-a-copy-of-each-access-token-recommended)).
 
 ### Time Machine and copies elsewhere
 

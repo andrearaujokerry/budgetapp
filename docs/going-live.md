@@ -212,7 +212,7 @@ recovery file (store it with `./run setup --env production --access-token`, then
 token in Keychain whose connection this database doesn't show (re-attach it first, so the app
 knows which bank it is), or all 10 connections used.
 
-### Keep a copy of the access token (recommended)
+### Keep a copy of each access token (recommended)
 
 Each connection's access token in Keychain is that connection. If one is ever lost, the only way
 back without using another connection is a copy. Once, after each link: on the Connection page,
@@ -268,6 +268,13 @@ bank or card** button.
 - Each connection has its own Keychain item, its own status pill, its own Reconnect and Renew
   buttons and its own entry in `./run doctor --env production`; a problem with one never stops
   the others from syncing.
+- **After your first bank account syncs, check how its money is filed.** Your rules apply to bank
+  rows too (all but a card payment Plaid marks as one), and each rule's preview on the Rules page
+  lists the bank rows it matches. Rent from checking goes to Home, Plaid's rent category, so a
+  Home budget sized for card purchases fills up at once: a Rent category of your own and a rule on
+  your landlord's name keep the two apart. A large-charge alert amount now covers spending from
+  checking too, so rent above it alerts every month. Paychecks, interest and other money in show
+  as income on the Dashboard and Trends ([Using the app](using-the-app.md#dashboard)).
 
 ## Upgrading the live app
 

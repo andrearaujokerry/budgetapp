@@ -2,8 +2,8 @@
 
 A personal budget app for your credit cards and bank accounts. It runs only on your Mac and opens
 in your browser. It pulls your transactions from your banks and card companies through Plaid,
-sorts them into categories, and shows budgets, trends, recurring charges and a statement check
-that matches your American Express statement to the cent.
+sorts them into categories, and shows budgets, income and spending trends, recurring charges and
+a statement check that matches each card statement to the cent.
 
 - **Read-only.** The app can read your accounts' transactions and balances, and your cards'
   statement details, and nothing else. No feature can pay, move money or change anything at your
@@ -14,11 +14,14 @@ that matches your American Express statement to the cent.
   Your data goes only between this Mac and Plaid. There are no analytics or trackers, and no
   fonts or scripts from the internet (the app's font ships with it); Plaid's own sign-in
   window on the Connection page is the one exception.
-- **Secrets in Keychain.** Plaid keys, the access tokens (one per bank you link) and the
+- **Secrets in Keychain.** Plaid keys, the access tokens (one per bank login you link) and the
   database passwords live in macOS Keychain, never in files, logs or git.
 - **Free to run.** Plaid's free Trial plan supplies the data.
-- **Exact.** Money is stored as exact decimals. Card payments never count as spending, also when
-  you pay a card from a linked checking account, and refunds count against their category.
+- **Exact.** Money is stored as exact decimals, and refunds count against their category. Card
+  payments never count as spending, and neither does paying a card from a linked checking account
+  when Plaid files that payment as a card payment (no rule changes it) or as a transfer (unless a
+  rule of yours moves it), so the card's charges count once. Each transaction's details say how
+  it counts.
 
 ## Quick start
 
