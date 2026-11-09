@@ -15,7 +15,11 @@ overall target, annual budgets, the pending setting), plus:
 * recurring charges expected before the period ends (``recurring.detect``);
 * the annual budgets of the year we are in (``budgets.annual_overviews``: a statement cycle
   across Dec 31 touches two years, and the Budgets page shows both);
-* how many imported rows are held for review (``csv_import.list_suspects``).
+* how many imported rows are held for review (``csv_import.list_suspects``);
+* with the "Show income" switch on (wave 3, INC-3): the period's income
+  (``spending.period_income``: the same basis and pending setting as ``period_spending``) and
+  net = income − all spending (``overview.spending.total``);
+* every visible account's balance, cash in bank accounts and owed on cards (INC-3).
 
 **Trends** (:func:`trends`): spending per expense category per CALENDAR month by ``spend_date``
 (``spending.monthly_spending``; the same pending setting as budgets, whatever the budget period
@@ -27,6 +31,13 @@ never set against a whole month (and only days the history covers: never days be
 Months before the first transaction have no data (``None``, not zero); the month the history
 starts in is partial. Averages count only complete months.
 Hidden categories are listed (marked) because their spending counts in every total.
+With ``income=True`` (the switch on, INC-4) Trends also carries income per income category per
+month (``spending.monthly_income``: the same months, basis and pending setting) and the net.
+
+**The switch** (:func:`income_switch`, :func:`set_show_income`, INC-2): ``app_settings.
+show_income``, on by default; it is offered once any money is booked to an income category.
+Until a bank account exists (:func:`has_bank_account`) the only income can be card credits, so
+the income figures carry ``cards_only`` and the pages say so next to the net.
 
 Services never commit.
 """
@@ -42,16 +53,19 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from budgetapp import clock, periods
-from budgetapp.models import Category, Transaction, get_app_settings, v_allocations
+from budgetapp.models import Account, Category, Transaction, get_app_settings, v_allocations
 from budgetapp.money import ZERO, to_money
 from budgetapp.periods import Period
-from budgetapp.services import budgets, csv_import, recurring, spending
+from budgetapp.services import accounts, budgets, csv_import, recurring, spending
 from budgetapp.services.budgets import AnnualOverview, BudgetOverview
 from budgetapp.services.recurring import RecurringSeries
 from budgetapp.services.spending import (
     BASIS_SPEND_DATE,
+    INCOME_KINDS,
+    CategoryIncome,
     CategorySpending,
     MerchantSpending,
+    PeriodIncome,
     basis_date,
 )
 
@@ -146,6 +160,137 @@ def has_transactions(session: Session) -> bool:
     return session.scalar(select(Transaction.id).limit(1)) is not None
 
 
+# --------------------------------------------------------------------------- income switch
+
+
+@dataclass(frozen=True, slots=True)
+class IncomeSwitch:
+    """The "Show income" switch of the Dashboard and Trends (INC-2).
+
+    ``available``: some counted money is booked to an income category (the switch is offered
+    only then); ``on``: the saved choice (``app_settings.show_income``, on by default). Income is
+    shown when both hold.
+    """
+
+    available: bool
+    on: bool
+
+    @property
+    def showing(self) -> bool:
+        return self.available and self.on
+
+
+def has_income(session: Session) -> bool:
+    """Whether any counted allocation (any account, any date) is in an income-kind category."""
+    query = (
+        select(v_allocations.c.transaction_id)
+        .join(Category, Category.id == v_allocations.c.category_id)
+        .where(Category.kind.in_(INCOME_KINDS))
+        .limit(1)
+    )
+    return session.scalar(query) is not None
+
+
+def income_switch(session: Session) -> IncomeSwitch:
+    """The switch as the pages show it."""
+    return IncomeSwitch(has_income(session), get_app_settings(session).show_income)
+
+
+def set_show_income(session: Session, on: bool) -> IncomeSwitch:
+    """Save the switch for every page and visit (the route commits)."""
+    get_app_settings(session).show_income = on
+    session.flush()
+    return income_switch(session)
+
+
+def has_bank_account(session: Session) -> bool:
+    """Whether any bank account exists, hidden ones included (a hidden account's money still
+    counts). Without one, the only income can be card credits (Credits & Rewards): with only
+    the card linked, Net is close to minus all spending, and the pages say why."""
+    return bool(accounts.bank_accounts(session, include_hidden=True))
+
+
+# --------------------------------------------------------------------------- accounts
+
+
+@dataclass(frozen=True, slots=True)
+class AccountBalance:
+    """One account on the Dashboard's Accounts card, with Plaid's cached balances (SYNC-7).
+
+    For a card ``current`` is the balance owed: positive means owed, negative that the card owes
+    you (RESEARCH T2.7). For a bank account it is the balance Plaid reports and ``available``
+    what the bank says can be used. Both are ``None`` until Plaid has sent them, and always for
+    an account imported from a CSV file (``is_manual``).
+    """
+
+    id: int
+    name: str
+    mask: str | None
+    institution: str | None
+    subtype: str | None
+    is_card: bool
+    is_manual: bool
+    current: Decimal | None
+    available: Decimal | None
+    as_of: dt.datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class AccountBalances:
+    """Every visible card and bank account (``services.accounts``, oldest first), with ``cash``
+    (the bank accounts' balances added up) and ``owed`` (the cards' balances added up); accounts
+    without a balance add nothing and are counted in ``*_without_balance``. ``as_of`` is the
+    oldest balance date shown (``None`` when none has one)."""
+
+    banks: tuple[AccountBalance, ...] = ()
+    cards: tuple[AccountBalance, ...] = ()
+    cash: Decimal = ZERO
+    owed: Decimal = ZERO
+    as_of: dt.datetime | None = None
+
+    @property
+    def any(self) -> bool:
+        return bool(self.banks or self.cards)
+
+    @property
+    def banks_without_balance(self) -> int:
+        return sum(1 for a in self.banks if a.current is None)
+
+    @property
+    def cards_without_balance(self) -> int:
+        return sum(1 for a in self.cards if a.current is None)
+
+
+def _balance(account: Account, *, is_card: bool) -> AccountBalance:
+    item = account.item
+    return AccountBalance(
+        id=account.id,
+        name=account.name or account.official_name or ("Card" if is_card else "Account"),
+        mask=account.mask,
+        institution=item.institution_name if item is not None else None,
+        subtype=account.subtype,
+        is_card=is_card,
+        is_manual=account.is_manual,
+        current=account.current_balance,
+        available=account.available_balance,
+        as_of=account.balances_as_of,
+    )
+
+
+def account_balances(session: Session) -> AccountBalances:
+    """The Dashboard's Accounts card (INC-3): visible bank accounts, then visible cards."""
+    banks = tuple(_balance(a, is_card=False) for a in accounts.bank_accounts(session))
+    cards = tuple(_balance(a, is_card=True) for a in accounts.card_accounts(session))
+    dates = [a.as_of for a in (*banks, *cards) if a.as_of is not None]
+    return AccountBalances(
+        banks=banks,
+        cards=cards,
+        cash=to_money(sum((a.current for a in banks if a.current is not None), ZERO)),
+        owed=to_money(sum((a.current for a in cards if a.current is not None), ZERO)),
+        as_of=min(dates) if dates else None,
+    )
+
+
 # --------------------------------------------------------------------------- dashboard
 
 
@@ -212,12 +357,41 @@ class Upcoming:
 
 
 @dataclass(frozen=True, slots=True)
+class IncomeAndNet:
+    """The period's income and net (INC-3, ARCHITECTURE §6 "Income and net"). ``income`` is
+    ``spending.period_income`` (the period's date basis and pending setting), ``spent`` all
+    spending (``period_spending``'s total: annual-budget categories included) and
+    ``net = income − spent``: positive is money kept. ``cards_only``: no bank account exists
+    (:func:`has_bank_account`), so the income can only be card credits."""
+
+    income: PeriodIncome
+    spent: Decimal
+    net: Decimal
+    cards_only: bool = False
+
+    @property
+    def total(self) -> Decimal:
+        return self.income.total
+
+    @property
+    def largest(self) -> CategoryIncome | None:
+        return self.income.largest
+
+    @property
+    def category_ids(self) -> tuple[int, ...]:
+        """The income categories with money in the period (where its list finds the rows)."""
+        return tuple(sorted(row.category_id for row in self.income.categories))
+
+
+@dataclass(frozen=True, slots=True)
 class Dashboard:
     """Everything the Dashboard shows (INS-1). ``overview`` is the Budgets page's overview of the
     current period, so every budget figure matches that page. ``annual`` is the annual budgets
     of the year that contains ``today``, as the Budgets page tallies that year for this period
     (as of the period's end, or Dec 31 when the year ends inside it); ``annual_other`` holds the
-    other year a statement cycle across Dec 31 touches (usually empty)."""
+    other year a statement cycle across Dec 31 touches (usually empty). ``income`` is set while
+    the "Show income" switch shows income (``income_switch.showing``); ``accounts`` holds every
+    visible account's balance."""
 
     today: dt.date
     overview: BudgetOverview
@@ -229,6 +403,9 @@ class Dashboard:
     held_rows: int
     has_transactions: bool
     annual_other: tuple[AnnualOverview, ...] = ()
+    income_switch: IncomeSwitch = IncomeSwitch(available=False, on=True)
+    income: IncomeAndNet | None = None
+    accounts: AccountBalances = AccountBalances()
 
     @property
     def period(self) -> Period:
@@ -342,6 +519,16 @@ def dashboard(session: Session, *, today: dt.date | None = None) -> Dashboard:
     years = budgets.annual_overviews(session, period, today=today)
     annual = next((a for a in years if a.year == today.year), years[-1])
     first_day = history_start(session, ov.spending.basis)
+    switch = income_switch(session)
+    income = None
+    if switch.showing:
+        earned = spending.period_income(session, period)
+        income = IncomeAndNet(
+            earned,
+            ov.spending.total,
+            to_money(earned.total - ov.spending.total),
+            cards_only=not has_bank_account(session),
+        )
     return Dashboard(
         today=today,
         overview=ov,
@@ -355,6 +542,9 @@ def dashboard(session: Session, *, today: dt.date | None = None) -> Dashboard:
         upcoming=upcoming(session, period, today),
         held_rows=len(csv_import.list_suspects(session)),
         has_transactions=has_transactions(session),
+        income_switch=switch,
+        income=income,
+        accounts=account_balances(session),
     )
 
 
@@ -406,6 +596,52 @@ class CategoryTrend:
 
 
 @dataclass(frozen=True, slots=True)
+class IncomeLine:
+    """Income over the months of :class:`Trends` (``amounts[i]`` is ``months[i]``; ``None``
+    before the history): one income category, or all income (``category=None``). ``average``
+    counts complete months only, like spending's."""
+
+    category: CategoryRef | None
+    amounts: tuple[Decimal | None, ...]
+    counts: tuple[int, ...]
+    total: Decimal
+    average: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class TrendsIncome:
+    """Income and net per calendar month next to the spending of :class:`Trends` (INC-4): the
+    same months, purchase-date basis and pending setting (``spending.monthly_income``).
+
+    ``categories``: every income category with money in range, largest total first (Credits &
+    Rewards is one of them, its own line); ``totals``: all income; ``net[i]`` is
+    ``totals.amounts[i]`` minus the month's spending (``None`` before the history), positive
+    when money was kept. ``change`` is the income of :attr:`Trends.compare` against the month
+    before (``None`` without a comparison). ``cards_only``: no bank account exists
+    (:func:`has_bank_account`), so the income can only be card credits.
+    """
+
+    categories: tuple[IncomeLine, ...]
+    totals: IncomeLine
+    net: tuple[Decimal | None, ...]
+    net_total: Decimal
+    net_average: Decimal | None
+    change: Change | None
+    cards_only: bool = False
+
+    @property
+    def category_ids(self) -> tuple[int, ...]:
+        """The income categories in range (where an "All income" link finds its rows)."""
+        return tuple(sorted(line.category.id for line in self.categories if line.category))
+
+    def largest_in(self, index: int) -> IncomeLine | None:
+        """The income category that brought in the most in ``months[index]`` (``None`` when
+        none brought anything in)."""
+        lines = [line for line in self.categories if (line.amounts[index] or ZERO) > 0]
+        return max(lines, key=lambda line: line.amounts[index]) if lines else None
+
+
+@dataclass(frozen=True, slots=True)
 class ChartSeries:
     """A series of the Trends chart: a category, or ``category=None`` for "Other"."""
 
@@ -451,6 +687,8 @@ class Trends:
     selected_ref: CategoryRef | None = None
     #: Months before the history were left out, so fewer than ``span`` months are shown.
     trimmed: bool = False
+    #: Income and net per month, when asked for (``trends(..., income=True)``).
+    income: TrendsIncome | None = None
 
     @property
     def has_data(self) -> bool:
@@ -556,11 +794,13 @@ def trends(
     span: int = DEFAULT_SPAN,
     category_id: int | None = None,
     today: dt.date | None = None,
+    income: bool = False,
 ) -> Trends:
     """Trends for ``span`` calendar months ending with the month of ``through`` (default: this
     month; a later month is pulled back to this month). ``category_id`` selects one category
     (``Trends.selected``; ``None`` when it has no spending in range or isn't a spending
-    category). See the module docstring.
+    category). ``income`` adds :class:`TrendsIncome` (the "Show income" switch). See the module
+    docstring.
     """
     today = today or clock.today()
     if span not in SPANS:
@@ -682,6 +922,21 @@ def trends(
         else:
             selected_ref = selected.category
 
+    earned = None
+    if income:
+        months_income = spending.monthly_income(
+            session, all_months[0].start, all_months[-1].end, include_pending=include_pending
+        )
+        earned = _trends_income(
+            months_income,
+            statuses,
+            shown,
+            complete,
+            compare_index,
+            totals.amounts,
+            cards_only=not has_bank_account(session),
+        )
+
     return Trends(
         today=today,
         span=span,
@@ -702,6 +957,76 @@ def trends(
         selected=selected,
         selected_ref=selected_ref,
         trimmed=start > 1,
+        income=earned,
+    )
+
+
+def _trends_income(
+    data: Sequence[spending.MonthIncome],
+    statuses: Sequence[str],
+    shown: range,
+    complete: Sequence[int],
+    compare_index: int | None,
+    spent: Sequence[Decimal | None],
+    *,
+    cards_only: bool,
+) -> TrendsIncome:
+    """:class:`TrendsIncome` from :func:`spending.monthly_income` of the same months as the
+    spending (``data[i]`` and ``statuses[i]`` are the month before the range when ``i`` is 0;
+    ``shown`` the months in range; ``spent`` the spending totals of the ``shown`` months)."""
+
+    def amount(month_index: int, category_id: int | None) -> Decimal | None:
+        if statuses[month_index] == BEFORE:
+            return None
+        month = data[month_index]
+        return month.total if category_id is None else month.amount_for(category_id)
+
+    refs: dict[int, CategoryRef] = {}
+    totals_by_id: dict[int, Decimal] = {}
+    for i in shown:
+        for row in data[i].categories:
+            refs.setdefault(
+                row.category_id,
+                CategoryRef(row.category_id, row.name, row.color, row.icon, row.is_hidden),
+            )
+            totals_by_id[row.category_id] = totals_by_id.get(row.category_id, ZERO) + row.amount
+
+    def line(category: CategoryRef | None) -> IncomeLine:
+        cid = category.id if category is not None else None
+        amounts = tuple(amount(i, cid) for i in shown)
+        counts = tuple(
+            sum(r.transaction_count for r in data[i].categories)
+            if cid is None
+            else next((r.transaction_count for r in data[i].categories if r.category_id == cid), 0)
+            for i in shown
+        )
+        return IncomeLine(
+            category=category,
+            amounts=amounts,
+            counts=counts,
+            total=to_money(sum((a or ZERO for a in amounts), ZERO)),
+            average=_average(amount(i, cid) or ZERO for i in complete),
+        )
+
+    ordered = sorted(refs.values(), key=lambda r: (-totals_by_id[r.id], r.name.casefold()))
+    totals = line(None)
+    net = tuple(
+        None if earned is None or out is None else to_money(earned - out)
+        for earned, out in zip(totals.amounts, spent, strict=True)
+    )
+    position = {month_index: n for n, month_index in enumerate(shown)}
+    return TrendsIncome(
+        categories=tuple(line(ref) for ref in ordered),
+        totals=totals,
+        net=net,
+        net_total=to_money(sum((n or ZERO for n in net), ZERO)),
+        net_average=_average(net[position[i]] or ZERO for i in complete),
+        change=(
+            change(amount(compare_index, None), amount(compare_index - 1, None))
+            if compare_index is not None
+            else None
+        ),
+        cards_only=cards_only,
     )
 
 

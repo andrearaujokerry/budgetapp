@@ -20,7 +20,7 @@ from tests.factories import make_account, make_item
 
 VERSIONS = Path(__file__).parent.parent / "budgetapp/migrations/versions"
 MIGRATION_2 = VERSIONS / "0002_seed_defaults.py"
-HEAD = "0005_bank_categories"
+HEAD = "0006_income_preference"
 #: The categories migration 0002 seeds and 0003 recolours; 0005 adds the bank ones (BANK_PALETTE).
 SEEDED = 19
 

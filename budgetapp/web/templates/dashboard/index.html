@@ -1,7 +1,10 @@
 {#- Dashboard (INS-1): the current budget period. Every budget figure is the Budgets page's
-    (budgets.overview of the same period); see routes/dashboard.py. -#}
+    (budgets.overview of the same period); see routes/dashboard.py. With income to show, the
+    "Show income" switch (INC-2) adds the Income and Net tiles; the Accounts card (INC-3) shows
+    whenever an account exists. -#}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
+{% import "dashboard/_income_switch.html" as income %}
 {% block title %}Dashboard{% endblock %}
 {% block charts %}{% if d.has_transactions %}yes{% endif %}{% endblock %}
 {% block head %}<link rel="stylesheet" href="/static/css/pages/dashboard.css">{% endblock %}
@@ -9,6 +12,9 @@
 {%- set subtitle = words.heading ~ ' · ' ~ (ov.days_left|pluralize('day')) ~ ' left' if d.has_transactions else 'Spending against your budgets, at a glance.' -%}
 {% call ui.page_header("Dashboard", subtitle) %}
 {%- if d.has_transactions %}
+{%- if d.income_switch.available %}
+{{ income.switch(switch_path, d.income_switch.on, '#dash-kpis') }}
+{%- endif %}
 {{ ui.button('Budgets', href='/budgets', icon='target', size='sm', id='dash-open-budgets') }}
 {{ ui.button('Trends', href='/trends', icon='trending', size='sm', id='dash-open-trends') }}
 {%- endif %}
@@ -26,8 +32,15 @@
 
 {%- if not d.has_transactions %}
 {% include "dashboard/_empty.html" %}
+{%- if d.accounts.any %}
+{% include "dashboard/_accounts.html" %}
+{%- endif %}
 {%- else %}
 {% include "dashboard/_kpis.html" %}
+
+{%- if d.accounts.any %}
+{% include "dashboard/_accounts.html" %}
+{%- endif %}
 
 <div class="grid grid--2 dash-grid">
 {% include "dashboard/_budgets.html" %}

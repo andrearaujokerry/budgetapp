@@ -1,16 +1,42 @@
 {#- The headline tiles: spent against budget and remaining (the Budgets page's overall card:
     ov.overall), days left, and all spending so far against the same day of the previous
     period (d.pace, like the pace chart: annual-budget categories included, so the tile says
-    "all spending" next to a Spent figure that may leave them out). -#}
+    "all spending" next to a Spent figure that may leave them out).
+    With the "Show income" switch on (d.income, INC-3) the first row reads Spent, Income and
+    Net (income − all spending: positive is money kept), then Remaining, Days left and the
+    comparison. With no bank account (inc.cards_only) the only income is card credits, so the
+    Net tile says so and links to Connection. The switch's HTMX response is this partial alone
+    (#dash-kpis). -#}
 {%- import "components/ui.html" as ui -%}
+{%- import "dashboard/_income_switch.html" as income -%}
 {%- set o = ov.overall -%}
 {%- set p = d.pace -%}
-<div class="grid grid--4 dash-kpis" id="dash-kpis">
+{%- set inc = d.income -%}
+<div class="grid {{ 'grid--3' if inc else 'grid--4' }} dash-kpis" id="dash-kpis">
 {%- if o.budget is not none %}
 {%- set spent_sub = 'of ' ~ ui.money_text(o.budget, cents=false) ~ (' target' if o.has_target else ' budgeted') %}
 {% call ui.stat('Spent', ui.money(o.spent, cents=false), sub=spent_sub, tone=o.status if o.status in ['warn', 'over'] else none, icon='credit-card', id='kpi-spent') %}
 {%- if o.percent_used is not none %}{{ ui.progress(o.percent_used, pace_pct=o.pace_percent, status=o.status, show_pct=false, size='sm', name=('Overall target used' if o.has_target else 'Monthly budgets used')) }}{% endif %}
 {% endcall %}
+{%- else %}
+{{ ui.stat('Spent', ui.money(ov.totals.spent, cents=false), sub='in all categories', icon='credit-card', id='kpi-spent') }}
+{%- endif %}
+{%- if inc %}
+{%- set top = inc.largest %}
+{%- if top and top.amount == inc.total %}{% set income_sub = 'all from ' ~ top.name %}
+{%- elif top %}{% set income_sub = 'largest: ' ~ top.name ~ ', ' ~ ui.money_text(top.amount, cents=false) %}
+{%- else %}{% set income_sub = 'nothing has come in this ' ~ words.unit %}{% endif %}
+{{ ui.stat('Income', ui.money(inc.total, cents=false), sub=income_sub, icon='download', href=income_href, id='kpi-income') }}
+{%- set net_sub = 'income ' ~ ui.money_text(inc.total, cents=false) ~ ' − all spending ' ~ ui.money_text(inc.spent, cents=false) %}
+{%- if inc.net > 0 %}{% set net_sub = 'kept: ' ~ net_sub %}{% elif inc.net < 0 %}{% set net_sub = 'more out than in: ' ~ net_sub %}{% endif %}
+{%- set net_value = ui.money(inc.net, signed=true, cents=false, tone='neutral') %}
+{%- if inc.cards_only %}
+{% call ui.stat('Net', net_value, sub=net_sub, icon='receipt', id='kpi-net') %}<p class="income-hint">{{ income.cards_only_hint() }}</p>{% endcall %}
+{%- else %}
+{{ ui.stat('Net', net_value, sub=net_sub, icon='receipt', id='kpi-net') }}
+{%- endif %}
+{%- endif %}
+{%- if o.budget is not none %}
 {%- if o.remaining < 0 %}
 {%- set remaining_sub = 'over ' ~ ('the target' if o.has_target else 'budget') %}
 {%- elif ov.days_left > 0 %}
@@ -20,7 +46,6 @@
 {%- endif %}
 {{ ui.stat('Remaining', ui.money(o.remaining, cents=false, tone='over' if o.remaining < 0 else 'neutral'), sub=remaining_sub, tone='over' if o.remaining < 0 else none, icon='target', id='kpi-remaining') }}
 {%- else %}
-{{ ui.stat('Spent', ui.money(ov.totals.spent, cents=false), sub='in all categories', icon='credit-card', id='kpi-spent') }}
 {{ ui.stat('Remaining', ui.money(none), sub='no budget set yet', icon='target', href='/budgets', id='kpi-remaining') }}
 {%- endif %}
 {{ ui.stat('Days left', (ov.days_left|string), sub='of ' ~ ov.period.days ~ ' · ' ~ words.ends, icon='calendar', id='kpi-days') }}

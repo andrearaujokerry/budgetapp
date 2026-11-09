@@ -14,6 +14,13 @@
 * Trends (:func:`monthly_spending`) always use calendar months by ``spend_date``.
 * :func:`daily_spending` splits a budget period into days on the same rules (the dashboard's
   pace chart); its days add up to :func:`period_spending`'s total.
+* **Income** (wave 3, ARCHITECTURE §6 "Income and net"): money in, booked to categories of kind
+  ``income`` from any account, as a POSITIVE number: ``−sum(v_allocations.amount)``. Each income
+  function mirrors its spending counterpart's date basis, pending setting and suspect handling
+  (:func:`period_income`/:func:`periods_income` ↔ :func:`period_spending`/
+  :func:`periods_spending`, :func:`monthly_income` ↔ :func:`monthly_spending`,
+  :func:`income_by_category` ↔ :func:`spending_by_category`), by running the same query with
+  ``kinds=("income",)``. Net = income − spending. Transfers (``transfer``) are neither.
 
 In the posting-date basis a pending row (no ``posted_date`` yet) is dated by its Plaid ``date``.
 """
@@ -35,6 +42,9 @@ from budgetapp.periods import Period, months_between
 BASIS_SPEND_DATE = "spend_date"
 BASIS_POSTED_DATE = "posted_date"
 BASES = (BASIS_SPEND_DATE, BASIS_POSTED_DATE)
+#: The category kinds that count as spending, and as income.
+SPENDING_KINDS = ("expense",)
+INCOME_KINDS = ("income",)
 
 
 def basis_for_mode(mode: str) -> str:
@@ -209,27 +219,8 @@ def periods_spending(
     settings = get_app_settings(session)
     basis = basis_for_mode(settings.budget_period_mode)
     include_pending = settings.include_pending_in_budgets
-    ordered = sorted({(p.start, p.end): p for p in periods}.values(), key=lambda p: p.start)
-    for before, after in zip(ordered, ordered[1:], strict=False):
-        if after.start <= before.end:
-            raise ValueError(f"budget periods overlap: {before.label} and {after.label}")
-    found: dict[int, list[CategorySpending]] = {}
-    if ordered:
-        day = basis_date(basis)
-        starts = [p.start for p in ordered]
-        ends = [p.end + dt.timedelta(days=1) for p in ordered]  # the day after each period
-        started = func.width_bucket(day, literal(starts, ARRAY(Date)))
-        ended = func.width_bucket(day, literal(ends, ARRAY(Date)))
-        conditions = _filters(starts[0], ordered[-1].end, basis, include_pending, ("expense",))
-        query = (
-            select(started.label("number"), *_category_columns())
-            .select_from(v_allocations)
-            .join(Category, Category.id == v_allocations.c.category_id)
-            .where(*conditions, ended < started)
-            .group_by(started, Category.id)
-        )
-        for r in session.execute(query):
-            found.setdefault(r.number, []).append(_category_spending(r))
+    ordered = _ordered_periods(periods)
+    found = _rows_by_period(session, ordered, basis, include_pending, SPENDING_KINDS)
     result = {}
     for number, period in enumerate(ordered, start=1):
         rows = sorted(found.get(number, ()), key=_largest_first)
@@ -238,6 +229,45 @@ def periods_spending(
             period, basis, include_pending, tuple(rows), total
         )
     return result
+
+
+def _ordered_periods(periods: Iterable[Period]) -> list[Period]:
+    """The distinct periods, oldest first; ``ValueError`` when two overlap."""
+    ordered = sorted({(p.start, p.end): p for p in periods}.values(), key=lambda p: p.start)
+    for before, after in zip(ordered, ordered[1:], strict=False):
+        if after.start <= before.end:
+            raise ValueError(f"budget periods overlap: {before.label} and {after.label}")
+    return ordered
+
+
+def _rows_by_period(
+    session: Session,
+    ordered: list[Period],
+    basis: str,
+    include_pending: bool,
+    kinds: Iterable[str],
+) -> dict[int, list[CategorySpending]]:
+    """Per-category sums of ``kinds`` in each of ``ordered`` (non-overlapping, oldest first),
+    keyed by the period's 1-based position; one query for all of them."""
+    found: dict[int, list[CategorySpending]] = {}
+    if not ordered:
+        return found
+    day = basis_date(basis)
+    starts = [p.start for p in ordered]
+    ends = [p.end + dt.timedelta(days=1) for p in ordered]  # the day after each period
+    started = func.width_bucket(day, literal(starts, ARRAY(Date)))
+    ended = func.width_bucket(day, literal(ends, ARRAY(Date)))
+    conditions = _filters(starts[0], ordered[-1].end, basis, include_pending, kinds)
+    query = (
+        select(started.label("number"), *_category_columns())
+        .select_from(v_allocations)
+        .join(Category, Category.id == v_allocations.c.category_id)
+        .where(*conditions, ended < started)
+        .group_by(started, Category.id)
+    )
+    for r in session.execute(query):
+        found.setdefault(r.number, []).append(_category_spending(r))
+    return found
 
 
 def monthly_spending(
@@ -399,3 +429,145 @@ def daily_spending(session: Session, period: Period) -> list[DaySpending]:
         )
         for i in range(period.days)
     ]
+
+
+# --------------------------------------------------------------------------- income (wave 3)
+
+
+@dataclass(frozen=True, slots=True)
+class CategoryIncome:
+    """Income in one category of kind ``income``, as a positive number.
+
+    ``amount = received − taken_back``: ``received`` is the money in (Plaid's negative amounts,
+    made positive) and ``taken_back`` any money out booked to the category (a reversed statement
+    credit, a returned deposit), so ``amount = −sum(v_allocations.amount)``.
+    """
+
+    category_id: int
+    name: str
+    color: str | None
+    icon: str | None
+    is_hidden: bool
+    amount: Decimal
+    received: Decimal
+    taken_back: Decimal
+    transaction_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodIncome:
+    """Income in a budget period, per income category (largest first) and in total, on the
+    same date basis and pending setting as :class:`PeriodSpending`."""
+
+    period: Period
+    basis: str
+    include_pending: bool
+    categories: tuple[CategoryIncome, ...]
+    total: Decimal
+
+    def amount_for(self, category_id: int) -> Decimal:
+        """Income in a category (``ZERO`` when it had none)."""
+        for row in self.categories:
+            if row.category_id == category_id:
+                return row.amount
+        return ZERO
+
+    @property
+    def largest(self) -> CategoryIncome | None:
+        """The category that brought in the most (``None`` when none brought anything in)."""
+        return next((row for row in self.categories if row.amount > 0), None)
+
+
+@dataclass(frozen=True, slots=True)
+class MonthIncome:
+    """One calendar month of :func:`monthly_income`."""
+
+    month: Period
+    categories: tuple[CategoryIncome, ...]
+    total: Decimal
+
+    def amount_for(self, category_id: int) -> Decimal:
+        for row in self.categories:
+            if row.category_id == category_id:
+                return row.amount
+        return ZERO
+
+
+def _income(row: CategorySpending) -> CategoryIncome:
+    """A :class:`CategorySpending` of an income category, signed as income."""
+    return CategoryIncome(
+        category_id=row.category_id,
+        name=row.name,
+        color=row.color,
+        icon=row.icon,
+        is_hidden=row.is_hidden,
+        amount=to_money(-row.amount),
+        received=to_money(-row.credits),
+        taken_back=to_money(row.charges),
+        transaction_count=row.transaction_count,
+    )
+
+
+def _income_rows(rows: Iterable[CategorySpending]) -> tuple[CategoryIncome, ...]:
+    """Income rows, largest first (ties by name)."""
+    return tuple(sorted((_income(r) for r in rows), key=lambda r: (-r.amount, r.name.casefold())))
+
+
+def _income_total(rows: Iterable[CategoryIncome]) -> Decimal:
+    return to_money(sum((row.amount for row in rows), Decimal("0")))
+
+
+def income_by_category(
+    session: Session, start: dt.date, end: dt.date, *, basis: str, include_pending: bool
+) -> list[CategoryIncome]:
+    """Income per income category between ``start`` and ``end`` (inclusive) on ``basis``:
+    :func:`spending_by_category` of the ``income`` kind, signed as income. Largest first."""
+    rows = spending_by_category(
+        session, start, end, basis=basis, include_pending=include_pending, kinds=INCOME_KINDS
+    )
+    return list(_income_rows(rows))
+
+
+def period_income(session: Session, period: Period) -> PeriodIncome:
+    """Income in a budget period, next to :func:`period_spending` (reads ``app_settings`` the
+    same way: the budget period mode's date basis and the pending setting)."""
+    return periods_income(session, (period,))[(period.start, period.end)]
+
+
+def periods_income(
+    session: Session, periods: Iterable[Period]
+) -> dict[tuple[dt.date, dt.date], PeriodIncome]:
+    """:func:`period_income` of several budget periods, read in one query, keyed by
+    ``(start, end)`` (the periods must not overlap), like :func:`periods_spending`."""
+    settings = get_app_settings(session)
+    basis = basis_for_mode(settings.budget_period_mode)
+    include_pending = settings.include_pending_in_budgets
+    ordered = _ordered_periods(periods)
+    found = _rows_by_period(session, ordered, basis, include_pending, INCOME_KINDS)
+    result = {}
+    for number, period in enumerate(ordered, start=1):
+        rows = _income_rows(found.get(number, ()))
+        result[(period.start, period.end)] = PeriodIncome(
+            period, basis, include_pending, rows, _income_total(rows)
+        )
+    return result
+
+
+def monthly_income(
+    session: Session,
+    first_month: dt.date,
+    last_month: dt.date,
+    *,
+    include_pending: bool | None = None,
+) -> list[MonthIncome]:
+    """Income per calendar month (by ``spend_date``) for every month from ``first_month`` to
+    ``last_month`` inclusive, oldest first, empty months included: :func:`monthly_spending` of
+    the ``income`` kind (the same pending default: the budgets' setting), signed as income."""
+    months = monthly_spending(
+        session, first_month, last_month, include_pending=include_pending, kinds=INCOME_KINDS
+    )
+    out = []
+    for month in months:
+        rows = _income_rows(month.categories)
+        out.append(MonthIncome(month.month, rows, _income_total(rows)))
+    return out

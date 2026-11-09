@@ -1,0 +1,54 @@
+{#- Accounts (INC-3): every visible account's balance, as Plaid last sent it (d.accounts).
+    Bank accounts first, added up as "Cash" (each with its available balance when Plaid sends
+    one), then cards, added up as "Owed on cards" (a negative balance is a credit in your
+    favour). An account without a balance (not synced yet, or imported from a CSV file) shows
+    "—" and adds nothing. Each name opens that account's transactions. -#}
+{%- import "components/ui.html" as ui -%}
+{%- set a = d.accounts -%}
+{%- macro account_row(acc) -%}
+<li class="dash-account" id="dash-account-{{ acc.id }}">
+<div class="dash-row">
+<a class="dash-row__name dash-link dash-account__name" href="/transactions?account={{ acc.id }}">{{ acc.name }}</a>
+<span class="dash-row__value">{{ ui.money(acc.current, tone=('over' if not acc.is_card and acc.current is not none and acc.current < 0 else none)) }}</span>
+</div>
+<div class="dash-account__meta text-sm muted">
+{%- if acc.institution %}{{ acc.institution }}{% elif acc.is_manual %}Imported from a CSV file{% endif %}{% if acc.mask %} ··{{ acc.mask }}{% endif %}
+{%- if acc.current is none %} · {{ 'no balance' if acc.is_manual else 'no balance yet' }}
+{%- elif acc.is_card and acc.current < 0 %} · a credit in your favour
+{%- elif not acc.is_card and acc.current < 0 %} · overdrawn
+{%- endif %}
+{%- if not acc.is_card and acc.available is not none %} · available {{ ui.money_text(acc.available) }}{% endif -%}
+</div>
+</li>
+{%- endmacro -%}
+{%- set subtitle = ('Balances as of ' ~ (a.as_of|relative_time)) if a.as_of else none -%}
+{% call ui.card('Accounts', subtitle=subtitle, id='dash-accounts') %}
+<div class="dash-accounts">
+{%- if a.banks %}
+<div class="dash-accounts__group" id="dash-accounts-banks" role="group" aria-labelledby="dash-accounts-cash">
+<div class="dash-accounts__head">
+<h3 class="dash-accounts__title" id="dash-accounts-cash">Cash</h3>
+<span class="dash-accounts__total">{{ ui.money(a.cash, tone='over' if a.cash < 0 else none) }}</span>
+</div>
+<ul class="dash-list dash-accounts__list">
+{%- for acc in a.banks %}
+{{ account_row(acc) }}
+{%- endfor %}
+</ul>
+</div>
+{%- endif %}
+{%- if a.cards %}
+<div class="dash-accounts__group" id="dash-accounts-cards" role="group" aria-labelledby="dash-accounts-owed">
+<div class="dash-accounts__head">
+<h3 class="dash-accounts__title" id="dash-accounts-owed">Owed on cards</h3>
+<span class="dash-accounts__total">{{ ui.money(a.owed) }}</span>
+</div>
+<ul class="dash-list dash-accounts__list">
+{%- for acc in a.cards %}
+{{ account_row(acc) }}
+{%- endfor %}
+</ul>
+</div>
+{%- endif %}
+</div>
+{% endcall %}
