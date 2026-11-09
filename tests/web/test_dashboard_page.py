@@ -12,8 +12,10 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from budgetapp.models import get_app_settings
 from budgetapp.services import budgets
 from tests.factories import (
+    card_payments,
     get_category,
     make_account,
     make_budget,
@@ -23,6 +25,7 @@ from tests.factories import (
     make_transaction,
     set_app_settings,
 )
+from tests.web.conftest import HTMX
 from tests.web.csp import csp_problems
 
 D = Decimal
@@ -81,8 +84,13 @@ def block(page: str, element_id: str) -> str:
 
 
 def kpis(page: str) -> str:
-    """The headline tiles' text."""
-    match = re.search(r'id="dash-kpis".*?(?=<div class="grid grid--2 dash-grid">)', page, re.S)
+    """The headline tiles' text (up to the Accounts card, or the cards when there is none)."""
+    match = re.search(
+        r'id="dash-kpis".*?(?=<section class="card" id="dash-accounts"|'
+        r'<div class="grid grid--2 dash-grid">)',
+        page,
+        re.S,
+    )
     assert match, "no tiles"
     return text_of(match.group(0))
 
@@ -465,3 +473,226 @@ def test_pace_chart_compares_with_the_same_day_last_month(client, cat, spend):
     assert "Compared with September −$70 all spending: $30 so far, $100 by Sep 15" in kpi
     described = text_of(block(page, "dash-pace-chart-desc"))
     assert "September: $100.00 by Sep 15, 2026, $300.00 in all." in described
+
+
+# --------------------------------------------------------------------------- income (wave 3)
+
+
+def income_category(db, name: str):
+    """An income category by name: MONEY's migration seeds Paycheck, Interest and Other Income
+    (W3-PLAN C2); without it the test creates the category."""
+    try:
+        category = get_category(db, name)
+    except LookupError:
+        category = make_category(db, name, kind="income", color="other")
+    assert category.kind == "income"
+    return category
+
+
+@pytest.fixture
+def checking(db):
+    bank = make_item(db, institution_id="ins_109508", institution_name="First Platypus Bank")
+    return make_account(db, bank, name="Plaid Checking", mask="0000", type="depository",
+                        subtype="checking", current_balance=D("3210.55"),
+                        available_balance=D("3180.55"))  # fmt: skip
+
+
+@pytest.fixture
+def paid(db, checking, groceries, cat, spend):
+    """October: two paychecks, an Amex credit, $250 of groceries and a $400 trip (annual)."""
+    paycheck = income_category(db, "Paycheck")
+    make_transaction(db, checking, amount="-2400.00", category=paycheck, date="2026-10-02",
+                     name="ACME PAYROLL")  # fmt: skip
+    make_transaction(db, checking, amount="-2400.00", category=paycheck, date="2026-10-09",
+                     name="ACME PAYROLL")  # fmt: skip
+    spend(cat("Credits & Rewards"), "-25.00", "2026-10-05", name="AMEX OFFER CREDIT")
+    travel = cat("Travel")
+    make_budget(db, travel, "6000.00", effective_from=day("2026-01-01"), period="annual")
+    spend(travel, "400.00", "2026-10-08")
+    # A card payment from checking: never spending, never income.
+    make_transaction(db, checking, amount="500.00", category=card_payments(db), date="2026-10-10",
+                     name="AMEX PAYMENT")  # fmt: skip
+    return paycheck
+
+
+def switch_form(page: str) -> str:
+    match = re.search(r'<form class="income-switch".*?</form>', page, re.S)
+    assert match, "no switch"
+    return match.group(0)
+
+
+class TestShowIncome:
+    def test_the_switch_appears_once_there_is_income(self, client, db, groceries, cat, spend):
+        page = client.get("/").text
+        assert "income-switch" not in page and 'id="kpi-income"' not in page
+        spend(cat("Credits & Rewards"), "-25.00", "2026-10-05")
+        page = client.get("/").text
+        form = switch_form(page)
+        assert 'method="post" action="/dashboard/show-income"' in form
+        assert 'hx-post="/dashboard/show-income"' in form and 'hx-trigger="change"' in form
+        assert 'hx-target="#dash-kpis"' in form and 'hx-swap="outerHTML"' in form
+        switch = re.search(r'<input class="switch"[^>]*>', form).group(0)
+        assert 'role="switch"' in switch and 'id="show-income"' in switch
+        assert 'name="show_income"' in switch and "checked" in switch  # on by default
+        assert '<label class="check income-switch__control" for="show-income">' in form
+        assert "Show income" in text_of(form)
+        assert '<noscript><button class="btn btn--sm" type="submit">Save</button></noscript>' in (
+            form
+        )  # works without JavaScript
+        assert 'id="kpi-income"' in page and 'id="kpi-net"' in page
+        assert csp_problems(page, rendered=True) == []
+
+    def test_income_and_net_tiles(self, client, db, paid, checking, cat):
+        response = client.get("/")
+        page = response.text
+        assert '<div class="grid grid--3 dash-kpis" id="dash-kpis">' in page
+        tiles = kpis(page)
+        # Spent is the target's or budgets' figure; Net counts all spending (the trip too).
+        assert "Spent $250 of $500 budgeted" in tiles
+        assert "Income $4,825 largest: Paycheck, $4,800" in tiles
+        assert "Net +$4,175 kept: income $4,825 − all spending $650" in tiles
+        order = re.findall(r'id="(kpi-[a-z]+)"', page)
+        assert order == ["kpi-spent", "kpi-income", "kpi-net", "kpi-remaining", "kpi-days",
+                         "kpi-compare"]  # fmt: skip
+        d = response.context["d"]
+        assert (d.income.total, d.income.net) == (D("4825.00"), D("4175.00"))
+        assert csp_problems(page, rendered=True) == []
+
+    def test_the_income_tile_lists_what_it_counts(self, client, db, paid, cat):
+        page = client.get("/").text
+        tile = re.search(r'<a class="stat" href="([^"]+)" id="kpi-income">', page)
+        href = html.unescape(tile.group(1))
+        query = parse_qs(urlsplit(href).query)
+        assert sorted(query["category"]) == sorted([str(paid.id), str(cat("Credits & Rewards").id)])
+        assert (query["from"], query["to"]) == (["2026-10-01"], ["2026-10-31"])
+        listed = client.get(href).context["page"]
+        assert listed.total_count == 3
+        assert listed.sums.net == D("-4825.00")  # money in, as Plaid signs it: the figure
+
+    def test_statement_cycles_and_pending_carry_into_the_income_link(
+        self, client, db, paid, account, checking
+    ):
+        account.statement_closing_day = 27
+        make_statement(db, account, "2026-09-27")
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id,
+                         include_pending_in_budgets=False)  # fmt: skip
+        make_transaction(db, checking, amount="-99.00", category=paid, date="2026-10-14",
+                         pending=True)  # fmt: skip
+        page = client.get("/").text
+        href = html.unescape(re.search(r'href="([^"]+)" id="kpi-income"', page).group(1))
+        assert "basis=posted_date" in href and "status=posted" in href
+        assert "from=2026-09-28" in href and "to=2026-10-27" in href
+        assert "Income $4,825" in kpis(page)  # the pending paycheck isn't counted
+        assert client.get(href).context["page"].sums.net == D("-4825.00")
+
+    def test_nothing_in_yet_this_period(self, client, db, groceries, cat, spend):
+        spend(cat("Credits & Rewards"), "-25.00", "2026-09-05")
+        page = client.get("/").text
+        tiles = kpis(page)
+        assert "Income $0 nothing has come in this month" in tiles
+        assert "Net −$250 more out than in: income $0 − all spending $250" in tiles
+        assert '<div class="stat" id="kpi-income">' in page  # nothing to list: no link
+
+    def test_switching_off_in_place(self, client, db, paid):
+        response = client.post("/dashboard/show-income", data={}, headers=HTMX)
+        assert response.status_code == 200
+        assert response.template.name == "dashboard/_kpis.html"
+        fragment = response.text
+        assert fragment.startswith('<div class="grid grid--4 dash-kpis" id="dash-kpis">')
+        assert 'id="kpi-income"' not in fragment and 'id="kpi-net"' not in fragment
+        assert 'hx-swap-oob="beforeend:#flash"' in fragment
+        assert "Income is hidden on the Dashboard and Trends." in fragment
+        assert csp_problems(fragment, rendered=True) == []
+        assert get_app_settings(db).show_income is False
+        page = client.get("/").text
+        switch = re.search(r'<input class="switch"[^>]*>', switch_form(page)).group(0)
+        assert "checked" not in switch  # remembered
+        assert 'id="kpi-income"' not in page
+        assert "income-switch" in client.get("/trends").text  # and on Trends
+
+    def test_switching_on_in_place(self, client, db, paid):
+        set_app_settings(db, show_income=False)
+        response = client.post("/dashboard/show-income", data={"show_income": "1"}, headers=HTMX)
+        assert 'id="kpi-income"' in response.text and 'id="kpi-net"' in response.text
+        assert "Income is shown on the Dashboard and Trends." in response.text
+        assert get_app_settings(db).show_income is True
+
+    def test_without_javascript_a_plain_post_redirects(self, client, db, paid):
+        response = client.post("/dashboard/show-income", data={}, follow_redirects=False)
+        assert response.status_code == 303 and response.headers["location"] == "/"
+        page = client.get("/").text
+        assert "Income is hidden on the Dashboard and Trends." in page
+        assert get_app_settings(db).show_income is False
+        response = client.post("/dashboard/show-income", data={"show_income": "1"})
+        assert response.status_code == 200 and 'id="kpi-income"' in response.text
+
+    def test_the_switch_needs_the_apps_own_origin(self, raw_client, db, paid):
+        response = raw_client.post(
+            "/dashboard/show-income",
+            data={},
+            headers={"Origin": "http://evil.example", "Host": "127.0.0.1:8766"},
+        )
+        assert response.status_code == 403
+        assert get_app_settings(db).show_income is True
+
+
+class TestAccountsCard:
+    def test_cash_and_what_is_owed(self, client, db, paid, checking, account, freeze_today):
+        now = dt.datetime(2026, 10, 15, 12, tzinfo=dt.UTC)
+        freeze_today("2026-10-15", now=now)
+        account.current_balance = D("1234.56")
+        account.balances_as_of = now - dt.timedelta(hours=3)
+        checking.balances_as_of = now - dt.timedelta(minutes=5)
+        savings = make_account(db, checking.item, name="Plaid Saving", mask="1111",
+                               type="depository", subtype="savings",
+                               current_balance=D("12509.62"))  # fmt: skip
+        overdrawn = make_account(db, checking.item, name="Joint Checking", mask="2222",
+                                 type="depository", subtype="checking",
+                                 current_balance=D("-45.10"))  # fmt: skip
+        make_account(db, checking.item, name="Old Savings", type="depository",
+                     subtype="savings", current_balance=D("1.00"), is_hidden=True)  # fmt: skip
+        manual = make_account(db, manual=True)
+        page = client.get("/").text
+        card_html = card(page, "dash-accounts")
+        text = text_of(card_html)
+        assert text.startswith("Accounts Balances as of 3 h ago Cash $15,675.07")
+        assert "Plaid Checking $3,210.55 First Platypus Bank ··0000 · available $3,180.55" in text
+        assert "Plaid Saving $12,509.62 First Platypus Bank ··1111" in text
+        assert "Joint Checking −$45.10 First Platypus Bank ··2222 · overdrawn" in text
+        assert "Old Savings" not in text  # hidden accounts aren't listed
+        assert "Owed on cards $1,234.56" in text
+        assert f"Platinum Card $1,234.56 American Express ··{account.mask}" in text
+        assert (
+            f"American Express (CSV) — Imported from a CSV file ··{manual.mask} · no balance"
+            in text
+        )
+        assert re.search(r'class="amount[^"]*amount--over[^"]*"[^>]*>−\$45\.10', card_html)
+        for acc in (checking, savings, overdrawn, account, manual):
+            assert f'href="/transactions?account={acc.id}"' in card_html
+        assert csp_problems(page, rendered=True) == []
+        # The card comes right after the headline tiles, switch on or off.
+        assert page.index('id="dash-kpis"') < page.index('id="dash-accounts"')
+        assert page.index('id="dash-accounts"') < page.index('id="dash-budgets"')
+        set_app_settings(db, show_income=False)
+        assert 'id="dash-accounts"' in client.get("/").text
+
+    def test_a_card_in_credit(self, client, db, groceries, account):
+        account.current_balance = D("-12.00")
+        db.flush()
+        text = text_of(card(client.get("/").text, "dash-accounts"))
+        assert "Owed on cards −$12.00" in text and "a credit in your favour" in text
+
+    def test_balances_not_synced_yet(self, client, db, groceries, account):
+        text = text_of(card(client.get("/").text, "dash-accounts"))
+        assert text.startswith("Accounts Owed on cards $0.00")  # no "as of" without a date
+        assert f"Platinum Card — American Express ··{account.mask} · no balance yet" in text
+
+    def test_shown_before_the_first_transactions_arrive(self, client, db, checking):
+        page = client.get("/").text
+        assert "Your transactions are on their way" in page
+        assert "Cash $3,210.55" in text_of(card(page, "dash-accounts"))
+        assert "income-switch" not in page
+        assert csp_problems(page, rendered=True) == []
+
+    def test_no_accounts_no_card(self, client):
+        assert 'id="dash-accounts"' not in client.get("/").text

@@ -25,7 +25,7 @@
 {% call ui.card('Accounts', subtitle=subtitle, id='dash-accounts') %}
 <div class="dash-accounts">
 {%- if a.banks %}
-<section class="dash-accounts__group" id="dash-accounts-banks" aria-labelledby="dash-accounts-cash">
+<div class="dash-accounts__group" id="dash-accounts-banks" role="group" aria-labelledby="dash-accounts-cash">
 <div class="dash-accounts__head">
 <h3 class="dash-accounts__title" id="dash-accounts-cash">Cash</h3>
 <span class="dash-accounts__total">{{ ui.money(a.cash, tone='over' if a.cash < 0 else none) }}</span>
@@ -35,10 +35,10 @@
 {{ account_row(acc) }}
 {%- endfor %}
 </ul>
-</section>
+</div>
 {%- endif %}
 {%- if a.cards %}
-<section class="dash-accounts__group" id="dash-accounts-cards" aria-labelledby="dash-accounts-owed">
+<div class="dash-accounts__group" id="dash-accounts-cards" role="group" aria-labelledby="dash-accounts-owed">
 <div class="dash-accounts__head">
 <h3 class="dash-accounts__title" id="dash-accounts-owed">Owed on cards</h3>
 <span class="dash-accounts__total">{{ ui.money(a.owed) }}</span>
@@ -48,7 +48,7 @@
 {{ account_row(acc) }}
 {%- endfor %}
 </ul>
-</section>
+</div>
 {%- endif %}
 </div>
 {% endcall %}
