@@ -60,12 +60,14 @@ it open those pages.
   neither income nor spending. The switch is on to begin with, and the app remembers your choice
   for the Dashboard and Trends. The **Income** tile opens the period's income in Transactions,
   where money in shows as negative amounts (as Plaid sends it), so the list's **Net** is the
-  figure with a minus sign.
+  figure with a minus sign. Until you link a bank account, the only income is your card credits,
+  so **Net** is close to minus your spending; the tile says so, with a link to Connection.
 - **Accounts:** every account you haven't hidden, with the balance Plaid last sent: bank
-  accounts with their available balance, added up as **Cash**, and cards with what you owe,
-  added up as **Owed on cards** (a negative balance is a credit in your favour; an overdrawn bank
-  account shows in red). An account imported from a CSV file has no balance. Each name opens that
-  account's transactions.
+  accounts with their balance (and, under it, the available balance when the bank sends one),
+  their balances added up as **Cash**, and cards with what you owe, added up as **Owed on
+  cards** (a negative balance is a credit in your favour; an overdrawn bank account shows in
+  red). An account imported from a CSV file has no balance. Each name opens that account's
+  transactions.
 - **Budgets:** your six most-used monthly budgets with what is left; **All budgets** opens the
   Budgets page.
 - **Top categories:** where the money went this period, with each category's share (hidden
@@ -185,7 +187,7 @@ note says so), with the same pending setting as budgets.
   **All spending**, one row per income category (Credits & Rewards on its own line), **All
   income** and **Net** (income minus spending). Each income amount opens that month's income in
   Transactions (money in shows as negative amounts there). A single category's view stays
-  spending only.
+  spending only; with the switch on, it says that income and net show with **All categories**.
 
 ## Recurring
 

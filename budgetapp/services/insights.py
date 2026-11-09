@@ -36,6 +36,8 @@ month (``spending.monthly_income``: the same months, basis and pending setting) 
 
 **The switch** (:func:`income_switch`, :func:`set_show_income`, INC-2): ``app_settings.
 show_income``, on by default; it is offered once any money is booked to an income category.
+Until a bank account exists (:func:`has_bank_account`) the only income can be card credits, so
+the income figures carry ``cards_only`` and the pages say so next to the net.
 
 Services never commit.
 """
@@ -201,6 +203,13 @@ def set_show_income(session: Session, on: bool) -> IncomeSwitch:
     return income_switch(session)
 
 
+def has_bank_account(session: Session) -> bool:
+    """Whether any bank account exists, hidden ones included (a hidden account's money still
+    counts). Without one, the only income can be card credits (Credits & Rewards): with only
+    the card linked, Net is close to minus all spending, and the pages say why."""
+    return bool(accounts.bank_accounts(session, include_hidden=True))
+
+
 # --------------------------------------------------------------------------- accounts
 
 
@@ -352,11 +361,13 @@ class IncomeAndNet:
     """The period's income and net (INC-3, ARCHITECTURE §6 "Income and net"). ``income`` is
     ``spending.period_income`` (the period's date basis and pending setting), ``spent`` all
     spending (``period_spending``'s total: annual-budget categories included) and
-    ``net = income − spent``: positive is money kept."""
+    ``net = income − spent``: positive is money kept. ``cards_only``: no bank account exists
+    (:func:`has_bank_account`), so the income can only be card credits."""
 
     income: PeriodIncome
     spent: Decimal
     net: Decimal
+    cards_only: bool = False
 
     @property
     def total(self) -> Decimal:
@@ -512,7 +523,12 @@ def dashboard(session: Session, *, today: dt.date | None = None) -> Dashboard:
     income = None
     if switch.showing:
         earned = spending.period_income(session, period)
-        income = IncomeAndNet(earned, ov.spending.total, to_money(earned.total - ov.spending.total))
+        income = IncomeAndNet(
+            earned,
+            ov.spending.total,
+            to_money(earned.total - ov.spending.total),
+            cards_only=not has_bank_account(session),
+        )
     return Dashboard(
         today=today,
         overview=ov,
@@ -601,7 +617,8 @@ class TrendsIncome:
     Rewards is one of them, its own line); ``totals``: all income; ``net[i]`` is
     ``totals.amounts[i]`` minus the month's spending (``None`` before the history), positive
     when money was kept. ``change`` is the income of :attr:`Trends.compare` against the month
-    before (``None`` without a comparison).
+    before (``None`` without a comparison). ``cards_only``: no bank account exists
+    (:func:`has_bank_account`), so the income can only be card credits.
     """
 
     categories: tuple[IncomeLine, ...]
@@ -610,6 +627,7 @@ class TrendsIncome:
     net_total: Decimal
     net_average: Decimal | None
     change: Change | None
+    cards_only: bool = False
 
     @property
     def category_ids(self) -> tuple[int, ...]:
@@ -910,7 +928,13 @@ def trends(
             session, all_months[0].start, all_months[-1].end, include_pending=include_pending
         )
         earned = _trends_income(
-            months_income, statuses, shown, complete, compare_index, totals.amounts
+            months_income,
+            statuses,
+            shown,
+            complete,
+            compare_index,
+            totals.amounts,
+            cards_only=not has_bank_account(session),
         )
 
     return Trends(
@@ -944,6 +968,8 @@ def _trends_income(
     complete: Sequence[int],
     compare_index: int | None,
     spent: Sequence[Decimal | None],
+    *,
+    cards_only: bool,
 ) -> TrendsIncome:
     """:class:`TrendsIncome` from :func:`spending.monthly_income` of the same months as the
     spending (``data[i]`` and ``statuses[i]`` are the month before the range when ``i`` is 0;
@@ -1000,6 +1026,7 @@ def _trends_income(
             if compare_index is not None
             else None
         ),
+        cards_only=cards_only,
     )
 
 

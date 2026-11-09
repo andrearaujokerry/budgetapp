@@ -192,6 +192,12 @@
   margin: 0;
 }
 
+/* Under the Net tile while no bank account exists: only card credits are income yet. */
+.income-hint {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
 @media (max-width: 599px) {
   #trends-kpis {
     grid-template-columns: repeat(2, minmax(0, 1fr));

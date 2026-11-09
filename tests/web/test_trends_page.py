@@ -72,6 +72,11 @@ def text_of(fragment: str) -> str:
     return " ".join(html.unescape(plain).split())
 
 
+def shown(fragment: str) -> str:
+    """The text a sighted reader sees: :func:`text_of` without the screen-reader-only words."""
+    return text_of(re.sub(r'<span class="sr-only">[^<]*</span>', "", fragment))
+
+
 def section(page: str, element_id: str) -> str:
     match = re.search(
         rf'<(section|div) class="card[^"]*"[^>]*id="{element_id}".*?</\1>', page, re.S
@@ -470,13 +475,26 @@ def income_chart(page: str) -> dict:
 
 
 def income_links(page: str) -> list[tuple[str, Decimal]]:
-    """``(href, figure)`` of every income amount that opens its transactions."""
+    """``(href, figure)`` of every income amount that opens its transactions (the figure is the
+    visible amount; the words after it are for screen readers)."""
     found = []
     for href, body in re.findall(r'<a class="trends-income" href="([^"]+)"[^>]*>(.*?)</a>',
                                  page, re.S):  # fmt: skip
-        shown = text_of(body).replace("−", "-").replace("$", "").replace(",", "")
+        amount = re.search(r'<span class="amount[^"]*">(.*?)</span>', body).group(1)
+        shown = text_of(amount).replace("−", "-").replace("$", "").replace(",", "")
         found.append((html.unescape(href), Decimal(shown)))
     return found
+
+
+@pytest.fixture
+def card_credits(db, cat, spend, history):
+    """Only the card is linked: Amex statement credits (Credits & Rewards, an income category)
+    are the only money in, on top of the spending history."""
+    spend(cat("Credits & Rewards"), "-15.00", "2026-09-12", name="AMEX OFFER CREDIT")
+    spend(cat("Credits & Rewards"), "-25.00", "2026-10-12", name="AMEX OFFER CREDIT")
+
+
+CARDS_ONLY_HINT = "Only card credits count as income: link a bank account to add your paychecks."
 
 
 class TestIncome:
@@ -517,8 +535,12 @@ class TestIncome:
         config = income_chart(page)
         assert config["type"] == "bar" and "stacked" not in config
         net, income, spent = config["data"]["datasets"]
-        # The net line is listed first so Chart.js draws it over the bars.
-        assert (net["type"], net["dashed"], net["color"]) == ("line", True, "cat-1")
+        # The net line is listed first so Chart.js draws it over the bars. It wears a neutral
+        # token, never a palette slot: every slot is some category's colour in the "Spending by
+        # month" chart below (cat-1 is Travel's), so a coloured line would look like one.
+        assert (net["type"], net["dashed"], net["color"]) == ("line", True, "muted")
+        below = {d["color"] for d in chart_config(page)["data"]["datasets"]}
+        assert net["color"] not in below and not net["color"].startswith("cat-")
         assert net["label"] == "Net (income − spending)"
         assert (income["label"], income["color"]) == ("Income", "cat-16")
         assert (spent["label"], spent["color"]) == ("Spending", "accent")
@@ -544,13 +566,13 @@ class TestIncome:
         assert heading
         ids = re.findall(r'<tr id="grid-income-(\d+)"', grid)
         assert ids == [str(earnings[k].id) for k in ("paycheck", "credits", "interest")]
-        paycheck = text_of(row(grid, f"grid-income-{earnings['paycheck'].id}"))
+        paycheck = shown(row(grid, f"grid-income-{earnings['paycheck'].id}"))
         assert paycheck.startswith("Paycheck $22,500 $2,045 $2,000") and (
             paycheck.endswith("$2,500 $0")
         )
-        credits = text_of(row(grid, f"grid-income-{earnings['credits'].id}"))
+        credits = shown(row(grid, f"grid-income-{earnings['credits'].id}"))
         assert credits.startswith("Credits & Rewards $25 $2 $0")  # its own line
-        total = text_of(row(grid, "grid-income-total"))
+        total = shown(row(grid, "grid-income-total"))
         assert total.startswith("All income $22,532 $2,048 $2,000") and total.endswith("$2,529 $0")
         net = text_of(row(grid, "grid-net"))
         assert net.startswith("Net income − spending +$20,392 +$1,857 +$1,900")
@@ -573,11 +595,88 @@ class TestIncome:
         assert html.unescape(tile) in hrefs
         assert client.get(html.unescape(tile)).context["page"].sums.net == Decimal("-2529.00")
 
+    def test_an_income_amounts_name_starts_with_what_it_shows(self, client, earnings):
+        """WCAG 2.5.3 (Label in Name): the grid shows whole dollars, so a link's accessible
+        name starts with that visible amount; what it is and where it leads follow for screen
+        readers only, never an aria-label naming a different (cents) figure."""
+        page = client.get("/trends").text
+        anchors = re.findall(r'<a class="trends-income"[^>]*>.*?</a>', page, re.S)
+        assert len(anchors) >= 20
+        for anchor in anchors:
+            assert "aria-label" not in anchor, anchor
+            visible = re.search(r'<span class="amount[^"]*">([^<]*)</span>', anchor).group(1)
+            name = text_of(anchor)
+            assert name.startswith(visible + " ") and name.endswith(": see the transactions")
+            extra = re.search(r'<span class="sr-only">([^<]*)</span>', anchor).group(1)
+            assert visible not in extra  # the rest isn't shown, so it's for screen readers
+        names = {text_of(anchor) for anchor in anchors}
+        assert "$2,500 from Paycheck in Oct 2026: see the transactions" in names
+        assert "$2,529 of income in Oct 2026: see the transactions" in names
+
     def test_one_category_stays_spending_only(self, client, cat, earnings):
         page = client.get(f"/trends?category={cat('Groceries').id}").text
         assert "income-switch" in page  # the choice is still offered
         assert "trends-income-card" not in page and 'id="trend-income"' not in page
         assert '<div class="grid grid--4" id="trends-kpis">' in page
+
+    def test_one_category_says_where_income_shows(self, client, db, cat, earnings):
+        """The switch is offered in one category's view too, so with it on the view says
+        that income and net show with all categories (and links there), on the page and to
+        screen readers; nothing to say with the switch off or with all categories."""
+        groceries = cat("Groceries")
+        page = client.get(f"/trends?months=24&through=2026-10&category={groceries.id}").text
+        note = re.search(r'<p[^>]*id="trends-income-elsewhere"[^>]*>.*?</p>', page, re.S)
+        assert note, "no note"
+        assert note.group(0).endswith(
+            'Income and net show with <a href="/trends?months=24&amp;through=2026-10">'
+            "All categories</a>.</p>"
+        )
+        assert page.index('id="trends-category-heading"') < note.start()
+        assert note.start() < page.index('id="trends-kpis"')
+        status = html.unescape(re.search(r' data-status="([^"]*)"', page).group(1))
+        assert status.endswith(", Groceries; income and net show with all categories.")
+        assert csp_problems(page, rendered=True) == []
+        assert 'id="trends-income-elsewhere"' not in client.get("/trends").text
+
+        # Switched off in place, the view has nothing to explain; switched on, it says it again.
+        filters = {"months": "24", "through": "2026-10", "category": str(groceries.id)}
+        off = client.post("/trends/show-income", data=filters, headers=HTMX).text
+        assert "Income is hidden on the Dashboard and Trends." in off
+        assert 'id="trends-income-elsewhere"' not in off
+        status = html.unescape(re.search(r' data-status="([^"]*)"', off).group(1))
+        assert status.endswith(", Groceries.")
+        assert (
+            'id="trends-income-elsewhere"'
+            not in client.get(f"/trends?category={groceries.id}").text
+        )
+        on = client.post(
+            "/trends/show-income", data={"show_income": "1", **filters}, headers=HTMX
+        ).text
+        assert "Income is shown on the Dashboard and Trends." in on
+        assert 'id="trends-income-elsewhere"' in on and "trends-income-card" not in on
+
+    def test_card_credits_only_until_a_bank_account_is_linked(self, client, db, card_credits):
+        """With no bank account, the only income is card credits, so Net is close to minus
+        all spending: the Net tile and the income note say why, and link to Connection."""
+        page = client.get("/trends").text
+        text = tiles(page)
+        assert "Net in Oct 2026 −$180 average" in text
+        assert f"over 11 complete months {CARDS_ONLY_HINT} Nov 2026 so far" in text  # Net's
+        net = re.search(r'id="trend-net".*?</p>', page, re.S).group(0)
+        assert '<a href="/connection">link a bank account</a>' in net
+        note = text_of(re.search(r'<p[^>]*id="trends-income-note".*?</p>', page, re.S).group(0))
+        assert note.endswith(f"neither. {CARDS_ONLY_HINT}")
+        assert csp_problems(page, rendered=True) == []
+
+    @pytest.mark.parametrize("hidden", [False, True])
+    def test_no_card_credit_hint_once_a_bank_account_exists(
+        self, client, db, card_credits, checking, hidden
+    ):
+        """A bank account ends the hint, even a hidden one: its money still counts."""
+        checking.is_hidden = hidden
+        db.flush()
+        page = client.get("/trends").text
+        assert 'id="trend-net"' in page and "Only card credits" not in page
 
     def test_switching_off_in_place_keeps_the_filters(self, client, db, earnings):
         response = client.post(
@@ -660,7 +759,7 @@ class TestIncome:
         page = client.get("/trends").text
         assert "Income in Oct 2026 $1,000" in tiles(page)
         grid = section(page, "trends-grid-card")
-        assert "All income $1,000" in text_of(row(grid, "grid-income-total"))
+        assert "All income $1,000" in shown(row(grid, "grid-income-total"))
         assert csp_problems(page, rendered=True) == []
 
     def test_the_first_month_of_history_shows_this_months_income(self, client, db, checking):

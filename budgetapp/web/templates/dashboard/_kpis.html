@@ -4,8 +4,11 @@
     "all spending" next to a Spent figure that may leave them out).
     With the "Show income" switch on (d.income, INC-3) the first row reads Spent, Income and
     Net (income − all spending: positive is money kept), then Remaining, Days left and the
-    comparison. The switch's HTMX response is this partial alone (#dash-kpis). -#}
+    comparison. With no bank account (inc.cards_only) the only income is card credits, so the
+    Net tile says so and links to Connection. The switch's HTMX response is this partial alone
+    (#dash-kpis). -#}
 {%- import "components/ui.html" as ui -%}
+{%- import "dashboard/_income_switch.html" as income -%}
 {%- set o = ov.overall -%}
 {%- set p = d.pace -%}
 {%- set inc = d.income -%}
@@ -26,7 +29,12 @@
 {{ ui.stat('Income', ui.money(inc.total, cents=false), sub=income_sub, icon='download', href=income_href, id='kpi-income') }}
 {%- set net_sub = 'income ' ~ ui.money_text(inc.total, cents=false) ~ ' − all spending ' ~ ui.money_text(inc.spent, cents=false) %}
 {%- if inc.net > 0 %}{% set net_sub = 'kept: ' ~ net_sub %}{% elif inc.net < 0 %}{% set net_sub = 'more out than in: ' ~ net_sub %}{% endif %}
-{{ ui.stat('Net', ui.money(inc.net, signed=true, cents=false, tone='neutral'), sub=net_sub, icon='receipt', id='kpi-net') }}
+{%- set net_value = ui.money(inc.net, signed=true, cents=false, tone='neutral') %}
+{%- if inc.cards_only %}
+{% call ui.stat('Net', net_value, sub=net_sub, icon='receipt', id='kpi-net') %}<p class="income-hint">{{ income.cards_only_hint() }}</p>{% endcall %}
+{%- else %}
+{{ ui.stat('Net', net_value, sub=net_sub, icon='receipt', id='kpi-net') }}
+{%- endif %}
 {%- endif %}
 {%- if o.budget is not none %}
 {%- if o.remaining < 0 %}

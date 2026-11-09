@@ -5,7 +5,8 @@
     With income shown (INC-4) the table is a monthly income statement: All spending, then each
     income category (Credits & Rewards on its own line), All income and Net (income − all
     spending). Each income amount opens that month's income transactions, whose Net is the
-    amount (money in is negative there, as Plaid signs it). -#}
+    amount (money in is negative there, as Plaid signs it). Its accessible name starts with the
+    whole dollars it shows (WCAG 2.5.3); what it is and where it leads follow in sr-only text. -#}
 {%- import "components/ui.html" as ui -%}
 {%- import "trends/_macros.html" as tm -%}
 {%- macro month_cells(amounts) -%}
@@ -16,7 +17,7 @@
 {%- macro income_cells(line, ids, what) -%}
 {%- for amount in line.amounts %}
 {%- set m = t.months[loop.index0] %}
-<td class="num{{ ' trends-grid__current' if m.status == 'current' }}">{% if amount is none %}<span class="muted">—</span>{% elif amount == 0 %}<span class="trends-zero">{{ ui.money_text(amount, cents=false) }}</span>{% else %}<a class="trends-income" href="{{ income_href(ids, m.period) }}" aria-label="{{ ui.money_text(amount) }} {{ what }} in {{ m.period.start|month_label }}: see the transactions">{{ ui.money(amount, cents=false) }}</a>{% endif %}</td>
+<td class="num{{ ' trends-grid__current' if m.status == 'current' }}">{% if amount is none %}<span class="muted">—</span>{% elif amount == 0 %}<span class="trends-zero">{{ ui.money_text(amount, cents=false) }}</span>{% else %}<a class="trends-income" href="{{ income_href(ids, m.period) }}">{{ ui.money(amount, cents=false) }}<span class="sr-only"> {{ what }} in {{ m.period.start|month_label }}: see the transactions</span></a>{% endif %}</td>
 {%- endfor %}
 {%- endmacro -%}
 {%- set subtitle = 'Whole dollars; choose a category for its month-by-month detail' ~ ('. Income and net follow spending.' if show_income else '') -%}

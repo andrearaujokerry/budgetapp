@@ -506,7 +506,10 @@ and owed (cards' current balances: positive is owed, negative a credit, RESEARCH
 all income, and the net per month, with the same months, statuses and complete-month averages as
 spending. An income figure's link lists every income category's rows for its dates
 (`routes.dashboard.categories_url`); the list signs money in as Plaid does (negative), so its Net
-is the figure with a minus sign.
+is the figure with a minus sign. Both income objects carry `cards_only` while no bank account
+exists (`insights.has_bank_account`, hidden accounts included since their money still counts):
+the only income is then card credits, so the Net tiles and the Trends income note say so and
+link to Connection, and the figures stay as they are.
 
 ### Categorization precedence (CAT-2, TXN-3)
 For a new transaction:
@@ -833,6 +836,9 @@ sends with `hx-include="#trends-filters"`) plus a toast that screen readers hear
 stays outside that region, so focus never moves. Without JavaScript a Save button in
 `<noscript>` submits the same form and the route redirects (303) to the Dashboard or to `next`
 (only a `/trends` address). An unchecked switch sends nothing, which the route reads as off.
+Trends shows income with all categories only; in one category's view, while the switch is on, a
+note under the category (and the results' `data-status`) says that income and net show with all
+categories, with a link there.
 
 ## 10. Commands and background jobs
 

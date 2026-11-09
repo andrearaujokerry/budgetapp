@@ -585,6 +585,37 @@ class TestShowIncome:
         assert "Income $4,825" in kpis(page)  # the pending paycheck isn't counted
         assert client.get(href).context["page"].sums.net == D("-4825.00")
 
+    def test_card_credits_only_until_a_bank_account_is_linked(
+        self, client, db, groceries, cat, spend
+    ):
+        """With only the card linked, the only income is card credits (Credits & Rewards), so
+        Net is close to minus all spending: the Net tile says why and links to Connection, on
+        the page and in the switch's in-place answer."""
+        spend(cat("Credits & Rewards"), "-25.00", "2026-10-05")
+        page = client.get("/").text
+        hint = "Only card credits count as income: link a bank account to add your paychecks."
+        assert (
+            f"Net −$225 more out than in: income $25 − all spending $250 {hint} Remaining"
+            in kpis(page)
+        )
+        net = block(page, "kpi-net")
+        assert '<div class="stat" id="kpi-net">' in page  # a tile, not a link: it holds one
+        assert '<a href="/connection">link a bank account</a>' in net
+        assert csp_problems(page, rendered=True) == []
+        fragment = client.post("/dashboard/show-income", data={"show_income": "1"}, headers=HTMX)
+        assert hint in text_of(fragment.text)
+
+    @pytest.mark.parametrize("hidden", [False, True])
+    def test_no_card_credit_hint_once_a_bank_account_exists(
+        self, client, db, groceries, cat, spend, checking, hidden
+    ):
+        """A bank account ends the hint, even a hidden one: its money still counts."""
+        spend(cat("Credits & Rewards"), "-25.00", "2026-10-05")
+        checking.is_hidden = hidden
+        db.flush()
+        page = client.get("/").text
+        assert 'id="kpi-net"' in page and "Only card credits" not in page
+
     def test_nothing_in_yet_this_period(self, client, db, groceries, cat, spend):
         spend(cat("Credits & Rewards"), "-25.00", "2026-09-05")
         page = client.get("/").text

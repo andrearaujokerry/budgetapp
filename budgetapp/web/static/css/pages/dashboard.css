@@ -148,6 +148,12 @@ a.dash-row__name:hover .cat__name {
   margin: 0;
 }
 
+/* Under the Net tile while no bank account exists: only card credits are income yet. */
+.income-hint {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
 /* Accounts: the bank accounts ("Cash") and the cards ("Owed on cards") side by side when the
    card is wide enough, one above the other on a phone. */
 .dash-accounts {

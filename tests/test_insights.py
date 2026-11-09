@@ -659,6 +659,21 @@ class TestDashboardIncome:
         assert inc.spent == d.overview.spending.total  # all spending, annual included
         assert inc.largest.name == "Paycheck"
         assert inc.category_ids == tuple(sorted((paycheck.id, cat("Credits & Rewards").id)))
+        assert not inc.cards_only  # a bank account is linked
+
+    @pytest.mark.parametrize("hidden", [False, True])
+    def test_card_credits_only_until_a_bank_account_exists(self, db, cat, spend, bank, hidden):
+        """Without a bank account the only income is card credits, which the page says next to
+        the net; any bank account ends that, a hidden one too (its money still counts)."""
+        spend(cat("Groceries"), "300.00", "2026-10-03")
+        spend(cat("Credits & Rewards"), "-25.00", "2026-10-06")
+        inc = insights.dashboard(db, today=day("2026-10-20")).income
+        assert inc.cards_only and (inc.total, inc.net) == (D("25.00"), D("-275.00"))
+        assert insights.has_bank_account(db) is False
+        make_account(db, bank, name="Plaid Saving", type="depository", subtype="savings",
+                     is_hidden=hidden)  # fmt: skip
+        assert insights.has_bank_account(db) is True
+        assert not insights.dashboard(db, today=day("2026-10-20")).income.cards_only
 
     def test_switched_off_or_no_income(self, db, cat, spend):
         spend(cat("Groceries"), "300.00", "2026-10-03")
@@ -790,6 +805,15 @@ class TestTrendsIncome:
         assert inc.category_ids == tuple(sorted(c.id for c in earnings.values()))
         assert inc.largest_in(len(t.months) - 2).category.name == "Paycheck"
         assert t.amount_in(t.totals, t.ended) == D("205.00")  # spending is unchanged
+        assert not inc.cards_only  # a bank account is linked
+
+    def test_card_credits_only_until_a_bank_account_exists(self, db, cat, spend, history, bank):
+        spend(cat("Credits & Rewards"), "-25.00", "2026-10-12")
+        t = insights.trends(db, today=day("2026-11-05"), income=True)
+        assert t.income.cards_only and t.income.totals.amounts[-2] == D("25.00")
+        make_account(db, bank, name="Plaid Checking", type="depository", subtype="checking",
+                     is_hidden=True)  # fmt: skip
+        assert not insights.trends(db, today=day("2026-11-05"), income=True).income.cards_only
 
     def test_pending_income_follows_the_budget_setting(self, db, earnings):
         assert insights.trends(db, today=day("2026-11-05"), income=True).income.totals.amounts[

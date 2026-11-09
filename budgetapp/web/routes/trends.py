@@ -48,9 +48,12 @@ MAX_ID = 2**63 - 1
 _ID = re.compile(r"\s*[0-9]{1,19}\s*")
 SWITCH_PATH = "/trends/show-income"
 #: The "Income and spending" chart (INC-5): spending keeps the ink accent, income takes one
-#: palette colour (teal: readable on both themes' cards), the net a dashed line in another.
+#: palette colour (teal: readable on both themes' cards), and the net is a dashed line in the
+#: muted grey of the app's other dashed lines (the pace chart's previous period, a category's
+#: monthly average). Never a palette slot for the net: each slot is some category's colour in
+#: the "Spending by month" chart right below (cat-1 is Travel's), so it would read as one.
 INCOME_COLOR = "cat-16"
-NET_COLOR = "cat-1"
+NET_COLOR = "muted"
 
 
 def _category_id(value: str) -> tuple[int | None, bool]:
@@ -182,8 +185,10 @@ def _context(
         "statement_mode": statement_mode,
         "switch": switch,
         "switch_path": SWITCH_PATH,
-        # Income shows with all categories (one spending category's view stays spending only).
+        # Income shows with all categories (``t.income`` is there while the switch shows it);
+        # one spending category's view stays spending only and says where income shows.
         "show_income": t.income is not None and t.selected_ref is None,
+        "income_elsewhere": t.income is not None and t.selected_ref is not None,
         # Where the switch's plain form post returns: this page with these filters.
         "switch_next": "/trends?" + urlencode({k: v for k, v in filters.items() if v}),
         "filters": filters,
