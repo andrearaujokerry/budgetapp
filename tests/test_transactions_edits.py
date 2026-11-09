@@ -14,6 +14,7 @@ from budgetapp.models import Rule, Transaction
 from budgetapp.services import categorize, rules, spending, userstate
 from budgetapp.services import transactions as txns
 from budgetapp.services.transactions import TransactionEditError
+from tests.bank_factories import make_bank_account
 from tests.factories import (
     card_payments,
     get_category,
@@ -407,6 +408,18 @@ class TestSplits:
         row = txns.update(db, system.id, category_id=cats["shopping"].id)
         assert row.can_split
         assert txns.set_splits(db, system.id, two).is_split
+
+    def test_transfers_between_accounts_cannot_be_split(self, db, cats):
+        """MON-1: a transfer to savings is not spending either; the message says transfer."""
+        checking = make_bank_account(db)
+        transfer = make_transaction(
+            db, checking, amount="500.00", category=get_category(db, "Transfers")
+        )
+        two = parts((cats["groceries"], "300.00", None), (cats["home"], "200.00", None))
+        with pytest.raises(TransactionEditError) as err:
+            txns.set_splits(db, transfer.id, two)
+        assert "transfer between your accounts can't be split" in err.value.errors["parts"]
+        assert not txns.get_row(db, transfer.id).can_split
 
     def test_zero_amount_transactions_cannot_be_split(self, db, card, cats):
         txn = make_transaction(db, card, amount="0.00")
@@ -993,7 +1006,8 @@ class TestDetail:
         )
         made = make_rule(db, cats["groceries"], merchant_pattern="X", source_transaction_id=txn.id)
         detail = txns.detail(db, txn.id)
-        assert detail.row.id == txn.id and detail.account_name == card.display_name
+        assert detail.row.id == txn.id
+        assert detail.account_name == f"American Express · {card.display_name}"  # MON-4
         assert detail.rule == txns.RuleRef(rule.id, "Coffee", True)
         assert detail.replaced_pending == txns.PendingLink(
             "pend-1", Decimal("45.00"), dt.date(2026, 10, 15), "BLUE BOTTLE", carried_edits=False

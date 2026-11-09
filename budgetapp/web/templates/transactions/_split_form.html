@@ -24,6 +24,8 @@ Split {{ ui.money_text(t.amount|abs) }} across categories. Type each part withou
 {%- if not t.can_split %}
 {%- if t.pending %}
 {{ ui.banner('warn', "A pending charge can't be split yet. Split it once it posts.", title="Can't split this one.") }}
+{%- elif t.is_payment and t.transfer_label == 'Transfer' %}
+{{ ui.banner('warn', "A transfer between your accounts isn't spending, so it can't be split. If this isn't a transfer, change its category first.", title="Can't split this one.") }}
 {%- elif t.is_payment %}
 {{ ui.banner('warn', "A card payment isn't spending, so it can't be split. If this isn't a card payment, change its category first.", title="Can't split this one.") }}
 {%- else %}

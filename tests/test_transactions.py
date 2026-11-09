@@ -13,6 +13,7 @@ from starlette.datastructures import QueryParams
 from budgetapp.services import spending
 from budgetapp.services import transactions as txns
 from budgetapp.services.transactions import TransactionFilter
+from tests.bank_factories import make_bank_account, make_bank_item
 from tests.factories import (
     card_payments,
     get_category,
@@ -822,7 +823,7 @@ class TestExport:
             "Dining & Drinks",
             "6.75",
             "no",
-            card.display_name,
+            "American Express · " + card.display_name,  # account_label (MON-4)
             "SAM RIVERA",
             "latte",
             "coffee, work",
@@ -904,3 +905,67 @@ class TestExport:
         assert txns.export_filename(TransactionFilter(), everything, TODAY) == (
             "transactions-2026-10-29.csv"
         )
+
+
+# --------------------------------------------------------------------------- accounts (MON-4)
+
+
+class TestAccounts:
+    """W3-PLAN MON-4: the Account filter lists every account, cards and bank accounts."""
+
+    @pytest.fixture
+    def accounts(self, db):
+        amex = make_account(db, name="Blue Cash Preferred®", mask="3005")
+        bank = make_bank_item(db)
+        checking = make_bank_account(db, bank, mask="4417")
+        savings = make_bank_account(db, bank, subtype="savings", mask="7702")
+        manual = make_account(db, manual=True, mask=None)
+        return amex, checking, savings, manual
+
+    def test_the_filter_lists_every_account_with_its_institution(self, db, accounts):
+        amex, checking, savings, manual = accounts
+        options = txns.filter_options(db, today=TODAY).accounts
+        assert [(a.id, a.name, a.is_bank) for a in options] == [
+            (amex.id, "American Express · Blue Cash Preferred® ··3005", False),
+            (checking.id, "Harbor Bank · Everyday Checking ··4417", True),
+            (savings.id, "Harbor Bank · High Yield Savings ··7702", True),
+            (manual.id, "American Express (CSV)", False),
+        ]
+
+    def test_an_unknown_institution_shows_the_account_alone(self, db):
+        item = make_bank_item(db, institution_name=None)
+        account = make_bank_account(db, item, mask="0001")
+        assert txns.account_label(account) == "Everyday Checking ··0001"
+
+    def test_filtering_by_a_bank_account(self, db, accounts):
+        amex, checking, savings, _manual = accounts
+        make_transaction(db, amex, amount="40.00", name="CARD", date=D("2026-10-10"))
+        make_transaction(db, checking, amount="2450.00", name="RENT", date=D("2026-10-01"))
+        make_transaction(db, checking, amount="-3412.18", name="PAYROLL", date=D("2026-10-09"))
+        make_transaction(db, savings, amount="-48.12", name="INTEREST", date=D("2026-10-28"))
+        page = run(db, F(account=str(checking.id)))
+        assert names(page) == ["PAYROLL", "RENT"]
+        assert (page.sums.charges, page.sums.credits) == (Decimal("2450.00"), Decimal("-3412.18"))
+        assert names(run(db, F(account=str(savings.id)))) == ["INTEREST"]
+
+    def test_the_export_names_the_account_with_its_institution(self, db, accounts):
+        _amex, checking, _savings, _manual = accounts
+        make_transaction(db, checking, amount="80.00", name="ATM", date=D("2026-10-12"))
+        text = "".join(txns.export_csv(db, F(account=str(checking.id)), today=TODAY))
+        rows = list(csv.reader(io.StringIO(text.lstrip("﻿"))))
+        assert rows[1][rows[0].index("Account")] == "Harbor Bank · Everyday Checking ··4417"
+
+    def test_transfers_and_card_payments_are_muted_and_named(self, db, accounts):
+        _amex, checking, _savings, _manual = accounts
+        transfer = make_transaction(
+            db, checking, amount="500.00", category=get_category(db, "Transfers")
+        )
+        payment = make_transaction(db, checking, amount="900.00", category=card_payments(db))
+        paycheck = make_transaction(
+            db, checking, amount="-3412.18", category=get_category(db, "Paycheck")
+        )
+        rows = {r.id: r for r in run(db).rows}
+        assert rows[transfer.id].is_payment and rows[transfer.id].transfer_label == "Transfer"
+        assert rows[payment.id].is_payment and rows[payment.id].transfer_label == "Payment"
+        assert not rows[transfer.id].can_split
+        assert not rows[paycheck.id].is_payment and not rows[paycheck.id].is_refund
