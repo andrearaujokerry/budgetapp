@@ -80,13 +80,13 @@ class ItemStatus:
 
     @property
     def display_name(self) -> str | None:
-        """The name that tells this connection apart ("TD Bank", or with another login at the
+        """The name that tells this connection apart ("Tartan Bank", or with another login at the
         same bank "Chase (Freedom ··5678)"); ``None`` for a connection saved without a name."""
         return self.label or self.institution_name
 
     @property
     def name(self) -> str:
-        """The connection's name for messages ("TD Bank"), or a neutral one."""
+        """The connection's name for messages ("Tartan Bank"), or a neutral one."""
         return self.display_name or "A bank connection"
 
     @property

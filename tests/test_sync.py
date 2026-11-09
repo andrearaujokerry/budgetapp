@@ -1838,8 +1838,8 @@ def test_a_bank_only_connection_never_asks_for_statement_details(
         notifier,
         item_id="item-bank",
         consented=("transactions",),
-        institution_id="ins_14",
-        institution_name="TD Bank",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
         liabilities_status="not_consented",  # what an earlier version stored
     )
     bank.fake_item.accounts = bank_accounts()
@@ -1868,8 +1868,8 @@ def test_a_bank_login_with_a_card_still_reads_its_statement_details(
         settings,
         notifier,
         item_id="item-bank",
-        institution_id="ins_14",
-        institution_name="TD Bank",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
     )
     bank.fake_item.accounts = [*bank_accounts(), *bank.fake_item.accounts]
     bank.sync()
@@ -1984,9 +1984,9 @@ def test_the_sandbox_never_uses_a_v1_production_token(db, session_factory, setti
 
 
 def test_error_help_names_the_institution():
-    """BANK-7 (C9): "TD Bank needs you to sign in again", or a neutral sentence."""
-    login = sync.describe_error("ITEM_LOGIN_REQUIRED", institution="TD Bank")
-    assert login.startswith("TD Bank needs you to sign in again through Plaid")
+    """BANK-7 (C9): "Tartan Bank needs you to sign in again", or a neutral sentence."""
+    login = sync.describe_error("ITEM_LOGIN_REQUIRED", institution="Tartan Bank")
+    assert login.startswith("Tartan Bank needs you to sign in again through Plaid")
     assert sync.describe_error("INSTITUTION_DOWN").startswith("The bank isn't answering Plaid")
     assert "Amex" not in sync.describe_error("ACCESS_NOT_GRANTED", institution="Chase")
 
@@ -2085,15 +2085,19 @@ def test_a_v1_copy_keeps_its_owner_beside_another_connection(
     its own token touches it."""
     production, prod_plaid, fake_item, item = v1_production(db, tmp_path, secrets)
     app_secrets.store_access_token(production, "item-amex", fake_item.access_token, store=secrets)
-    make_item(db, plaid_item_id="item-td", institution_id="ins_14", institution_name="TD Bank")
-    app_secrets.store_access_token(production, "item-td", "access-production-td", store=secrets)
+    make_item(
+        db, plaid_item_id="item-tartan", institution_id="ins_109511", institution_name="Tartan Bank"
+    )
+    app_secrets.store_access_token(
+        production, "item-tartan", "access-production-tartan", store=secrets
+    )
     legacy = app_secrets.LEGACY_PRODUCTION_TOKEN
     copy = app_secrets.LegacyTokenState("copy", "item-amex")
     assert linking.legacy_state(db, store=secrets) == copy
     assert not linking.legacy_unplaced(db, store=secrets)
     assert not linking.reattach_available(db, production, store=secrets)
-    td = sync.access_token_for(production, "item-td", secrets, source=session_factory)
-    assert td == "access-production-td" and legacy in secrets.values
+    tartan = sync.access_token_for(production, "item-tartan", secrets, source=session_factory)
+    assert tartan == "access-production-tartan" and legacy in secrets.values
     move = sync.migrate_legacy_token(session_factory, production, secrets)
     assert (move.status, move.item_id, move.reason) == ("moved", "item-amex", None)
     assert legacy not in secrets.values
@@ -2177,8 +2181,10 @@ def test_a_re_issued_account_is_not_called_unshared(linked, fake_plaid, db):
 def test_a_sign_in_again_is_about_consent_only_for_american_express():
     """UX review: ITEM_LOGIN_REQUIRED at another bank often follows a password change or access
     withdrawn at the bank (RESEARCH T2.4); only American Express's text blames the consent."""
-    bank = sync.describe_error("ITEM_LOGIN_REQUIRED", institution="TD Bank")
-    assert bank.startswith("TD Bank needs you to sign in again through Plaid (for example after")
+    bank = sync.describe_error("ITEM_LOGIN_REQUIRED", institution="Tartan Bank")
+    assert bank.startswith(
+        "Tartan Bank needs you to sign in again through Plaid (for example after"
+    )
     assert "password change" in bank and "the consent expired or was revoked" not in bank
     amex = sync.describe_error("ITEM_LOGIN_REQUIRED", institution="American Express", amex=True)
     assert "(the consent expired or was revoked)" in amex

@@ -28,7 +28,7 @@ open, after **Sync now** or a change you make. Demo data never sends any.
 | --- | --- | --- | --- |
 | **Budget reached** | "Groceries: 80% of budget used", "Groceries: over budget", "Travel: 80% of the 2026 budget used", "Overall budget: 80% used" | a budget reaches one of your percentages this period, or this year for an annual budget (80% and 100% unless you change them) | once per budget, period and percentage |
 | **Sync failed** | "American Express sync failed" | a sync of one of your connections fails (Plaid, the bank or the app had a problem); the title names the bank and the message the error code | once per connection, error code and day |
-| **Reconnect needed** | "Reconnect TD Bank" | a bank needs you to sign in again ([Reconnecting](reconnecting.md#reconnect)) | once each time it happens |
+| **Reconnect needed** | "Reconnect Tartan Bank" | a bank needs you to sign in again ([Reconnecting](reconnecting.md#reconnect)) | once each time it happens |
 | **Data is stale** | "American Express data is out of date" | no successful sync of that connection for 36 hours | once a day (folded into the failure or reconnect alert when one goes out in the same sync) |
 | **Consent renewal due** | "Renew your American Express connection" | a bank's consent runs out within your reminder days (30 unless you change it): American Express asks every year; another bank only when Plaid reports an end date | once per due date; not while the connection needs reconnecting (reconnecting renews the consent too) |
 | **Large charge** | "$612.40 at Delta" | new spending over the amount you set, on a card or a bank account, or a pending charge that posts above it | once per charge; more than three in one sync arrive as one summary ("5 new charges over $500.00") |

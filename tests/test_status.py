@@ -78,7 +78,9 @@ def test_the_year_estimate_is_for_american_express_only(db):
     """BANK-6: other banks use Plaid's consent_expiration_time or have no due date at all."""
     set_app_settings(db, consent_reminder_days=30)
     old = NOW - dt.timedelta(days=400)
-    bank = make_item(db, institution_id="ins_3", institution_name="TD Bank", last_consented_at=old)
+    bank = make_item(
+        db, institution_id="ins_3", institution_name="Tartan Bank", last_consented_at=old
+    )
     (state,) = connection_status(db, now=NOW).items
     assert state.item_id == bank.id and state.institution_id == "ins_3"
     assert state.consent_due_at is None and state.consent_days_left is None
@@ -114,10 +116,10 @@ def test_an_amex_item_saved_without_an_institution_id_keeps_the_estimate(db):
 def test_the_banners_name_each_institution_and_the_first_consent_due(db):
     set_app_settings(db, consent_reminder_days=30)
     make_item(db, institution_name="American Express", consent_expires_at=NOW + dt.timedelta(9))
-    td = make_item(
+    tartan = make_item(
         db,
-        institution_id="ins_14",
-        institution_name="TD Bank",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
         consent_expires_at=NOW + dt.timedelta(days=3),
     )
     make_item(
@@ -130,7 +132,7 @@ def test_the_banners_name_each_institution_and_the_first_consent_due(db):
     make_item(db, institution_id="ins_6", institution_name="Chase", status="needs_reconnect")
     status = connection_status(db, now=NOW)
     assert status.reconnect_names == ("Citibank", "Chase")
-    assert status.consent_item.item_id == td.id
+    assert status.consent_item.item_id == tartan.id
 
 
 def test_liabilities_apply_only_to_connections_with_a_card(db):
@@ -139,7 +141,7 @@ def test_liabilities_apply_only_to_connections_with_a_card(db):
 
     card_item = make_item(db)
     make_account(db, card_item)
-    bank_item = make_item(db, institution_id="ins_14", institution_name="TD Bank")
+    bank_item = make_item(db, institution_id="ins_109511", institution_name="Tartan Bank")
     make_bank_account(db, bank_item, name="Checking")
     by_id = {s.item_id: s for s in connection_status(db, now=NOW).items}
     assert by_id[card_item.id].has_cards and not by_id[bank_item.id].has_cards
@@ -149,15 +151,15 @@ def test_liabilities_apply_only_to_connections_with_a_card(db):
 
 
 def test_another_banks_reconnect_never_hides_a_consent_that_is_due(db):
-    """UX review (major): a reconnect at TD Bank renews nothing at American Express, so Amex's
+    """UX review (major): a reconnect at Tartan Bank renews nothing at American Express, so Amex's
     due consent stays in consent_items. A connection that itself needs reconnecting is left out
     (its Reconnect renews its consent too). Several due consents come soonest first."""
     set_app_settings(db, consent_reminder_days=30)
     amex = make_item(db, consent_expires_at=NOW + dt.timedelta(days=5))
     make_item(
         db,
-        institution_id="ins_14",
-        institution_name="TD Bank",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
         status="needs_reconnect",
         error_code="ITEM_LOGIN_REQUIRED",
         consent_expires_at=NOW - dt.timedelta(days=1),  # renewed by its own reconnect
@@ -181,8 +183,8 @@ def test_syncable_means_some_connection_can_sync(db):
     assert not connection_status(db, now=NOW).syncable
     make_item(
         db,
-        institution_id="ins_14",
-        institution_name="TD Bank",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
         consent_expires_at=NOW - dt.timedelta(days=1),
     )
     assert not connection_status(db, now=NOW).syncable
@@ -199,11 +201,11 @@ def test_two_logins_at_one_bank_get_labels_from_their_first_account(db):
     make_account(db, mine, name="Sapphire Preferred", mask="1234")
     theirs = make_item(db, institution_id="ins_3", institution_name="CHASE")
     make_account(db, theirs, name="Freedom Unlimited", mask="5678")
-    td = make_item(db, institution_id="ins_14", institution_name="TD Bank")
+    tartan = make_item(db, institution_id="ins_109511", institution_name="Tartan Bank")
     by_id = {s.item_id: s for s in connection_status(db, now=NOW).items}
     assert by_id[mine.id].name == "Chase (Sapphire Preferred ··1234)"
     assert by_id[theirs.id].name == "CHASE (Freedom Unlimited ··5678)"  # the same bank
-    assert by_id[td.id].label is None and by_id[td.id].name == "TD Bank"
+    assert by_id[tartan.id].label is None and by_id[tartan.id].name == "Tartan Bank"
 
 
 def test_test_items_with_the_same_first_account_are_numbered(db):

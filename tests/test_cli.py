@@ -237,8 +237,8 @@ class TestAccessTokenReentry:
         """BANK-4: a second connection's token is saved beside the first, never over it."""
         settings = self._settings(tmp_path)
         other = "access-production-99999999-2222-3333-4444-555555555555"
-        for token, item_id in ((self.TOKEN, "item-prod-1"), (other, "item-td")):
-            gateway = FakeItemGateway(item_id=item_id, institution="TD Bank")
+        for token, item_id in ((self.TOKEN, "item-prod-1"), (other, "item-tartan")):
+            gateway = FakeItemGateway(item_id=item_id, institution="Tartan Bank")
             assert (
                 setup.enter_access_token(
                     settings, input_fn=lambda _, t=token: t, gateway=gateway, store=secrets
@@ -246,8 +246,10 @@ class TestAccessTokenReentry:
                 == 0
             )
         assert secrets.values[self.KEY] == self.TOKEN
-        assert secrets.values["plaid.access_token.production.item-td"] == other
-        assert "Saved the access token for Item item-td (TD Bank)" in capsys.readouterr().out
+        assert secrets.values["plaid.access_token.production.item-tartan"] == other
+        assert (
+            "Saved the access token for Item item-tartan (Tartan Bank)" in capsys.readouterr().out
+        )
 
     def test_the_v1_copy_of_the_same_token_is_removed(self, tmp_path, secrets, capsys):
         settings = self._settings(tmp_path)

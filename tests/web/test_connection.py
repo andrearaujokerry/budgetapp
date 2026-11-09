@@ -687,13 +687,13 @@ def test_an_account_plaid_no_longer_shares_is_marked_on_its_tile(
         )
 
     fake = fake_plaid.add_item(
-        item_id="td",
-        institution_id="ins_14",
-        institution_name="TD Bank",
+        item_id="tartan",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
         consented_products=("transactions",),
         accounts=[
-            bank_account("td-chk", "Checking", "4417", "checking", "100.00"),
-            bank_account("td-sav", "Savings", "9902", "savings", "5000.00"),
+            bank_account("tartan-chk", "Checking", "4417", "checking", "100.00"),
+            bank_account("tartan-sav", "Savings", "9902", "savings", "5000.00"),
         ],
     )
     result = linking.exchange(
@@ -702,10 +702,10 @@ def test_an_account_plaid_no_longer_shares_is_marked_on_its_tile(
         secrets,
         settings,
         fake_plaid.public_token_for(fake),
-        {"institution": {"institution_id": "ins_14", "name": "TD Bank"}},
+        {"institution": {"institution_id": "ins_109511", "name": "Tartan Bank"}},
     )
 
-    def sync_td():
+    def sync_tartan():
         sync_service.sync_item(
             session_factory,
             fake_plaid,
@@ -717,9 +717,9 @@ def test_an_account_plaid_no_longer_shares_is_marked_on_its_tile(
             sleep=lambda _s: None,
         )
 
-    sync_td()
-    fake.accounts = [a for a in fake.accounts if a["account_id"] != "td-sav"]
-    sync_td()
+    sync_tartan()
+    fake.accounts = [a for a in fake.accounts if a["account_id"] != "tartan-sav"]
+    sync_tartan()
     html = main(page(client))
     words = text(html)
     assert "1 bank account (1 no longer shared) · linked" in words
@@ -734,12 +734,12 @@ def test_each_connection_names_its_keychain_item(db, prod_client, production, se
     Keychain item is which connection (its name only, never the token)."""
     for pid, name, inst in (
         ("item-amex", "American Express", "ins_10"),
-        ("item-td", "TD Bank", "ins_14"),
+        ("item-tartan", "Tartan Bank", "ins_109511"),
     ):
         make_item(db, plaid_item_id=pid, institution_name=name, institution_id=inst)
         app_secrets.store_access_token(production, pid, f"access-production-{pid}", store=secrets)
     html = main(page(prod_client))
-    for pid in ("item-amex", "item-td"):
+    for pid in ("item-amex", "item-tartan"):
         assert f'<code class="keychain-item">plaid.access_token.production.{pid}</code>' in html
     assert "access-production-item-" not in html
 

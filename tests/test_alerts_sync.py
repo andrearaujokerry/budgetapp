@@ -345,20 +345,22 @@ def test_a_bank_connection_names_its_bank_and_has_no_estimated_consent(db, notif
     12-month consent estimate, so a bank without a date from Plaid never gets a reminder."""
     bank = make_item(
         db,
-        institution_id="ins_14",
-        institution_name="TD Bank",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
         last_sync_success_at=NOW - 2 * HOUR,
         linked_at=NOW - 400 * DAY,
         last_consented_at=NOW - 400 * DAY,
     )
     evaluate(db, notifier, fail(bank, "ITEM_LOGIN_REQUIRED", reconnect=True))
-    assert notifier.titles == ["Reconnect TD Bank"]
-    assert notifier.sent[0].message.startswith("TD Bank needs you to sign in again through Plaid")
+    assert notifier.titles == ["Reconnect Tartan Bank"]
+    assert notifier.sent[0].message.startswith(
+        "Tartan Bank needs you to sign in again through Plaid"
+    )
     evaluate(db, notifier, succeed(bank))
-    assert keys(db, "consent") == [] and notifier.titles == ["Reconnect TD Bank"]
+    assert keys(db, "consent") == [] and notifier.titles == ["Reconnect Tartan Bank"]
     bank.consent_expires_at = NOW + 10 * DAY  # Plaid sends a date: it counts
     evaluate(db, notifier, succeed(bank))
-    assert notifier.titles[-1] == "Renew your TD Bank connection"
+    assert notifier.titles[-1] == "Renew your Tartan Bank connection"
 
 
 def test_a_connection_without_a_name_stays_neutral(db, notifier):

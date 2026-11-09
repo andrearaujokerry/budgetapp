@@ -51,9 +51,9 @@
 {%- set consent_items = (conn.consent_items|default([]) or [])|list if conn and not on_connection else [] -%}
 
 {#- The consent banner for `items` (soonest first). One connection: its own sentences
-    ("Renew your TD Bank connection by Nov 20, 2026 (23 days left)."). Several: named
+    ("Renew your Tartan Bank connection by Nov 20, 2026 (23 days left)."). Several: named
     together, grouped by state ("Your American Express consent has expired. Renew your
-    TD Bank connection by …"). Only American Express's says it asks every 12 months. -#}
+    Tartan Bank connection by …"). Only American Express's says it asks every 12 months. -#}
 {%- macro consent_banner(items) -%}
 {%- set one = items[0] -%}
 {%- set days = one.consent_days_left -%}

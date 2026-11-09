@@ -934,15 +934,17 @@ def test_statement_details_are_refused_for_a_bank_without_cards(
     db, client, fake_plaid, secrets, settings
 ):
     fake_item = fake_plaid.add_item(
-        item_id="td", institution_id="ins_14", institution_name="TD Bank"
+        item_id="tartan", institution_id="ins_109511", institution_name="Tartan Bank"
     )
-    app_secrets.store_access_token(settings, "td", fake_item.access_token, store=secrets)
-    item = make_item(db, plaid_item_id="td", institution_id="ins_14", institution_name="TD Bank")
+    app_secrets.store_access_token(settings, "tartan", fake_item.access_token, store=secrets)
+    item = make_item(
+        db, plaid_item_id="tartan", institution_id="ins_109511", institution_name="Tartan Bank"
+    )
     make_bank_account(db, item)
     response = client.post(
         "/connection/link-token", json={"mode": "liabilities", "item_id": item.id}
     )
-    assert response.status_code == 409 and "TD Bank has none" in response.json()["error"]
+    assert response.status_code == 409 and "Tartan Bank has none" in response.json()["error"]
 
 
 @pytest.mark.parametrize(
@@ -974,17 +976,17 @@ def test_the_page_shows_a_bank_connection_with_its_kind_of_tiles(
     """BANK-5: a bank connection's accounts show current and available balance; no statement
     details or "Grant access" for a connection without cards; its consent has no end date."""
     linked(db, fake_plaid, secrets, settings)
-    td = make_item(
+    tartan = make_item(
         db,
-        plaid_item_id="td",
-        institution_id="ins_14",
-        institution_name="TD Bank",
+        plaid_item_id="tartan",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
         consented_products=["transactions"],
         last_sync_success_at=NOW - dt.timedelta(hours=1),
     )
     make_account(
         db,
-        td,
+        tartan,
         name="Everyday Checking",
         mask="0101",
         type="depository",
@@ -994,16 +996,16 @@ def test_the_page_shows_a_bank_connection_with_its_kind_of_tiles(
         available_balance=Decimal("2400.00"),
     )
     html = client.get("/connection").text
-    section = html[html.index(f'aria-labelledby="item-{td.id}-title"') :]
+    section = html[html.index(f'aria-labelledby="item-{tartan.id}-title"') :]
     section = section[: section.index("</section>")]
     words = " ".join(html_lib.unescape(re.sub(r"<[^>]+>", " ", section)).split())
-    assert "TD Bank" in words and "1 bank account · linked" in words
+    assert "Tartan Bank" in words and "1 bank account · linked" in words
     assert "Everyday Checking ··0101 Checking" in words
     assert "Current balance $2,480.40" in words and "Available balance $2,400.00" in words
     assert "Statement balance" not in words and "Minimum payment" not in words
     assert "Statement details" not in words and 'data-link-mode="liabilities"' not in section
-    assert "Consent No end date (Plaid reports none for TD Bank)" in words
-    assert f'id="accounts-{td.id}"' in section and f'id="renew-{td.id}"' not in section
+    assert "Consent No end date (Plaid reports none for Tartan Bank)" in words
+    assert f'id="accounts-{tartan.id}"' in section and f'id="renew-{tartan.id}"' not in section
 
 
 # ------------------------------------------------------------------ W3-BANK review fixes (UX)
@@ -1015,19 +1017,19 @@ def test_sync_now_leaves_out_a_bank_that_needs_reconnecting(
     """UX review: Sync now stays in the top bar while a healthy connection can sync; pressing
     it syncs that one and doesn't keep retrying the bank only Reconnect can fix."""
     _, amex = linked(db, fake_plaid, secrets, settings)
-    _, td = linked(
+    _, tartan = linked(
         db,
         fake_plaid,
         secrets,
         settings,
-        item_id="item-td",
-        institution_id="ins_14",
-        institution_name="TD Bank",
+        item_id="item-tartan",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
         status="needs_reconnect",
         error_code="ITEM_LOGIN_REQUIRED",
     )
     response = client.post("/connection/sync", headers=HTMX)
-    assert toasts(response.text) == ["Sync started. TD Bank waits for you to reconnect first."]
+    assert toasts(response.text) == ["Sync started. Tartan Bank waits for you to reconnect first."]
     assert jobs.waiting_keys() == [f"refresh:{amex.id}"]
     assert [(r.item_id, r.status) for r in runs(db)] == [(amex.id, "running")]
 

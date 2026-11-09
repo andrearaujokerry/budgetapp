@@ -812,7 +812,7 @@ class TestKeychainItems:
 class TestProductionTokens:
     """BANK-4/BANK-7 (C6): one token per production Item; orphans; the v1 token's states."""
 
-    TD = "plaid.access_token.production.item-td"
+    TARTAN = "plaid.access_token.production.item-tartan"
     AMEX = "plaid.access_token.production.item-amex"
 
     def store(self, *accounts: str, index: tuple[str, ...] = ()) -> app_secrets.MemoryStore:
@@ -827,19 +827,21 @@ class TestProductionTokens:
 
     def test_each_connection_needs_its_own_token(self, prod, db):
         make_item(db, plaid_item_id="item-amex")
-        make_item(db, plaid_item_id="item-td", institution_name="TD Bank")
+        make_item(db, plaid_item_id="item-tartan", institution_name="Tartan Bank")
         titles = self.titles(prod, self.store(self.AMEX, index=("item-amex",)))
-        assert titles["The access token of TD Bank is missing"] == FAIL
+        assert titles["The access token of Tartan Bank is missing"] == FAIL
         assert "The access token of American Express is missing" not in titles
-        titles = self.titles(prod, self.store(self.AMEX, self.TD, index=("item-amex", "item-td")))
+        titles = self.titles(
+            prod, self.store(self.AMEX, self.TARTAN, index=("item-amex", "item-tartan"))
+        )
         assert set(titles.values()) == {PASS}
 
     def test_tokens_without_a_connection_are_reported(self, prod, db):
         make_item(db, plaid_item_id="item-amex")
-        store = self.store(self.AMEX, self.TD, index=("item-amex", "item-td"))
+        store = self.store(self.AMEX, self.TARTAN, index=("item-amex", "item-tartan"))
         checks = prod.run(doctor.check_keychain_items, store=store)
         (orphan,) = [c for c in checks if "no connection in the database" in c.title]
-        assert orphan.status == WARN and orphan.detail == "Items item-td"
+        assert orphan.status == WARN and orphan.detail == "Items item-tartan"
         assert "Re-attach" in orphan.fix
 
     def test_a_v1_token_not_moved_yet(self, prod, db):
@@ -868,8 +870,8 @@ class TestProductionTokens:
         """Its value names its owner however many connections exist: never "can't tell which
         connection it belongs to" (which would send the owner to Re-attach for nothing)."""
         make_item(db, plaid_item_id="item-amex")
-        make_item(db, plaid_item_id="item-td", institution_name="TD Bank")
-        store = self.store(self.TD, index=("item-amex", "item-td"))
+        make_item(db, plaid_item_id="item-tartan", institution_name="Tartan Bank")
+        store = self.store(self.TARTAN, index=("item-amex", "item-tartan"))
         store.values[self.AMEX] = store.values[app_secrets.LEGACY_PRODUCTION_TOKEN] = "same"
         titles = self.titles(prod, store)
         assert titles["An old copy of the access token of American Express is still saved"] == INFO
@@ -1234,8 +1236,8 @@ class TestConnection:
         freeze_today(now=NOW)
         bank = make_item(
             db,
-            institution_id="ins_14",
-            institution_name="TD Bank",
+            institution_id="ins_109511",
+            institution_name="Tartan Bank",
             liabilities_status=None,
             consented_products=["transactions"],
             last_consented_at=NOW - dt.timedelta(days=400),
@@ -1243,8 +1245,8 @@ class TestConnection:
         make_bank_account(db, bank, name="Checking")
         checks = {c.title: c.status for c in dr.run(doctor.check_connection)}
         assert checks == {
-            "TD Bank consent has no end date (Plaid reports none)": INFO,
-            "Statement details don't apply to TD Bank (no cards)": INFO,
+            "Tartan Bank consent has no end date (Plaid reports none)": INFO,
+            "Statement details don't apply to Tartan Bank (no cards)": INFO,
         }
 
     def test_every_line_names_its_connection(self, dr, db, freeze_today):

@@ -301,7 +301,7 @@ def describe_error(
     amex: bool = False,
 ) -> str | None:
     """A plain sentence about a stored sync error, for the Connection page and alerts; it names
-    the ``institution`` ("TD Bank needs you to sign in again…") when known (BANK-7, C9).
+    the ``institution`` ("Tartan Bank needs you to sign in again…") when known (BANK-7, C9).
 
     A sign-in Plaid needs again is about consent for American Express (``amex``: its consent
     runs out every 12 months); at another bank it can as well follow a password change or

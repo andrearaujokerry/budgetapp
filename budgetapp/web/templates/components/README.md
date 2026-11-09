@@ -115,7 +115,7 @@ The web shell passes `env="demo"` when it serves a demo database (`serve --demo 
 | partial | `conn.last_sync_success_at` | aware datetime or `None` (property) | "Synced " + `\|relative_time` |
 | partial | `conn.primary` | `ItemStatus` or `None` (property) | the worst Item (its fields below) |
 | partial | `conn.primary.display_name` | str or `None` | healthy tooltip "American Express via Plaid"; the problem tooltips start with it |
-| partial | `conn.primary.error_message`, `conn.primary.error_code` | str or `None` | error / reconnect tooltip ("TD Bank: …") |
+| partial | `conn.primary.error_message`, `conn.primary.error_code` | str or `None` | error / reconnect tooltip ("Tartan Bank: …") |
 
 Since wave 3 a connection's consent can have no due date (a bank whose consent doesn't expire:
 `consent_due_at`, `consent_days_left` are `None` and `consent_warning` is false), so read the
@@ -127,14 +127,14 @@ Notices (between the top bar and the page, only rendered when there is one):
 
 - `#reconnect-banner` (tone `over`, role alert, **Reconnect** → `/connection`) when
   `conn.needs_reconnect` and `conn.state != "not_linked"`, naming the connections:
-  "TD Bank needs attention. Syncing it is paused…" / "Citibank and Chase need attention.
+  "Tartan Bank needs attention. Syncing it is paused…" / "Citibank and Chase need attention.
   Syncing them is paused…"
 - `#consent-banner` when `conn.consent_items` isn't empty, also below the reconnect banner (a
   reconnect at one bank renews nothing at another). One connection: days < 0 → `over` "Your
   American Express consent has expired" ("…it lapsed on Oct 25, 2026"); days = 0 → `over`
-  "expires today"; else `warn` "Renew your TD Bank connection by Nov 20, 2026 (23 days left)."
+  "expires today"; else `warn` "Renew your Tartan Bank connection by Nov 20, 2026 (23 days left)."
   Several: one title naming them by state, "Your American Express consent has expired. Renew your
-  TD Bank and Citibank connections by Nov 20, 2026 (23 days left)." (the earliest date). Only
+  Tartan Bank and Citibank connections by Nov 20, 2026 (23 days left)." (the earliest date). Only
   American Express's banner says it asks "every 12 months". Action **Renew now** →
   `/connection`. A connection that needs reconnecting is never in `consent_items`: its one Plaid
   update-mode session fixes both.
