@@ -2,7 +2,8 @@
     Bank accounts first, added up as "Cash" (each with its available balance when Plaid sends
     one), then cards, added up as "Owed on cards" (a negative balance is a credit in your
     favour). An account without a balance (not synced yet, or imported from a CSV file) shows
-    "—" and adds nothing. Each name opens that account's transactions. -#}
+    "—" and adds nothing. An account Plaid no longer shares keeps its last balance, marked, and
+    adds nothing to the totals. Each name opens that account's transactions. -#}
 {%- import "components/ui.html" as ui -%}
 {%- set a = d.accounts -%}
 {%- macro account_row(acc) -%}
@@ -18,6 +19,7 @@
 {%- elif not acc.is_card and acc.current < 0 %} · overdrawn
 {%- endif %}
 {%- if not acc.is_card and acc.available is not none %} · available {{ ui.money_text(acc.available) }}{% endif -%}
+{%- if acc.no_longer_shared %} · no longer shared, left out of {{ 'Owed on cards' if acc.is_card else 'Cash' }}{% endif -%}
 </div>
 </li>
 {%- endmacro -%}

@@ -68,6 +68,7 @@ from budgetapp.services.spending import (
     PeriodIncome,
     basis_date,
 )
+from budgetapp.services.sync import no_longer_shared
 
 #: Categories the dashboard lists by name; the rest are one remainder row.
 TOP_CATEGORIES = 6
@@ -220,7 +221,9 @@ class AccountBalance:
     For a card ``current`` is the balance owed: positive means owed, negative that the card owes
     you (RESEARCH T2.7). For a bank account it is the balance Plaid reports and ``available``
     what the bank says can be used. Both are ``None`` until Plaid has sent them, and always for
-    an account imported from a CSV file (``is_manual``).
+    an account imported from a CSV file (``is_manual``). ``no_longer_shared``: Plaid stopped
+    listing the account (``sync.no_longer_shared``), so ``current`` is only the last balance it
+    sent and the card's totals leave it out.
     """
 
     id: int
@@ -233,6 +236,7 @@ class AccountBalance:
     current: Decimal | None
     available: Decimal | None
     as_of: dt.datetime | None
+    no_longer_shared: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,7 +244,8 @@ class AccountBalances:
     """Every visible card and bank account (``services.accounts``, oldest first), with ``cash``
     (the bank accounts' balances added up) and ``owed`` (the cards' balances added up); accounts
     without a balance add nothing and are counted in ``*_without_balance``. ``as_of`` is the
-    oldest balance date shown (``None`` when none has one)."""
+    oldest balance date shown (``None`` when none has one). An account Plaid no longer shares is
+    listed but adds nothing to ``cash`` or ``owed`` and has no say in ``as_of``."""
 
     banks: tuple[AccountBalance, ...] = ()
     cards: tuple[AccountBalance, ...] = ()
@@ -274,19 +279,27 @@ def _balance(account: Account, *, is_card: bool) -> AccountBalance:
         current=account.current_balance,
         available=account.available_balance,
         as_of=account.balances_as_of,
+        no_longer_shared=no_longer_shared(account),
     )
 
 
 def account_balances(session: Session) -> AccountBalances:
-    """The Dashboard's Accounts card (INC-3): visible bank accounts, then visible cards."""
+    """The Dashboard's Accounts card (INC-3): visible bank accounts, then visible cards. One
+    that Plaid no longer shares (BANK-5) is listed, marked, but left out of the totals and of
+    ``as_of``: its balance is the last one Plaid sent, not today's."""
     banks = tuple(_balance(a, is_card=False) for a in accounts.bank_accounts(session))
     cards = tuple(_balance(a, is_card=True) for a in accounts.card_accounts(session))
-    dates = [a.as_of for a in (*banks, *cards) if a.as_of is not None]
+
+    def total(rows: tuple[AccountBalance, ...]) -> Decimal:
+        shared = (a.current for a in rows if a.current is not None and not a.no_longer_shared)
+        return to_money(sum(shared, ZERO))
+
+    dates = [a.as_of for a in (*banks, *cards) if a.as_of is not None and not a.no_longer_shared]
     return AccountBalances(
         banks=banks,
         cards=cards,
-        cash=to_money(sum((a.current for a in banks if a.current is not None), ZERO)),
-        owed=to_money(sum((a.current for a in cards if a.current is not None), ZERO)),
+        cash=total(banks),
+        owed=total(cards),
         as_of=min(dates) if dates else None,
     )
 
