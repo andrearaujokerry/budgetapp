@@ -2,23 +2,34 @@
 
 For a new transaction, the first step that applies wins:
 
-0. **Payments** (fixed; rules cannot override): Card Payments (``category_source='system'``) when
-   ``amount < 0`` and any of: ``transaction_code = 'payment'``; ``pfc_detailed`` is
-   ``LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`` or ``LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT``;
-   ``pfc_primary = 'TRANSFER_IN'``; the name or original description matches
-   ``PAYMENT.*(THANK YOU|RECEIVED)|AUTOPAY``; or a CSV row with a blank Amex category. A positive
-   ``PAYMENT … RETURNED/REVERSED`` (not a fee) is also Card Payments.
+0. **Payments** (fixed; rules cannot override), **on a card only**: Card Payments
+   (``category_source='system'``) when ``amount < 0`` and any of: ``transaction_code =
+   'payment'``; ``pfc_detailed`` is ``LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`` or
+   ``LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT``; ``pfc_primary = 'TRANSFER_IN'``; the name or original
+   description matches ``PAYMENT.*(THANK YOU|RECEIVED)|AUTOPAY``; or a CSV row with a blank Amex
+   category. A positive ``PAYMENT … RETURNED/REVERSED`` (not a fee) is also Card Payments.
 1. User state carried over from the transaction this one replaces (``category_source='user'``).
 2. The first matching active rule by ``(priority, id)`` (``'rule'``).
 3. The Plaid PFC v2 mapping (detailed, then primary; ``'plaid'``) or, for CSV rows, the Amex
    category mapping (``Group-Subgroup``, then ``Group``; ``'amex'``). The mapping is sign-aware:
    for a negative amount the ``<key>|credit`` mappings are tried first (Amex puts cash back and
    billing-inquiry credits in "Fees & Adjustments", which must not reduce fee spending), except
-   for a fee reversal, which stays with the fee; and a positive amount never reaches a
+   for a fee reversal, which stays with the fee; and on a card a positive amount never reaches a
    ``transfer`` category through a mapping (it is a charge; step 0 already caught real payment
    reversals, and a row Plaid codes as a card payment stays a payment): it goes to Uncategorized,
    which counts as spending.
 4. Uncategorized (``'default'``).
+
+**Bank accounts** (checking, savings, money market: ``Account.type == "depository"``, see
+``services/accounts.py``; W3-PLAN C3): step 0 doesn't apply, so a transfer between your own accounts
+is never forced into Card Payments and a rule can still turn one into income. In step 3 the
+``<key>|bank`` mappings (:data:`BANK_KEY_SUFFIX`, detailed then primary; migration
+``0005_bank_categories``) are tried before the card keys: paychecks go to Paycheck, interest and
+dividends to Interest, other income to Other Income, transfers in and out to Transfers, an ATM
+withdrawal to Cash & ATM, and a card payment from checking (positive on the bank side) to Card
+Payments. Every other code maps as for cards, and a positive bank row may land in a ``transfer``
+category (money leaving for savings or the card is a transfer, not a charge). Anything that is not
+on a bank account (a card, the manual CSV account, an account Plaid hasn't typed yet) is a card.
 
 Refund rule: a row with ``transaction_code = 'refund'`` never lands in an ``income`` or
 ``transfer`` category; it takes the most recent expense category used for the same merchant, else
@@ -50,7 +61,7 @@ from typing import Any, Protocol
 
 import regex
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from budgetapp.db import ledger_lock
 from budgetapp.models import (
@@ -63,6 +74,7 @@ from budgetapp.models import (
 )
 from budgetapp.money import to_money
 from budgetapp.services import userstate
+from budgetapp.services.accounts import BANK
 from budgetapp.services.userstate import UserState
 from budgetapp.textutil import strip_control_chars
 
@@ -98,6 +110,8 @@ _REGEX_PROBES = (
 CHANGE_SAMPLE_LIMIT = 200
 #: Suffix of mapping keys tried first for negative amounts, e.g. ``"Fees & Adjustments|credit"``.
 CREDIT_KEY_SUFFIX = "|credit"
+#: Suffix of Plaid mapping keys tried first for a row on a bank account (``"INCOME_SALARY|bank"``).
+BANK_KEY_SUFFIX = "|bank"
 
 
 class TransactionLike(Protocol):
@@ -249,8 +263,34 @@ def looks_like_fee(txn: TransactionLike) -> bool:
     return any(FEE_TEXT.search(t) for t in (txn.name, txn.original_description) if t)
 
 
-def is_payment(txn: TransactionLike) -> bool:
-    """Step 0: is this a card payment (or a returned payment)?"""
+def on_bank_account(txn: TransactionLike) -> bool:
+    """Whether ``txn``, a stored or new ``Transaction``, is on a bank account (C3).
+
+    Reads the row's account through its session (or the account it was given). Anything else, a
+    row without an account, or an account Plaid hasn't typed yet, counts as a card. The
+    :class:`Categorizer` knows every account itself; this is for the paths that see one row.
+    """
+    if not isinstance(txn, Transaction):
+        return False
+    account = txn.__dict__.get("account")
+    if account is None and txn.account_id is not None:
+        session = object_session(txn)
+        if session is not None:
+            with session.no_autoflush:
+                account = session.get(Account, txn.account_id)
+    return account is not None and account.type == BANK
+
+
+def is_payment(txn: TransactionLike, *, bank: bool | None = None) -> bool:
+    """Step 0: is this a card payment (or a returned payment)? Never on a bank account.
+
+    ``bank`` says whether the row is on a bank account; ``None`` works it out for a
+    ``Transaction`` (:func:`on_bank_account`) and treats any other object as a card row.
+    """
+    if bank is None:
+        bank = on_bank_account(txn)
+    if bank:
+        return False
     code = (txn.transaction_code or "").strip().lower()
     if code == "refund":
         return False
@@ -308,6 +348,8 @@ class Categorizer:
     """Categorizes transactions with the rules and mappings loaded once (one per batch).
 
     Build with :meth:`load`; reuse it for every row of a sync batch, an import or a re-apply.
+    It knows which accounts are bank accounts (loaded once; an account added later, such as one a
+    sync just stored, is looked up the first time a row names it).
     """
 
     def __init__(
@@ -320,6 +362,7 @@ class Categorizer:
         kinds: dict[int, str],
         uncategorized_id: int,
         card_payments_id: int,
+        account_types: dict[int, str | None] | None = None,
     ) -> None:
         self.session = session
         self.rules = rules
@@ -328,11 +371,12 @@ class Categorizer:
         self.kinds = kinds
         self.uncategorized_id = uncategorized_id
         self.card_payments_id = card_payments_id
+        self.account_types: dict[int, str | None] = dict(account_types or {})
         self._refund_cache: dict[str, int] = {}
 
     @classmethod
     def load(cls, session: Session) -> Categorizer:
-        """Load active rules (by priority, id), both mappings and category kinds."""
+        """Load active rules (by priority, id), both mappings, category kinds and account types."""
         with session.no_autoflush:
             rules = list(
                 session.scalars(
@@ -353,6 +397,9 @@ class Categorizer:
                 else:
                     amex_map[key.casefold()] = category_id
             kinds = {cid: kind for cid, kind in session.execute(select(Category.id, Category.kind))}
+            account_types = {
+                aid: kind for aid, kind in session.execute(select(Account.id, Account.type))
+            }
         return cls(
             session,
             rules=rules,
@@ -361,6 +408,7 @@ class Categorizer:
             kinds=kinds,
             uncategorized_id=system_category_id(session, "uncategorized"),
             card_payments_id=system_category_id(session, "card_payments"),
+            account_types=account_types,
         )
 
     def kind_of(self, category_id: int) -> str:
@@ -370,34 +418,50 @@ class Categorizer:
             self.kinds[category_id] = kind or "expense"
         return self.kinds[category_id]
 
+    def on_bank(self, txn: TransactionLike) -> bool:
+        """Whether ``txn`` is on a checking, savings or money market account (C3)."""
+        account_id = getattr(txn, "account_id", None)
+        if account_id is None:
+            return on_bank_account(txn)
+        if account_id not in self.account_types:
+            with self.session.no_autoflush:
+                account = self.session.get(Account, account_id)
+            self.account_types[account_id] = account.type if account is not None else None
+        return self.account_types[account_id] == BANK
+
     def decide(self, txn: TransactionLike, *, inherited: UserState | None = None) -> Decision:
         """Apply the precedence (module docstring) to ``txn``.
 
         ``inherited`` is the user state carried over from the row ``txn`` replaces (step 1); step 0
-        (card payments) ranks above it, as ARCHITECTURE §6 orders them. To categorize a row AND
-        move the carried state onto it, use :func:`apply_carried_state`.
+        (card payments, on cards only) ranks above it, as ARCHITECTURE §6 orders them. To
+        categorize a row AND move the carried state onto it, use :func:`apply_carried_state`.
         """
-        if is_payment(txn):
+        bank = self.on_bank(txn)
+        if is_payment(txn, bank=bank):
             return Decision(self.card_payments_id, "system", reason="card payment")
         if inherited is not None and inherited.category_id is not None:
             return Decision(
                 inherited.category_id, "user", reason="carried over from the replaced row"
             )
-        return self._refund_rule(txn, self.automatic(txn))
+        return self._refund_rule(txn, self._automatic(txn, bank))
 
     def automatic(self, txn: TransactionLike) -> Decision:
         """Steps 2–4 only (rules, mapping, Uncategorized), without the refund rule.
 
-        The mapping (step 3) is sign-aware, see the module docstring.
+        The mapping (step 3) is sign-aware and account-aware, see the module docstring.
         """
+        return self._automatic(txn, self.on_bank(txn))
+
+    def _automatic(self, txn: TransactionLike, bank: bool) -> Decision:
         for rule in self.rules:
             if rule_matches(rule, txn):
                 return Decision(rule.category_id, "rule", rule.id, reason=f"rule {rule.id}")
-        found = self._mapped(txn)
+        found = self._mapped(txn, bank)
         if found is not None:
             category_id, source, label = found
             if (
-                to_money(txn.amount) > 0
+                not bank
+                and to_money(txn.amount) > 0
                 and self.kind_of(category_id) == "transfer"
                 and not _payment_coded(txn)
             ):
@@ -409,8 +473,12 @@ class Categorizer:
             return Decision(category_id, source, reason=label)
         return Decision(self.uncategorized_id, "default", reason="no rule or mapping")
 
-    def _mapped(self, txn: TransactionLike) -> tuple[int, str, str] | None:
-        """``(category_id, source, label)`` from the Plaid or Amex mapping, or ``None``."""
+    def _mapped(self, txn: TransactionLike, bank: bool = False) -> tuple[int, str, str] | None:
+        """``(category_id, source, label)`` from the Plaid or Amex mapping, or ``None``.
+
+        A Plaid row on a bank account tries the ``|bank`` keys first (detailed, then primary);
+        Amex CSV rows are always card rows.
+        """
         if txn.source == "csv":
             keys = amex_category_keys(txn.external_category)
             mapping, source, kind = self.amex_map, "amex", "Amex category"
@@ -420,10 +488,15 @@ class Categorizer:
         candidates = list(keys)
         if to_money(txn.amount) < 0 and not looks_like_fee(txn):
             candidates = [k + CREDIT_KEY_SUFFIX for k in keys] + candidates
+        if bank and source == "plaid":
+            candidates = [k + BANK_KEY_SUFFIX for k in keys] + candidates
         for key in candidates:
             category_id = mapping.get(key.casefold() if source == "amex" else key)
             if category_id is not None:
-                return category_id, source, f"{kind} {key}"
+                label = f"{kind} {key}"
+                if key.endswith(BANK_KEY_SUFFIX):
+                    label = f"{kind} {key[: -len(BANK_KEY_SUFFIX)]} (bank accounts)"
+                return category_id, source, label
         return None
 
     def _refund_rule(self, txn: TransactionLike, decision: Decision) -> Decision:
