@@ -120,7 +120,8 @@ RECURRING_STATUSES = ("ignored", "confirmed")
 
 
 class PlaidItem(IdMixin, TimestampMixin, Base):
-    """One Plaid Item (a linked login). v1 allows exactly one in production."""
+    """One Plaid Item: one linked bank login (each production Item uses one of the Trial plan's
+    10 for good; its access token is in Keychain under ``plaid.access_token.<env>.<item id>``)."""
 
     __tablename__ = "plaid_items"
     __table_args__ = (
@@ -166,7 +167,8 @@ class PlaidItem(IdMixin, TimestampMixin, Base):
 
 
 class Account(IdMixin, TimestampMixin, Base):
-    """A card account: from Plaid (``item_id`` set) or manual, for CSV-only history (NULL)."""
+    """A card or bank account (``type`` ``credit`` or ``depository``): from Plaid (``item_id``
+    set) or manual, for Amex CSV-only history (NULL)."""
 
     __tablename__ = "accounts"
     __table_args__ = (

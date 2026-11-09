@@ -922,18 +922,8 @@ def _production_token_checks(ctx: DoctorContext, present: dict[str, bool]) -> li
         )
     if legacy and ctx.database()[0]:
         own = secrets.production_access_token_key(sole) if sole else None
-        if sole is None:
-            problems.append(
-                Check(
-                    section,
-                    WARN,
-                    f"Keychain still holds the v1 access token ({secrets.LEGACY_PRODUCTION_TOKEN})"
-                    " and the app can't tell which connection it belongs to",
-                    fix="Connection page → Re-attach existing connection: Plaid says whose it is "
-                    "(never link again).",
-                )
-            )
-        elif not present.get(own):
+        same = own is not None and _read(ctx, own) == _read(ctx, secrets.LEGACY_PRODUCTION_TOKEN)
+        if own is not None and not present.get(own):
             problems.append(
                 Check(
                     section,
@@ -944,7 +934,7 @@ def _production_token_checks(ctx: DoctorContext, present: dict[str, bool]) -> li
                     "if it stays, the sync log says why.",
                 )
             )
-        elif _read(ctx, own) == _read(ctx, secrets.LEGACY_PRODUCTION_TOKEN):
+        elif same:
             problems.append(
                 Check(
                     section,
@@ -955,16 +945,16 @@ def _production_token_checks(ctx: DoctorContext, present: dict[str, bool]) -> li
                 )
             )
         else:
+            # No Item, several, or the one Item has a different token of its own: the v1 token
+            # may be the only token of a connection the database lost. Never suggest deleting it.
             problems.append(
                 Check(
                     section,
                     WARN,
-                    f"Keychain holds two different access tokens for {linked[0][1]}",
-                    detail=f"{own} (used) and {secrets.LEGACY_PRODUCTION_TOKEN} (v1)",
-                    fix="If syncing works, the v1 one is dead: delete "
-                    f"{secrets.LEGACY_PRODUCTION_TOKEN} in Keychain Access. If syncing fails with "
-                    "INVALID_ACCESS_TOKEN, delete the other one and run ./run sync --env "
-                    "production.",
+                    f"Keychain still holds the v1 access token ({secrets.LEGACY_PRODUCTION_TOKEN})"
+                    " and the app can't tell which connection it belongs to",
+                    fix="Connection page → Re-attach existing connection: Plaid says whose it is "
+                    "(never link again).",
                 )
             )
     return problems

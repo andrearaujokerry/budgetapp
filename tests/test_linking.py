@@ -22,6 +22,7 @@ from budgetapp.models import Account, PlaidItem, TransactionTombstone
 from budgetapp.plaid_gateway import PlaidError
 from budgetapp.services import linking, reconcile, userstate
 from budgetapp.services import status as status_service
+from budgetapp.services import sync as sync_service
 from budgetapp.services.linking import LinkFailed, LinkMetadata, LinkRefused
 from tests.factories import (
     get_category,
@@ -1515,6 +1516,33 @@ def test_re_attach_asks_plaid_whose_v1_token_it_is(
     assert secrets.values[prod_key("item-amex")] == amex.access_token
     assert LEGACY not in secrets.values and len(items(db)) == 2
     assert prod_plaid.calls_to("exchange_public_token") == []
+
+
+def test_a_v1_token_beside_another_items_own_token_is_re_attached_not_moved(
+    db, session_factory, production, prod_plaid, secrets
+):
+    """A lost database: TD Bank was re-attached first, while the v1 Amex token (whose Item row
+    was lost too) is still under the v1 name. The one Item has its own token, so the v1 token
+    can't be its: it is never moved there; Re-attach asks Plaid and restores American Express."""
+    amex = prod_plaid.add_item(item_id="item-amex")
+    td = prod_plaid.add_item(
+        item_id="item-td",
+        institution_id="ins_14",
+        institution_name="TD Bank",
+        accounts=[checking()],
+    )
+    td_bank(db, plaid_item_id="item-td")
+    app_secrets.store_access_token(production, "item-td", td.access_token, store=secrets)
+    secrets.set(LEGACY, amex.access_token)
+    assert linking.legacy_unplaced(db, store=secrets)
+    assert linking.reattach_available(db, production, store=secrets)
+    assert "re-attach it first" in " ".join(linking.link_blocks(db, production, store=secrets))
+    assert sync_service.migrate_legacy_token(db, production, secrets).status == "kept"
+    assert secrets.values[prod_key("item-td")] == td.access_token  # TD Bank's token untouched
+    (result,) = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    assert (result.plaid_item_id, result.created) == ("item-amex", True)
+    assert secrets.values[prod_key("item-amex")] == amex.access_token
+    assert LEGACY not in secrets.values and not linking.legacy_unplaced(db, store=secrets)
 
 
 def test_each_orphaned_token_is_re_attached_to_its_own_item(

@@ -345,6 +345,21 @@ def orphaned_production_items(
     ]
 
 
+def legacy_unplaced(session: Session, *, store: secrets.SecretStore | None = None) -> bool:
+    """The v1 token (C6) is in Keychain and the database can't place it by itself: there is no
+    Item, or several, or the one Item already has a different token of its own (so the v1 token
+    may belong to a connection the database lost). Re-attach asks Plaid whose it is. With exactly
+    one Item and no other token for it, the next sync or link moves it there instead."""
+    legacy = secrets.legacy_production_token(store=store)
+    if not legacy:
+        return False
+    ids = list(session.scalars(select(PlaidItem.plaid_item_id)))
+    if len(ids) != 1:
+        return True
+    own = secrets.get_access_token("production", ids[0], store=store)
+    return own is not None and own != legacy
+
+
 def connections_used(
     session: Session, settings: Settings, *, store: secrets.SecretStore | None = None
 ) -> int:
@@ -371,16 +386,15 @@ def link_blocks(
     progress, no unsaved token in a recovery file, no token in Keychain without its connection,
     and fewer than 10 Items created.
 
-    The v1 token (C6) blocks unless exactly one Item exists and no move was tried yet
-    (``after_move`` False: the page, which never writes): a link first moves it
-    (:func:`new_link_token`), so a v1 token still there ``after_move`` would lose its owner once a
-    second Item exists, and blocks. With no Item or several, Re-attach asks Plaid whose it is."""
+    The v1 token (C6) blocks unless the database can place it (:func:`legacy_unplaced`) and no
+    move was tried yet (``after_move`` False: the page, which never writes): a link first moves
+    it (:func:`new_link_token`), so a v1 token still there ``after_move`` would lose its owner
+    once a second Item exists, and blocks. One it can't place needs Re-attach first."""
     today = clock.today()
     reasons: list[str] = []
     orphans = orphaned_production_items(session, store=store)
-    items = session.scalar(select(func.count()).select_from(PlaidItem)) or 0
     legacy = bool(secrets.legacy_production_token(store=store))
-    if orphans or (legacy and items != 1):
+    if orphans or legacy_unplaced(session, store=store):
         reasons.append(
             "Keychain holds the access token of a connection that this database doesn't show: "
             "re-attach it first (Re-attach existing connection), so the app can tell which bank "
@@ -469,7 +483,7 @@ def link_exited(
 
     ``event`` "EXIT" (or none) is ``onExit``: Link is closed, so a production new-link attempt's
     marker is cleared — only if ``attempt`` set it. ``CLOSE_OAUTH`` / ``FAIL_OAUTH`` are only
-    events: the Amex window closed or timed out, but Link stays open and can still succeed, so the
+    events: the bank's window closed or timed out, but Link stays open and can still succeed, so the
     marker stays. Under the link lock; the caller commits. True when the marker was cleared.
     """
     closed = event in (None, LINK_EXIT)
@@ -688,9 +702,8 @@ def _exchange_problem(
             "this new link was not completed (its token was not exchanged). Store that token "
             "with ./run setup --env production --access-token, then re-attach it here."
         )
-    items = session.scalar(select(func.count()).select_from(PlaidItem)) or 0
     legacy = secrets.legacy_production_token(store=store)
-    if orphaned_production_items(session, store=store) or (legacy and items != 1):
+    if orphaned_production_items(session, store=store) or legacy_unplaced(session, store=store):
         return (
             "Keychain holds the access token of a connection that this database doesn't show, "
             "so this new link was not completed (its token was not exchanged). Re-attach the "
@@ -1262,15 +1275,13 @@ def reattach_available(
     session: Session, settings: Settings, *, store: secrets.SecretStore | None = None
 ) -> bool:
     """Production: Keychain holds a token the database doesn't account for — a token of its own
-    without its Item row (BANK-4), or the v1 token while the database doesn't hold exactly one
-    Item (with exactly one, the next sync or link moves it to that Item's key by itself)."""
+    without its Item row (BANK-4), or a v1 token it can't place (:func:`legacy_unplaced`; one it
+    can place, the next sync or link moves to that Item's key by itself)."""
     if not settings.is_production:
         return False
-    if orphaned_production_items(session, store=store):
-        return True
-    if not secrets.legacy_production_token(store=store):
-        return False
-    return (session.scalar(select(func.count()).select_from(PlaidItem)) or 0) != 1
+    return bool(orphaned_production_items(session, store=store)) or legacy_unplaced(
+        session, store=store
+    )
 
 
 def recover_orphaned_items(

@@ -366,6 +366,13 @@ def test_a_connection_without_a_name_stays_neutral(db, notifier):
     evaluate(db, notifier, fail(nameless, "INSTITUTION_DOWN"))
     assert notifier.titles == ["Your bank sync failed"]
     assert notifier.sent[0].message.startswith("The bank isn't answering Plaid right now.")
+    evaluate(db, notifier, fail(nameless, "ITEM_LOGIN_REQUIRED", reconnect=True))
+    assert notifier.titles[-1] == "Reconnect your bank"
+    nameless.status, nameless.error_code = "healthy", None
+    nameless.consent_expires_at = NOW + 5 * DAY
+    evaluate(db, notifier, succeed(nameless))
+    assert notifier.titles[-1] == "Renew your bank connection"
+    assert notifier.sent[-1].message.startswith("Plaid's access to your bank ends on")
 
 
 # --------------------------------------------------------------------------- ALR-3

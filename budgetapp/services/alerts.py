@@ -279,8 +279,13 @@ def _age_text(delta: dt.timedelta) -> str:
 
 
 def _institution(item: PlaidItem) -> str:
-    """The institution's name for a connection alert ("TD Bank sync failed", BANK-7)."""
+    """The institution's name to start a connection alert ("TD Bank sync failed", BANK-7)."""
     return item.institution_name or DEFAULT_INSTITUTION
+
+
+def _bank(item: PlaidItem) -> str:
+    """The institution's name inside a sentence ("Reconnect TD Bank", "… your bank")."""
+    return item.institution_name or "your bank"
 
 
 # --------------------------------------------------------------------------- after a sync
@@ -426,7 +431,7 @@ def _reconnect(
         notifier,
         kind=KIND_RECONNECT,
         dedupe_key=f"reconnect:{item.id}:open",
-        title=f"Reconnect {name}",
+        title=f"Reconnect {_bank(item)}",
         message=message,
         item_id=item.id,
     )
@@ -477,7 +482,7 @@ def _consent(
     ):
         return []
     due = state.consent_due_at.astimezone().date()
-    name = _institution(item)
+    name = _bank(item)
     left = state.consent_days_left
     if left > 1:
         when = f"ends on {_date_text(due)} ({_days(left)} left)"
@@ -493,7 +498,7 @@ def _consent(
             notifier,
             kind=KIND_CONSENT,
             dedupe_key=f"consent:{item.id}:{due.isoformat()}",
-            title=f"Renew your {name} connection",
+            title=f"Renew your {item.institution_name or 'bank'} connection",
             message=(
                 f"Plaid's access to {name} {when}. Renew it on the Connection page so syncing "
                 "keeps working; it takes a minute and keeps this connection."

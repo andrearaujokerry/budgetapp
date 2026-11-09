@@ -738,7 +738,8 @@ def write_access_token_recovery_file(
     settings: Settings, item_id: str, access_token: str, *, state_dir: Path | None = None
 ) -> Path:
     """Write a token that could not be saved to Keychain to a 0600 file with instructions
-    (under ``<state_dir or settings.state_dir>/recovery``)."""
+    (under ``<state_dir or settings.state_dir>/recovery``), one file per Item and attempt:
+    ``access-token-<env>-<item id>-<UTC stamp>.txt``."""
     stamp = clock.now().strftime("%Y%m%dT%H%M%SZ")
     content = (
         "Budget Tracker could not save this Plaid access token to the macOS Keychain.\n"
@@ -751,7 +752,9 @@ def write_access_token_recovery_file(
         f"access_token: {access_token}\n"
     )
     return write_recovery_file(
-        state_dir or settings.state_dir, f"access-token-{settings.plaid_env}-{stamp}", content
+        state_dir or settings.state_dir,
+        f"access-token-{settings.plaid_env}-{item_id}-{stamp}",
+        content,
     )
 
 

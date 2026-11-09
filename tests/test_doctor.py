@@ -855,12 +855,15 @@ class TestProductionTokens:
         titles = self.titles(prod, store)
         assert titles["An old copy of the access token of American Express is still saved"] == INFO
 
-    def test_two_different_tokens_for_one_connection(self, prod, db):
+    def test_a_v1_token_beside_the_one_items_own_token_is_never_called_dead(self, prod, db):
+        """The one Item has a different token of its own, so the v1 token may be the only
+        token of a connection the database lost: re-attach (Plaid says whose), never delete."""
         make_item(db, plaid_item_id="item-amex")
         store = self.store(self.AMEX, app_secrets.LEGACY_PRODUCTION_TOKEN, index=("item-amex",))
         checks = prod.run(doctor.check_keychain_items, store=store)
-        (check,) = [c for c in checks if c.title.startswith("Keychain holds two different")]
-        assert check.status == WARN and "INVALID_ACCESS_TOKEN" in check.fix
+        (check,) = [c for c in checks if "v1 access token" in c.title]
+        assert check.status == WARN and "Re-attach" in check.fix
+        assert not any("delete" in (c.fix or "").casefold() for c in checks)
 
     @pytest.mark.parametrize("count", [0, 2])
     def test_a_v1_token_whose_connection_is_unknown(self, prod, db, count):
