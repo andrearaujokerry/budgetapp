@@ -94,6 +94,25 @@ def _all(session: Session) -> list[Transaction]:
     return list(session.scalars(select(Transaction).order_by(Transaction.id)))
 
 
+def _card(session: Session) -> Account:
+    return session.scalars(select(Account).where(Account.type == "credit")).one()
+
+
+def _amex(session: Session) -> PlaidItem:
+    return session.scalars(select(PlaidItem).where(PlaidItem.institution_id == "ins_10")).one()
+
+
+def _bank(session: Session) -> PlaidItem:
+    return session.scalars(
+        select(PlaidItem).where(PlaidItem.institution_id == cat.BANK_INSTITUTION_ID)
+    ).one()
+
+
+def _on_card(session: Session) -> list[Transaction]:
+    """The card's rows (Harbor Bank's checking and savings rows left out)."""
+    return [t for t in _all(session) if t.account_id == _card(session).id]
+
+
 def _category_ids(session: Session) -> dict[str, int]:
     return {c.name: c.id for c in session.scalars(select(Category))}
 
@@ -190,9 +209,10 @@ def _fingerprint(session: Session) -> list[tuple]:
         rows.append((r.trigger, r.status, r.started_at, r.added_count, r.error_code))
     for a in session.scalars(select(AlertEvent).order_by(AlertEvent.id)):
         rows.append((a.kind, a.dedupe_key, a.created_at))
-    item = session.scalars(select(PlaidItem)).one()
-    account = session.scalars(select(Account)).one()
-    rows.append((item.plaid_item_id, item.consent_expires_at, account.current_balance))
+    for item in session.scalars(select(PlaidItem).order_by(PlaidItem.id)):
+        rows.append((item.plaid_item_id, item.consent_expires_at, item.last_sync_success_at))
+    for account in session.scalars(select(Account).order_by(Account.id)):
+        rows.append((account.plaid_account_id, account.current_balance, account.available_balance))
     return rows
 
 
@@ -218,14 +238,18 @@ def test_recreating_gives_the_same_database_quickly(created, demo_engine):
 
 def test_summary_counts_every_table(created):
     counts = created.counts
-    assert 2200 <= counts["transactions"] <= 2900
-    assert counts["plaid_items"] == counts["accounts"] == counts["csv_imports"] == 1
+    assert 2500 <= counts["transactions"] <= 3300
+    assert 250 <= created.bank_transactions <= 400
+    assert counts["plaid_items"] == 2 and counts["accounts"] == 3  # Amex; Harbor Bank (MON-5)
+    assert counts["csv_imports"] == 1
     assert counts["statements"] == 12 and counts["rules"] == len(cat.RULES)
     assert counts["sync_runs"] >= 12 and counts["alert_events"] >= 2
     assert created.transactions["suspect"] == 2 and created.transactions["needs_review"] == 1
     assert 2 <= created.transactions["pending"] <= 15
     text = "\n".join(created.lines())
     assert "Health & Fitness" in text and "services.spending" in text
+    assert f"{created.bank_transactions:,} of them on Harbor Bank checking and savings" in text
+    assert "Income, spending and net this month (Oct 2026):" in text
 
 
 # --------------------------------------------------------------------------- Plaid conventions
@@ -233,6 +257,7 @@ def test_summary_counts_every_table(created):
 
 def test_plaid_rows_follow_plaid_conventions(s):
     mapped = set(s.scalars(select(CategoryMapping.external_key)))
+    card = _card(s)
     ids: set[str] = set()
     for t in _all(s):
         if t.source != "plaid":
@@ -240,7 +265,10 @@ def test_plaid_rows_follow_plaid_conventions(s):
         assert t.amount == t.amount.quantize(CENT) and t.amount != 0
         assert t.plaid_transaction_id and len(t.plaid_transaction_id) == 37
         ids.add(t.plaid_transaction_id)
-        assert t.transaction_code in PLAID_CODES
+        if t.account_id == card.id:
+            assert t.transaction_code in PLAID_CODES
+        else:  # US banks rarely send transaction codes (W3-PLAN §1)
+            assert t.transaction_code is None
         assert t.iso_currency_code == "USD" and isinstance(t.location, dict)
         if t.pending:
             assert t.posted_date is None and t.date == t.authorized_date
@@ -264,13 +292,25 @@ def test_plaid_rows_follow_plaid_conventions(s):
 
 def test_payments_are_card_payments_and_only_payments_are(s):
     card_payments = _category_ids(s)["Card Payments"]
+    card = _card(s)
     payments = [t for t in _all(s) if is_payment(t)]
-    assert len(payments) >= 22
+    assert len(payments) >= 22 and all(t.account_id == card.id for t in payments)
     assert all(t.category_id == card_payments and t.category_source == "system" for t in payments)
     assert all(t.amount < 0 for t in payments)
     assert {t.source for t in payments} == {"plaid", "csv"}
     others = [t for t in _all(s) if t.category_id == card_payments and not is_payment(t)]
-    assert others == []
+    # MON-5: each payment's other side, on Harbor Bank checking, is Card Payments by the bank
+    # mapping (positive there), never spending.
+    assert others and all(
+        t.account_id != card.id
+        and t.amount > 0
+        and t.pfc_detailed == "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"
+        and t.category_source == "plaid"
+        for t in others
+    )
+    assert sorted((t.posted_date, -t.amount) for t in payments) == sorted(
+        (t.posted_date, t.amount) for t in others
+    )
     names = {t.name for t in payments if t.source == "plaid"}
     assert "AUTOPAY PAYMENT - THANK YOU" in names and "MOBILE PAYMENT - THANK YOU" in names
 
@@ -325,8 +365,8 @@ def test_user_edits(s):
 
 
 def test_csv_rows_are_older_than_the_plaid_history_with_amex_fields(s):
-    account = s.scalars(select(Account)).one()
-    plaid_posted = [t.posted_date for t in _all(s) if t.source == "plaid" and t.posted_date]
+    account = _card(s)
+    plaid_posted = [t.posted_date for t in _on_card(s) if t.source == "plaid" and t.posted_date]
     assert account.plaid_history_start == min(plaid_posted)
     csv_rows = [t for t in _all(s) if t.source == "csv"]
     assert len(csv_rows) > 400
@@ -444,7 +484,7 @@ def test_statements_follow_the_amex_identity_with_one_cent_off_once(s):
     days = [(b.closing_date - a.closing_date).days for a, b in itertools.pairwise(statements)]
     assert all(25 <= d <= 35 for d in days)
     assert len({x.closing_date.day for x in statements}) > 1  # closing dates drift
-    posted = [t for t in _all(s) if t.posted_date and t.duplicate_status != "suspect"]
+    posted = [t for t in _on_card(s) if t.posted_date and t.duplicate_status != "suspect"]
     off_identity, off_gate_d, off_fields = [], [], []
     start = statements[0].period_start_override
     for i, st in enumerate(statements):
@@ -503,7 +543,7 @@ def test_autopay_pays_each_statement_balance_except_one_partial_month(s):
 
 
 def test_the_card_reflects_the_latest_statement(s):
-    account = s.scalars(select(Account)).one()
+    account = _card(s)
     latest = s.scalars(select(Statement).order_by(Statement.closing_date.desc())).first()
     assert account.type == "credit" and account.subtype == "credit card"
     assert account.statement_closing_day == cat.CLOSING_DAY
@@ -594,7 +634,7 @@ def test_budget_alerts_match_this_months_spending(s):
 
 
 def test_the_item_is_healthy_with_consent_due_in_25_days(s, created):
-    item = s.scalars(select(PlaidItem)).one()
+    item = _amex(s)
     clock.set_override(now=local_time(TODAY, 23, 59))
     conn = status.connection_status(s)
     assert conn.state == "healthy" and conn.consent_warning and not conn.stale
@@ -608,14 +648,16 @@ def test_the_item_is_healthy_with_consent_due_in_25_days(s, created):
 
 
 def test_sync_runs_every_six_hours_with_one_transient_failure(s):
-    runs = list(s.scalars(select(SyncRun).order_by(SyncRun.started_at)))
+    item = _amex(s)
+    runs = list(
+        s.scalars(select(SyncRun).where(SyncRun.item_id == item.id).order_by(SyncRun.started_at))
+    )
     failed = [r for r in runs if r.status == "error"]
     assert len(failed) == 1 and failed[0].error_code == "INSTITUTION_NOT_RESPONDING"
     assert all(r.status == "success" for r in runs if r is not failed[0])
     scheduled = [r.started_at for r in runs if r.trigger == "schedule"]
     gaps = {round((b - a).total_seconds() / 3600) for a, b in itertools.pairwise(scheduled)}
     assert gaps == {6} and len(scheduled) >= 12
-    item = s.scalars(select(PlaidItem)).one()
     last_ok = [r for r in runs if r.status == "success"][-1]
     assert item.last_sync_success_at == last_ok.finished_at
     day = failed[0].started_at.astimezone().date()
@@ -633,6 +675,168 @@ def test_the_summary_counts_the_rollover(created, s):
     printed = [x for x in created.lines() if x.strip().startswith(cat.ROLLOVER)]
     assert printed and "rolled over" in printed[0]
     assert f"{line.spent / line.available:.0%}" in printed[0]
+
+
+# --------------------------------------------------------------------------- Harbor Bank (MON-5)
+
+
+def _bank_rows(s: Session) -> list[Transaction]:
+    ids = {a.id for a in s.scalars(select(Account).where(Account.type == "depository"))}
+    return [t for t in _all(s) if t.account_id in ids]
+
+
+def _bank_account(s: Session, subtype: str) -> Account:
+    return s.scalars(select(Account).where(Account.subtype == subtype)).one()
+
+
+def test_harbor_bank_is_a_second_item_with_checking_and_savings(s, created):
+    item = _bank(s)
+    assert item.institution_name == "Harbor Bank" and item.status == "healthy"
+    assert item.consented_products == ["transactions"] and item.liabilities_status is None
+    assert (
+        item.consent_expires_at is None and item.history_complete_at and item.days_requested == 730
+    )
+    assert (local_time(TODAY, 23, 59) - item.linked_at).days == 45
+    checking, savings = _bank_account(s, "checking"), _bank_account(s, "savings")
+    for account, name, mask in (
+        (checking, "Everyday Checking", "4417"),
+        (savings, "High Yield Savings", "7702"),
+    ):
+        assert (account.name, account.mask, account.type) == (name, mask, "depository")
+        assert account.item_id == item.id and account.credit_limit is None
+        assert account.current_balance > 0 and account.available_balance <= account.current_balance
+        posted = [
+            t.posted_date for t in _bank_rows(s) if t.account_id == account.id and t.posted_date
+        ]
+        assert account.plaid_history_start == min(posted)
+        assert account.statement_closing_day is None
+    assert not s.scalar(
+        select(Statement.id).where(Statement.account_id.in_([checking.id, savings.id]))
+    )
+    runs = list(s.scalars(select(SyncRun).where(SyncRun.item_id == item.id)))
+    assert len(runs) >= 12 and {r.status for r in runs} == {"success"}
+    assert item.last_sync_success_at == max(r.finished_at for r in runs)
+
+
+def test_bank_rows_land_in_the_bank_categories(s):
+    """W3-PLAN C3 through the real Categorizer: income, transfers, cash and card payments."""
+    names = {v: k for k, v in _category_ids(s).items()}
+    expected = {
+        "ACME ROBOTICS PAYROLL": ("Paycheck", "plaid"),
+        "INTEREST PAYMENT": ("Interest", "plaid"),
+        "IRS TREAS 310 TAX REF": ("Other Income", "plaid"),
+        "ONLINE TRANSFER TO SAV ...7702": ("Transfers", "plaid"),
+        "ONLINE TRANSFER FROM CHK ...4417": ("Transfers", "plaid"),
+        "ATM WITHDRAWAL 24TH ST & MISSION": ("Cash & ATM", "plaid"),
+        "AMERICAN EXPRESS ACH PMT": ("Card Payments", "plaid"),
+        "BAYVIEW PROPERTY MGMT": ("Rent", "rule"),
+        "SFPUC WATER SEWER": ("Utilities & Bills", "plaid"),
+        "CUESA FERRY PLAZA FARMERS": ("Groceries", "plaid"),
+        "RAINBOW GROCERY COOP": ("Groceries", "plaid"),
+    }
+    rows = _bank_rows(s)
+    assert {t.name for t in rows} == set(expected)
+    for t in rows:
+        assert (names[t.category_id], t.category_source) == expected[t.name], t.name
+        assert t.source == "plaid" and t.csv_reference is None
+    incoming = [t for t in rows if names[t.category_id] in ("Paycheck", "Interest", "Other Income")]
+    assert incoming and all(t.amount < 0 for t in incoming)  # Plaid's sign: money in is negative
+    assert all(t.amount > 0 for t in rows if names[t.category_id] in ("Rent", "Cash & ATM"))
+
+
+def test_paychecks_every_other_friday_with_a_raise(s):
+    pay = sorted(
+        (t for t in _bank_rows(s) if t.pfc_detailed == "INCOME_SALARY"), key=lambda t: t.date
+    )
+    assert len(pay) >= 50 and all(t.date.weekday() == 4 for t in pay)
+    assert {(b.date - a.date).days for a, b in itertools.pairwise(pay)} == {14}
+    assert [-t.amount for t in (pay[0], pay[-1])] == list(cat.PAYCHECK)
+
+
+def test_transfers_move_money_between_own_accounts_and_count_nowhere(s):
+    checking, savings = _bank_account(s, "checking"), _bank_account(s, "savings")
+    out = sorted(
+        (t.date, t.amount) for t in _bank_rows(s) if t.pfc_detailed == "TRANSFER_OUT_SAVINGS"
+    )
+    into = sorted(
+        (t.date, -t.amount) for t in _bank_rows(s) if t.pfc_detailed == "TRANSFER_IN_SAVINGS"
+    )
+    assert out and out == into
+    assert all(
+        t.account_id == checking.id for t in _bank_rows(s) if t.amount > 0 and "TO SAV" in t.name
+    )
+    assert all(t.account_id == savings.id for t in _bank_rows(s) if "FROM CHK" in t.name)
+    transfers = _category_ids(s)["Transfers"]
+    month = month_of(TODAY)
+    assert period_spending(s, month).amount_for(transfers) == ZERO
+    assert all(c.kind == "expense" for c in period_spending(s, month).categories)
+
+
+def test_spending_from_checking_counts_in_the_budgets(s):
+    """Rent, the water bill, debit groceries and the ATM are spending (C3), card or not."""
+    month = month_of(TODAY)
+    ids = _category_ids(s)
+    spent = period_spending(s, month)
+    checking = _bank_account(s, "checking")
+    for name in ("Rent", "Cash & ATM", "Groceries"):
+        from_checking = sum(
+            (
+                t.amount
+                for t in _bank_rows(s)
+                if t.account_id == checking.id
+                and t.category_id == ids[name]
+                and month.contains(t.authorized_date or t.date)
+            ),
+            ZERO,
+        )
+        if name != "Cash & ATM" or from_checking:
+            assert from_checking > 0, name
+        assert spent.amount_for(ids[name]) >= from_checking
+
+
+def test_the_summary_prints_income_spending_and_net(created, s):
+    """C4: income is −sum of the income categories' allocations, on the spending figure's basis
+    (calendar month by spend date, pending included); net = income − spending."""
+    month = month_of(TODAY)
+    income_ids = {c.id for c in s.scalars(select(Category).where(Category.kind == "income"))}
+    rows = s.execute(
+        select(v_allocations.c.amount).where(
+            v_allocations.c.category_id.in_(income_ids),
+            v_allocations.c.spend_date >= month.start,
+            v_allocations.c.spend_date <= month.end,
+        )
+    ).scalars()
+    income = -sum(rows, ZERO)
+    assert income > 0 and created.month_income_total == income
+    assert created.month_total == period_spending(s, month).total
+    assert created.month_net == income - created.month_total
+    assert dict(created.month_income)["Paycheck"] > 0
+    printed = "\n".join(created.lines())
+    assert f"  Net       {demo._money(created.month_net):>10}  (income − spending)" in printed
+    assert "Paycheck $" in printed
+
+
+def test_no_bank_row_is_stored_before_it_reached_plaid():
+    now = local_time(TODAY, 10, 0)
+    morning = build_plan(SEED, TODAY, now)
+    last_sync = max(r.started_at for r in morning.sync_runs if r.status == "success")
+    for r in morning.bank_rows:
+        assert local_time(r.auth, r.arrival_hour) <= last_sync, (r.name, r.auth)
+    assert any(r.posted is None for r in morning.bank_rows)  # yesterday's debit purchase
+
+
+@pytest.mark.parametrize("seed", [1, 4, SEED])
+def test_checking_never_runs_dry(seed):
+    from budgetapp.devtools import demo_bank
+
+    plan = build_plan(seed, TODAY, local_time(TODAY, 23, 59))
+    checking = [r for r in plan.bank_rows if r.account == "checking" and r.posted]
+    current = plan.bank_accounts["checking"]["current_balance"]
+    balance = current + sum((r.amount for r in checking), ZERO)  # the opening balance
+    for row in sorted(checking, key=lambda r: (r.posted, r.seq)):
+        balance -= row.amount
+        assert balance >= demo_bank.CHECKING_FLOOR, (row.name, row.posted, balance)
+    assert balance == current
 
 
 # --------------------------------------------------------------------------- realism
@@ -734,7 +938,7 @@ def test_the_plan_keeps_its_shape_on_any_day(today):
     plan = build_plan(SEED, today, local_time(today, 23, 59))
     month = today.replace(day=1)
     spent: dict[str, Decimal] = defaultdict(lambda: ZERO)
-    for row in plan.rows:
+    for row in plan.rows + plan.bank_rows:  # budgets count spending from checking too (C3)
         if row.auth >= month and not row.suspect:
             spent[row.category] += row.amount
     for name, amount in cat.MONTHLY_BUDGETS.items():

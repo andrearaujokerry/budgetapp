@@ -139,6 +139,8 @@ class Row:
     suspect: bool = False
     account_owner: str | None = None
     arrival_hour: int = 12
+    #: ``card``, or Harbor Bank's ``checking`` / ``savings`` (``demo_bank``).
+    account: str = "card"
     # user state
     user_category: str | None = None
     notes: str | None = None
@@ -263,6 +265,11 @@ class Plan:
     linked_at: dt.datetime
     #: Trip name → (first, last) day away from home.
     trips: dict[str, tuple[dt.date, dt.date]] = field(default_factory=dict)
+    #: Harbor Bank (``demo_bank``): its rows, Item, accounts (``checking``, ``savings``), syncs.
+    bank_rows: list[Row] = field(default_factory=list)
+    bank_item: dict[str, Any] = field(default_factory=dict)
+    bank_accounts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    bank_sync_runs: list[SyncRunPlan] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- the planner
@@ -862,16 +869,19 @@ class _Planner:
             )
             day += dt.timedelta(days=self.rng.randint(100, 135))
 
-    def shape_current_month(self) -> None:
+    def shape_current_month(self, fixed: Iterable[Row] = ()) -> None:
         """This month: Health & Fitness at about 85 %, Entertainment over, the rest under 75 %.
 
         Works on any day of the month: the gym bills on the 1st and is Health & Fitness's only
         charge so far; concert tickets bought in the first days push Entertainment over budget.
         Other budgeted categories lose random older purchases until they are under 75 %.
+        ``fixed``: purchases from other accounts (Harbor Bank) that count toward the budgets but
+        are never removed.
         """
         budgets = cat.MONTHLY_BUDGETS
         by_category: dict[str, list[Row]] = defaultdict(list)
-        for row in sorted(self.rows, key=lambda r: (r.auth, r.seq)):
+        mine = {id(r) for r in self.rows}
+        for row in sorted([*self.rows, *fixed], key=lambda r: (r.auth, r.seq)):
             if row.kind == "purchase" and row.auth >= self.month:
                 by_category[row.category].append(row)
         recent = self.today - DAY * 2
@@ -879,7 +889,7 @@ class _Planner:
         for category, rows in by_category.items():
             if category not in budgets:
                 continue
-            removable = [r for r in rows if not r.scheduled]
+            removable = [r for r in rows if not r.scheduled and id(r) in mine]
             if category == cat.NEARLY_FULL:
                 cap = ZERO
             elif category == cat.OVERSPENT:
@@ -1265,7 +1275,7 @@ class _Planner:
         jan1 = dt.date(self.today.year, 1, 1)
         m = lambda back: month_start(self.today, back)  # noqa: E731
         out: list[BudgetPlan] = [
-            BudgetPlan(None, "monthly", Decimal("3600.00"), link_month),
+            BudgetPlan(None, "monthly", cat.EARLIER_OVERALL_TARGET, link_month),
             BudgetPlan(None, "monthly", cat.OVERALL_TARGET, m(4)),
         ]
         history = {
@@ -1477,6 +1487,8 @@ class _Planner:
 
 def build_plan(seed: int, today: dt.date, now: dt.datetime) -> Plan:
     """Plan the whole demo database for ``(seed, today)``; ``now`` bounds the sync history."""
+    from budgetapp.devtools.demo_bank import BankPlanner  # it builds on this module
+
     planner = _Planner(seed, today, now)
     for day in planner.days():
         planner.daily(day)
@@ -1485,7 +1497,9 @@ def build_plan(seed: int, today: dt.date, now: dt.datetime) -> Plan:
     planner.recent_pending()
     planner.refunds()
     planner.credits()
-    planner.shape_current_month()
+    bank = BankPlanner(planner)
+    bank.ledger()
+    planner.shape_current_month(fixed=bank.rows)
     planner.fx_fees()
     off = planner.rounding_cent()
     planner.post()
@@ -1498,6 +1512,11 @@ def build_plan(seed: int, today: dt.date, now: dt.datetime) -> Plan:
     item, account = planner.item_and_account(runs, statements, balance, history_start)
     alerts = planner.alerts(runs, "{item_id}")
     rows = sorted(planner.rows, key=lambda r: (r.auth, r.seq))
+    bank.card_payments(rows)
+    bank.interest()
+    bank.finish()
+    bank_runs = bank.sync_runs()
+    bank_item, bank_accounts = bank.item_and_accounts(bank_runs)
     return Plan(
         seed=seed,
         today=today,
@@ -1525,4 +1544,8 @@ def build_plan(seed: int, today: dt.date, now: dt.datetime) -> Plan:
         plaid_history_start=history_start,
         linked_at=planner.linked_at,
         trips=dict(planner.trips),
+        bank_rows=sorted(bank.rows, key=lambda r: (r.auth, r.seq)),
+        bank_item=bank_item,
+        bank_accounts=bank_accounts,
+        bank_sync_runs=bank_runs,
     )
