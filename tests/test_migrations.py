@@ -5,9 +5,11 @@ from pathlib import Path
 import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import exc, select, text
 
 from budgetapp.db import (
+    alembic_config,
     code_head,
     current_revision,
     downgrade_migrations,
@@ -152,6 +154,24 @@ def test_upgrade_downgrade_upgrade(scratch_engine):
         count = conn.execute(text("SELECT count(*) FROM categories")).scalar()
         assert count == SEEDED + len(BANK_PALETTE)
         assert conn.execute(text("SELECT count(*) FROM v_allocations")).scalar() == 0
+
+
+def test_the_migrations_form_one_line():
+    """W3-PLAN C8: 0003 → 0005_bank_categories → 0006_income_preference, one head, and no 0004
+    (BANK needed no migration, so ``0004_bank_connections`` was never written)."""
+    script = ScriptDirectory.from_config(alembic_config())
+    assert script.get_heads() == [HEAD]
+    chain = [revision.revision for revision in script.walk_revisions()]  # head first
+    assert chain == [
+        "0006_income_preference",
+        "0005_bank_categories",
+        "0003_f1_verification_fixes",
+        "0002_seed_defaults",
+        "0001_initial",
+    ]
+    for newer, older in zip(chain, chain[1:], strict=False):
+        assert script.get_revision(newer).down_revision == older
+    assert not list(VERSIONS.glob("0004_*.py"))
 
 
 def test_0003_downgrades_and_upgrades_cleanly(scratch_engine):

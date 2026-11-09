@@ -2,8 +2,8 @@
 
 The owner's production database already holds a settings row they customized. Upgrading must add
 the switch, on, and leave every other setting as it was; downgrading drops only the column. The
-previous revision is read from the script (``down_revision``), since the integrator chains the
-wave-3 migrations 0004 → 0005 → 0006.
+previous revision is read from the script (``down_revision``): wave 3 chains 0003 →
+0005_bank_categories → 0006_income_preference.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ REVISION = "0006_income_preference"
 
 
 def _previous() -> str:
-    """The revision 0006 upgrades from (0003 on its own branch, 0005 once chained)."""
+    """The revision 0006 upgrades from (0005_bank_categories)."""
     script = ScriptDirectory.from_config(alembic_config())
     revision = script.get_revision(REVISION)
     assert revision is not None
