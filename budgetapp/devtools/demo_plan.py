@@ -22,7 +22,9 @@ reaches the app:
   (and its Gate D check) is off by $0.01.
 
 The current month is shaped (on any day of the month) so that Health & Fitness is at about 85 % of
-its budget, Entertainment is over budget and the other budgeted categories stay under 75 %.
+its budget, Entertainment is over budget and the other budgeted categories stay under 75 %,
+counting the spending from Harbor Bank checking too: ``demo_bank`` plans that bank's checking and
+savings accounts (W3-PLAN MON-5) into ``Plan.bank_rows``.
 """
 
 from __future__ import annotations

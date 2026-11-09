@@ -12,17 +12,20 @@ sign on bank accounts too: positive is money leaving the account, negative is mo
 * **Spending from checking.** Rent on the 1st (the persona's rule puts it in Rent), the water bill
   around the 20th (Utilities & Bills), a few debit-card groceries and one or two ATM withdrawals a
   month (``TRANSFER_OUT_WITHDRAWAL``: Cash & ATM). ACH debits and credits land on business days.
-* **Moving money.** $500 to savings on the 2nd: a positive ``TRANSFER_OUT_SAVINGS`` row on
-  checking and a negative ``TRANSFER_IN_SAVINGS`` row on savings (Transfers: neither spending nor
-  income). Every Amex payment is mirrored on checking on the same day by a positive
-  ``LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`` row (Card Payments): paid once, counted nowhere twice.
+* **Moving money.** ``SAVINGS_TRANSFER`` ($1,500) to savings on the 2nd: a positive
+  ``TRANSFER_OUT_SAVINGS`` row on checking and a negative ``TRANSFER_IN_SAVINGS`` row on savings
+  (Transfers: neither spending nor income). Every Amex payment is mirrored on checking on the
+  same day by a positive ``LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`` row (Card Payments): paid once,
+  counted nowhere twice.
 * **Like a US bank through Plaid:** ``transaction_code`` is empty (W3-PLAN §1), ACH rows have no
-  merchant, debit purchases post a day or two after the purchase (the last ones still pending),
-  and nothing exists before the sync that would have brought it.
+  merchant, debit purchases post a day or two after the purchase (yesterday's still pending),
+  and nothing exists before the sync that would have brought it. Checking never drops below
+  :data:`CHECKING_FLOOR`: the opening balance is chosen so.
 
-The planner has its own random stream, so the card's data is the same with or without it, and
-runs after the card's ledger (for the payments it mirrors). Only the bank rows in budgeted
-categories reach the card planner first (``shape_current_month`` counts them as fixed).
+The planner has its own random stream, so the card's random draws are the same with or without
+it. Its ledger is planned before the card shapes the current month, which counts checking's
+spending in budgeted categories as fixed (``shape_current_month``); the card payments it mirrors
+and the savings interest come after the card's ledger.
 """
 
 from __future__ import annotations
