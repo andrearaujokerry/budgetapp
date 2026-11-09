@@ -57,11 +57,10 @@ from budgetapp.models import (
     Transaction,
     TransactionSplit,
     TransactionTombstone,
-    get_app_settings,
 )
 from budgetapp.periods import Period, month_of, previous_period
 from budgetapp.services.accounts import BANK
-from budgetapp.services.spending import basis_for_mode, period_spending, spending_by_category
+from budgetapp.services.spending import period_income, period_spending
 
 log = logging.getLogger(__name__)
 
@@ -128,8 +127,8 @@ class DemoSummary:
     month_total: Decimal
     #: Rows on Harbor Bank's checking and savings accounts (MON-5).
     bank_transactions: int = 0
-    #: This month's income per income category, positive (W3-PLAN C4: ``−sum`` of the income
-    #: categories' allocations, on the spending figure's date basis and pending setting).
+    #: This month's income per income category, positive (``spending.period_income``, W3-PLAN
+    #: C4: the spending figure's date basis and pending setting).
     month_income: tuple[tuple[str, Decimal], ...] = ()
 
     @property
@@ -407,18 +406,8 @@ def _summary(
     lines += tuple(
         category_line(n, Decimal("0.00")) for n in budgets if n not in names and n in ids
     )
-    settings = get_app_settings(session)
-    income = spending_by_category(
-        session,
-        month.start,
-        month.end,
-        basis=basis_for_mode(settings.budget_period_mode),
-        include_pending=settings.include_pending_in_budgets,
-        kinds=("income",),
-    )
-    month_income = tuple(
-        (row.name, -row.amount) for row in sorted(income, key=lambda r: r.amount) if row.amount
-    )
+    income = period_income(session, month)  # C4, next to period_spending (largest first)
+    month_income = tuple((row.name, row.amount) for row in income.categories if row.amount)
     bank_ids = select(Account.id).where(Account.type == BANK)
     statements = sorted(s.closing_date for s in plan.statements)
     return DemoSummary(

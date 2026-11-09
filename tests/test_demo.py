@@ -8,6 +8,7 @@ and dropped at the end.
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 import itertools
 import os
 import re
@@ -42,10 +43,17 @@ from budgetapp.models import (
     v_allocations,
 )
 from budgetapp.periods import month_of, previous_period
-from budgetapp.plaid_gateway import ALLOWED_METHODS, PlaidError, PlaidGateway, gateway_methods
+from budgetapp.plaid_gateway import (
+    ALLOWED_METHODS,
+    PlaidError,
+    PlaidGateway,
+    RealPlaidGateway,
+    gateway_methods,
+)
 from budgetapp.services import status
 from budgetapp.services.categorize import Categorizer, is_payment
 from budgetapp.services.spending import period_spending
+from tests.fake_plaid import FakePlaidGateway
 
 SEED = 7
 TODAY = dt.date(2026, 10, 15)
@@ -984,6 +992,27 @@ def test_the_demo_gateway_refuses_every_plaid_call_politely():
         err = info.value
         assert err.display_message == DEMO_MESSAGE and DEMO_MESSAGE in err.error_message
         assert not err.needs_reconnect and not err.retryable and not err.restart_pagination
+
+
+@pytest.mark.parametrize(
+    "gateway_class",
+    [DemoPlaidGateway, RealPlaidGateway, FakePlaidGateway],
+    ids=["demo", "real", "fake"],
+)
+def test_every_gateway_takes_the_protocols_arguments(gateway_class):
+    """Each gateway accepts every argument of the ``PlaidGateway`` protocol, with its kind and
+    default (wave 3: ``create_link_token(account_selection=...)`` for Add accounts, BANK-5); an
+    extra argument must be keyword-only and optional."""
+    for name in ALLOWED_METHODS:
+        protocol = inspect.signature(getattr(PlaidGateway, name)).parameters
+        own = inspect.signature(getattr(gateway_class, name)).parameters
+        for param in protocol.values():
+            assert param.name in own, f"{gateway_class.__name__}.{name} lacks {param.name}"
+            mine = own[param.name]
+            assert (mine.kind, mine.default) == (param.kind, param.default), (name, param.name)
+        for extra in own.keys() - protocol.keys():
+            assert own[extra].kind is inspect.Parameter.KEYWORD_ONLY, (name, extra)
+            assert own[extra].default is not inspect.Parameter.empty, (name, extra)
 
 
 def test_the_command_refuses_production(capsys):
