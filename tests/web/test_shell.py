@@ -11,6 +11,7 @@ page must keep: it renders with an empty database, inside the full layout.
 from __future__ import annotations
 
 import datetime as dt
+import html as html_lib
 import re
 from decimal import Decimal
 
@@ -500,6 +501,128 @@ def test_a_bank_consent_banner_names_the_bank_without_amex_wording(probe_client,
     html = probe_client.get("/_probe/page").text
     assert "Renew your Capital One connection by" in html and "(6 days left)." in html
     assert "12 months" not in html
+
+
+def notices(html: str) -> str:
+    """The every-page notices as text (empty when there are none)."""
+    match = re.search(r'<div class="notices">(.*?)<main', html, re.S)
+    if match is None:
+        return ""
+    return " ".join(html_lib.unescape(re.sub(r"<[^>]+>", " ", match.group(1))).split())
+
+
+def top_bar_action(html: str) -> str:
+    """The sync status partial: the pill and its action."""
+    return re.search(r'<div id="sync-status".*?</div>', html, re.S).group(0)
+
+
+def td_bank_broken(db) -> None:
+    make_item(
+        db,
+        institution_name="TD Bank",
+        institution_id="ins_14",
+        status="needs_reconnect",
+        error_code="ITEM_LOGIN_REQUIRED",
+        consent_expires_at=None,
+    )
+
+
+def test_a_consent_due_at_one_bank_shows_beside_another_banks_reconnect(probe_client, db, at_now):
+    """UX review (major): a reconnect at TD Bank renews nothing at American Express, so Amex's
+    renewal (5 days left) is still announced on every page while TD Bank waits."""
+    set_app_settings(db, consent_reminder_days=30)
+    make_item(db, consent_expires_at=NOW + dt.timedelta(days=5))  # American Express
+    td_bank_broken(db)
+    html = probe_client.get("/_probe/page").text
+    shown = notices(html)
+    assert "TD Bank needs attention. Syncing it is paused" in shown
+    due = date_long((NOW + dt.timedelta(days=5)).astimezone().date())
+    assert f"Renew your American Express connection by {due} (5 days left)." in shown
+    assert html.index('id="reconnect-banner"') < html.index('id="consent-banner"')
+
+
+def test_an_expired_consent_elsewhere_is_still_announced(probe_client, db, at_now):
+    """American Express's consent lapsed while TD Bank needs a reconnect: the consent banner
+    says so (with Renew now), and the healthy-but-lapsed card's renewal isn't lost."""
+    set_app_settings(db, consent_reminder_days=30)
+    make_item(db, consent_expires_at=NOW - dt.timedelta(days=2))
+    td_bank_broken(db)
+    html = probe_client.get("/_probe/page").text
+    shown = notices(html)
+    assert "Your American Express consent has expired." in shown
+    assert re.search(r'id="consent-banner">.*?Renew now', html, re.S)
+    # nothing can sync (TD needs a reconnect, Amex's consent lapsed): the top bar's repair
+    assert "Reconnect" in top_bar_action(html) and "sync-now" not in top_bar_action(html)
+
+
+def test_several_due_consents_are_named_together(probe_client, db, at_now):
+    set_app_settings(db, consent_reminder_days=30)
+    make_item(db, consent_expires_at=NOW - dt.timedelta(days=1))  # American Express, lapsed
+    for name, inst, days in (("TD Bank", "ins_14", 12), ("Citibank", "ins_5", 20)):
+        make_item(
+            db,
+            institution_name=name,
+            institution_id=inst,
+            consent_expires_at=NOW + dt.timedelta(days=days),
+        )
+    html = probe_client.get("/_probe/page").text
+    (banner,) = re.findall(
+        r'<div class="banner banner--(\w+)" role="\w+" id="consent-banner">', html
+    )
+    assert banner == "over"
+    due = date_long((NOW + dt.timedelta(days=12)).astimezone().date())
+    assert (
+        "Your American Express consent has expired. Renew your TD Bank and Citibank connections "
+        f"by {due} (12 days left)."
+    ) in notices(html)
+    assert "Amex asks you to renew access every 12 months." in notices(html)
+
+
+def test_sync_now_stays_while_another_connection_can_sync(probe_client, db, at_now):
+    """UX review: one broken bank used to replace Sync now on every page; the healthy card can
+    still sync, and the pill and banner lead to TD Bank's repair."""
+    make_item(db, last_sync_success_at=NOW - dt.timedelta(minutes=5))  # American Express
+    td_bank_broken(db)
+    action = top_bar_action(probe_client.get("/_probe/page").text)
+    assert 'id="sync-now"' in action and ">Reconnect<" not in action
+    assert pill(action) == ("needs_reconnect", "Reconnect needed")
+    assert 'data-tooltip="TD Bank: reconnect needed · American Express: connected"' in action
+
+
+def test_an_unnamed_connection_reads_as_a_sentence(probe_client, db, at_now):
+    make_item(
+        db,
+        institution_name=None,
+        institution_id=None,
+        status="needs_reconnect",
+        error_code="ITEM_LOGIN_REQUIRED",
+    )
+    shown = notices(probe_client.get("/_probe/page").text)
+    assert "A bank connection needs attention. Syncing it is paused until" in shown
+
+
+def test_two_logins_at_one_bank_are_told_apart(probe_client, db, at_now):
+    """UX review: BANK-3's "a different login at a bank I've already linked": the pill's tooltip
+    and the banner say which Chase login needs the reconnect."""
+    from tests.factories import make_account
+
+    mine = make_item(db, institution_name="Chase", institution_id="ins_3")
+    make_account(db, mine, name="Sapphire Preferred", mask="1234")
+    theirs = make_item(
+        db,
+        institution_name="Chase",
+        institution_id="ins_3",
+        status="needs_reconnect",
+        error_code="ITEM_LOGIN_REQUIRED",
+    )
+    make_account(db, theirs, name="Freedom Unlimited", mask="5678")
+    html = probe_client.get("/_probe/page").text
+    tooltip = re.search(r'class="pill pill--\w+" href="/connection" data-tooltip="([^"]*)"', html)
+    assert html_lib.unescape(tooltip.group(1)) == (
+        "Chase (Freedom Unlimited ··5678): reconnect needed · "
+        "Chase (Sapphire Preferred ··1234): connected"
+    )
+    assert "Chase (Freedom Unlimited ··5678) needs attention." in notices(html)
 
 
 def test_htmx_gets_the_partial_with_an_out_of_band_toast(probe_client, db, at_now):

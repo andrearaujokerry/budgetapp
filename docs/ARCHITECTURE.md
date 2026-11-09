@@ -162,9 +162,15 @@ Rules:
   the old key (`secrets.move_legacy_production_token`). On any doubt the old key stays and keeps
   working for that one Item (a failed or mismatched write — a bad copy is deleted again so it
   can't shadow the good one — or a different token already under the new key), linking another
-  bank waits, and `./run doctor --env production` says what to do. With no Item or several, only
-  Plaid can say whose it is: Re-attach calls `/item/get` and moves it to that Item. Doctor reads
-  and reports; it never moves anything.
+  bank waits, and `./run doctor --env production` says what to do. When only the last step failed
+  (the old key couldn't be deleted, say for want of Keychain approval in an agent), the old key
+  is a copy of a token saved and read back under its Item's own key: it never blocks anything
+  (every decision about the v1 token compares its value with each Item's own token, so it can't
+  lose its owner), and every production use of that Item's token deletes it, best effort
+  (`sync.access_token_for`; doctor points to `./run sync --env production` in Terminal, where
+  macOS can ask). With no Item or several and no match, only Plaid can say whose it is: Re-attach
+  calls `/item/get` and moves it to that Item. `secrets.legacy_token_state` names the four states
+  (none, copy, movable, unplaced). Doctor reads and reports; it never moves anything.
 
 ## 4. Repository layout
 
@@ -696,8 +702,9 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   offers no link once 10 exist (`TRIAL_ITEM_LIMIT`).
 - **The guard.** A production new-link token is issued only while no unexpired
   `plaid.link_in_progress.production` marker exists (one link at a time), no unsaved production
-  token waits in a recovery file, no token in Keychain lacks its Item row and no v1 token is left
-  (re-attach first, so the duplicate check knows every bank), and fewer than 10 Items exist
+  token waits in a recovery file, no token in Keychain lacks its Item row, no v1 token is left
+  that the app can't place (re-attach first, so the duplicate check knows every bank) or failed
+  to move, and fewer than 10 Items exist
   (`linking.link_blocks`, with `secrets.production_link_blockers` for the Keychain-only facts) —
   checked and the marker set under the link lock. A v1 token of the one Item is moved first.
   The marker records a random attempt id that goes back to the page with the Link token; only
@@ -714,10 +721,14 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   checkbox in the confirm dialog, sent as `different_login`). Even then the link is refused when
   any picked account's name and mask match an account already linked at that institution. Masks
   are compared with masks only, never with account numbers (the app has none). With connections
-  in place, metadata without an institution (or, with the choice, without accounts) is refused
-  too. The Sandbox applies the same check to Link; its test Items made without Link don't.
-  Whether a public token that is never exchanged counts toward the 10 is not documented; the
-  app treats the exchange as the step that creates the Item.
+  in place, metadata without the institution's id (or, with the choice, without accounts) is
+  refused too: Plaid's `onSuccess` names an institution with both its id and its name, and every
+  Item the app saves has the id. The Sandbox applies the same check to Link; its test Items made
+  without Link don't. Whether a public token that is never exchanged counts toward the 10 is not
+  documented; the app treats the exchange as the step that creates the Item. The refusal can't
+  undo what happened in Plaid's window: at OAuth banks that don't allow duplicates, signing in to
+  the same login again already sends the first Item to `ITEM_LOGIN_REQUIRED` (RESEARCH T1), which
+  Reconnect repairs.
 - **Re-attach.** A token in Keychain whose Item row is missing (lost or restored database, or a
   crash between the Keychain write and the commit), and a v1 token the app can't place, are
   re-attached per token: `/item/get` names the Item, its row is rebuilt from `/item/get` and
@@ -745,7 +756,11 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   and available balance) and its own actions: Reconnect, Renew consent (when a consent date is
   known: Plaid's, or the American Express estimate), Add accounts, and "Grant access to statement
   details" for card connections only. Those actions always need Plaid Link, so a page with a
-  connection loads Plaid's script whenever linking is possible.
+  connection loads Plaid's script whenever linking is possible. It also names the connection's
+  Keychain item (never the token), so the owner's password-manager copies can be told apart.
+  Connections at the same institution (a second login, or Sandbox test Items at one test bank)
+  are told apart everywhere by a label from their first account, "Chase (Freedom ··5678)"
+  (`status.connection_labels`).
 - Link's `onExit` (Link closed without linking) clears its own attempt's marker. The
   `CLOSE_OAUTH` and `FAIL_OAUTH` events are logged as "not linked" but never clear it: the bank's
   window closed or timed out while Link itself stays open and can still succeed.
@@ -789,7 +804,12 @@ sync_item(item_id, trigger):
 - **Stale data:** `status.py` reports `stale` (and alerts once a day) when the last successful
   sync is more than 36 hours old, whatever the Item status says.
 - **Sync now:** `/transactions/refresh` (free on the Trial plan, 2 per minute), then syncs now
-  and after about 15 s, 45 s and 2 min.
+  and after about 15 s, 45 s and 2 min. A connection that needs reconnecting is left out while
+  another can sync; the top bar keeps Sync now as long as one can (`ConnectionStatus.syncable`).
+- **Accounts Plaid stops listing** (unticked in Add accounts, or closed: "Plaid will stop
+  returning the account", RESEARCH T2.4 and the T2 gotchas) keep their history; `/accounts/get`
+  marks them with a notice (`sync.mark_not_shared`, read by `sync.no_longer_shared`), their
+  balance is the last one Plaid sent, and a later listing clears the notice.
 - **After linking or update mode:** the web process re-syncs with backoff until
   `HISTORICAL_UPDATE_COMPLETE` (cap about 1 hour), and once shortly after update mode.
 - **Consent (SYNC-6, BANK-6):** read on every run. Only American Express (`ins_10`) asks every 12
@@ -797,7 +817,10 @@ sync_item(item_id, trigger):
   null; another bank uses Plaid's `consent_expiration_time` or has no due date (no reminder, no
   banner). Renewal is update mode. The top-bar pill shows the worst connection and names each
   institution in its tooltip; the reconnect and consent banners and the connection alerts name
-  the institution(s).
+  the institution(s). The consent banner names every connection whose consent is due except one
+  that itself needs reconnecting (its Reconnect renews it), so it shows beside another bank's
+  reconnect banner. `ITEM_LOGIN_REQUIRED` is explained as a consent problem only for American
+  Express; at another bank it can as well follow a password change or withdrawn access.
 - Sandbox Items expire after 30 days (`ITEM_LOGIN_REQUIRED`); handled like any reconnect.
 
 ## 9. Web layer

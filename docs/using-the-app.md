@@ -10,15 +10,17 @@ guide walks through each page in the order of the menu:
 
 ## Everywhere
 
-- **The status in the top bar** shows the connection: Connected, Syncing…, Data is stale (no
-  successful sync for 36 hours), Sync problem, Reconnect needed, or Not linked. Click it for the
-  Connection page.
-- **Sync now** (next to it) asks Plaid to fetch fresh data from Amex, syncs at once and again
-  after about 15 seconds, 45 seconds and 2 minutes, while Plaid catches up. You rarely need it:
-  the background agent syncs four times a day. When the connection needs you, the button becomes
-  **Reconnect** or **Renew access** and opens the Connection page.
+- **The status in the top bar** shows your connections: Connected, Syncing…, Data is stale (no
+  successful sync for 36 hours), Sync problem, Reconnect needed, or Not linked. With several
+  connections it shows the one that needs you most, and its tooltip lists each bank with its
+  state. Click it for the Connection page.
+- **Sync now** (next to it) asks Plaid to fetch fresh data from your banks and cards, syncs at
+  once and again after about 15 seconds, 45 seconds and 2 minutes, while Plaid catches up. You
+  rarely need it: the background agent syncs four times a day. A connection that needs
+  reconnecting waits for you while the others sync. When no connection can sync, the button
+  becomes **Reconnect** or **Renew access** and opens the Connection page.
 - **Banners** at the top of every page (except Connection, which shows the same things in more
-  detail) tell you when Amex needs you to reconnect or when the yearly consent renewal is due.
+  detail) name each bank that needs you to reconnect and each one whose consent renewal is due.
   See [Reconnecting and renewing](reconnecting.md).
 - **`/`** jumps to the search box on pages that have one.
 - Pages work in light and dark mode, follow your Mac's setting, and fit a narrow window.

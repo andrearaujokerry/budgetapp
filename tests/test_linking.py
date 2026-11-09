@@ -1356,8 +1356,10 @@ def test_masks_are_compared_with_masks_only(db, sandbox, fake_plaid, secrets, se
     [
         (link_meta(None, ("Checking", "0001")), "didn't say which bank"),
         ({"institution": TD["institution"], "accounts": []}, "didn't list the accounts"),
+        (link_meta({"name": "TD Bank"}, ("Savings", "0002")), "didn't say which bank"),
+        (link_meta({"institution_id": "", "name": "TD Bank"}), "didn't say which bank"),
     ],
-    ids=["no-institution", "no-accounts"],
+    ids=["no-institution", "no-accounts", "name-without-id", "empty-id"],
 )
 def test_metadata_that_cant_be_checked_is_refused_once_something_is_linked(db, metadata, words):
     td_bank(db)
@@ -1674,3 +1676,123 @@ def test_the_overview_shows_each_connection_with_its_kind_of_accounts(db, produc
     (account,) = td_view.accounts
     assert not account.is_card and account.kind == "Checking"
     assert amex_view.accounts[0].is_card and amex_view.accounts[0].kind == "Credit card"
+
+
+# ------------------------------------------------------------- W3-BANK review fixes (safety)
+
+
+def v1_amex(db, prod_plaid, secrets):
+    """The owner's live state before wave 3: one Amex Item, its token under the v1 name."""
+    amex = prod_plaid.add_item(item_id="item-amex")
+    row = make_item(db, plaid_item_id="item-amex", last_sync_success_at=None)
+    make_account(db, row, plaid_account_id=amex.default_account_id, mask="1005")
+    secrets.set(LEGACY, amex.access_token)
+    return amex, row
+
+
+def test_a_v1_copy_the_move_could_not_delete_never_blocks_linking(
+    db, session_factory, production, prod_plaid, secrets, notifier
+):
+    """Safety review (major): the first sync moved the v1 token (new key written and read back)
+    but couldn't delete the old key. That copy can't lose its owner (placing the v1 token
+    compares values), so the page offers Link and a link goes through, instead of a refusal that
+    blamed a failed save; the next allowed delete removes the copy."""
+    amex, row = v1_amex(db, prod_plaid, secrets)
+    secrets.fail_on[("delete", LEGACY)] = app_secrets.KeychainApprovalNeeded(LEGACY, -25308)
+    out = sync_service.sync_item(
+        session_factory,
+        prod_plaid,
+        secrets,
+        production,
+        row.id,
+        trigger="schedule",
+        notifier=notifier,
+        sleep=no_sleep,
+    )
+    assert out.status == "success"
+    assert secrets.values[prod_key("item-amex")] == secrets.values[LEGACY] == amex.access_token
+    overview = linking.connection_overview(db, production, store=secrets)
+    assert overview.can_link and overview.link_blockers == () and not overview.reattach_available
+
+    link = linking.new_link_token(db, prod_plaid, production, store=secrets)  # retries; refused
+    db.commit()
+    assert link.attempt and LEGACY in secrets.values
+    td = prod_plaid.add_item(
+        item_id="item-td",
+        institution_id="ins_14",
+        institution_name="TD Bank",
+        accounts=[checking()],
+    )
+    result = linking.exchange(
+        session_factory,
+        prod_plaid,
+        secrets,
+        production,
+        prod_plaid.public_token_for(td),
+        link_meta(TD["institution"], ("Checking", "0001")),
+        attempt=link.attempt,
+        sleep=no_sleep,
+    )
+    assert result.plaid_item_id == "item-td" and len(items(db)) == 2
+    assert secrets.values[prod_key("item-td")] == td.access_token
+    assert linking.legacy_state(db, store=secrets) == app_secrets.LegacyTokenState(
+        "copy", "item-amex"
+    )
+    # TD Bank's syncs never touch the copy; American Express's delete it once Keychain allows.
+    del secrets.fail_on[("delete", LEGACY)]
+    assert sync_service.access_token_for(production, "item-td", secrets) == td.access_token
+    assert LEGACY in secrets.values
+    assert sync_service.access_token_for(production, "item-amex", secrets) == amex.access_token
+    assert LEGACY not in secrets.values
+
+
+def test_a_v1_token_whose_move_failed_still_pauses_linking_with_the_right_reason(
+    db, production, prod_plaid, secrets
+):
+    """The other half of C6's "on any doubt": the new key couldn't be written, so the v1 token is
+    still the only copy and still unmoved. A second Item now would leave it without an owner."""
+    v1_amex(db, prod_plaid, secrets)
+    secrets.fail_on[("set", prod_key("item-amex"))] = app_secrets.SecretStoreError("locked")
+    with pytest.raises(LinkRefused, match="couldn't save the access token of your first"):
+        linking.new_link_token(db, prod_plaid, production, store=secrets)
+    assert linking.legacy_state(db, store=secrets) == app_secrets.LegacyTokenState(
+        "movable", "item-amex"
+    )
+
+
+def test_re_attach_only_deletes_a_v1_copy(db, session_factory, production, prod_plaid, secrets):
+    """A copy of a token saved under its Item's own key needs no /item/get: Re-attach (run for
+    an orphan) deletes it and asks Plaid about nothing else."""
+    amex, _row = v1_amex(db, prod_plaid, secrets)
+    app_secrets.store_access_token(production, "item-amex", amex.access_token, store=secrets)
+    assert linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production) == []
+    assert prod_plaid.calls_to("get_item") == [] and LEGACY not in secrets.values
+
+
+def test_link_metadata_naming_a_linked_bank_without_its_id_is_refused_before_the_exchange(
+    db, session_factory, production, prod_plaid, secrets
+):
+    """Safety review (minor): metadata with the institution's name but no id (Plaid always sends
+    both; this is an odd or tampered request) matched no saved Item, so a second American
+    Express link was exchanged. It is refused now, and nothing reaches Plaid or Keychain."""
+    amex, _row = v1_amex(db, prod_plaid, secrets)
+    sync_service.migrate_legacy_token(db, production, secrets)
+    link = linking.new_link_token(db, prod_plaid, production, store=secrets)
+    db.commit()
+    second = prod_plaid.add_item(item_id="item-amex-2")
+    before = {k: v for k, v in secrets.values.items() if "link_in_progress" not in k}
+    with pytest.raises(LinkRefused, match="didn't say which bank"):
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(second),
+            {"institution": {"name": "American Express"}, "accounts": []},
+            attempt=link.attempt,
+            sleep=no_sleep,
+        )
+    assert prod_plaid.calls_to("exchange_public_token") == []
+    assert {k: v for k, v in secrets.values.items() if "link_in_progress" not in k} == before
+    assert app_secrets.get_link_in_progress(store=secrets) is None
+    assert app_secrets.production_item_ids(store=secrets) == ["item-amex"]

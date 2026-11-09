@@ -361,7 +361,9 @@ def sync_now(
     jobs: JobsDep,
 ) -> Response:
     """Sync now (SYNC-2): ``/transactions/refresh``, a sync now and three follow-ups, in the
-    background. Answers at once with the status pill saying "Syncing…"."""
+    background. Answers at once with the status pill saying "Syncing…". A connection that needs
+    reconnecting is left out while another can sync (only Reconnect can fix it, and the top bar
+    keeps Sync now for the others); when every connection needs it, all are tried as before."""
     if is_demo(request):
         return _sync_answer(request, session, "info", DEMO_MESSAGE)
     conn = connection_status(session)
@@ -374,7 +376,9 @@ def sync_now(
     gateway, problem = plaid_gateway(request)
     if gateway is None:
         return _sync_answer(request, session, "error", problem or KEYS_MISSING)
-    for item in conn.items:
+    targets = [i for i in conn.items if i.item_status != "needs_reconnect"] or list(conn.items)
+    waiting = [i.name for i in conn.items if i not in targets]
+    for item in targets:
         run_id = sync_service.prepare_run(session, item.item_id, "manual").id
         session.commit()
         task = sync_service.RefreshThenSync(
@@ -389,7 +393,11 @@ def sync_now(
         if not jobs.submit(refresh_key(item.item_id), task, replace=True):
             _abandon_run(session_factory, run_id)
             return _sync_answer(request, session, "error", NOT_STARTED)
-    return _sync_answer(request, session, "info", "Sync started", running=True)
+    text = "Sync started"
+    if waiting:
+        who = waiting[0] if len(waiting) == 1 else f"{', '.join(waiting[:-1])} and {waiting[-1]}"
+        text += f". {who} {'waits' if len(waiting) == 1 else 'wait'} for you to reconnect first."
+    return _sync_answer(request, session, "info", text, running=True)
 
 
 @router.get("/connection/sync-status")

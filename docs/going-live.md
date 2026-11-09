@@ -19,12 +19,15 @@ So the app treats every production link as a one-time event per bank login:
   connections are used. Otherwise the button stays off and the page says why and what to do. The
   Connection page shows how many of the 10 the app has created so far.
 - When Plaid's window closes, the app compares the bank you picked with the banks you have
-  linked. The same bank again is refused before Plaid creates anything: to share more accounts of
-  that login, use **Add accounts** on its connection; to repair it, use **Reconnect**. If it
-  really is a different login at the same bank (someone else's, or a business login), tick
-  **"A different login at a bank I've already linked"** in the dialog before you link. Even then,
-  an account whose name and last digits match one already linked there is refused, because that
-  is the same login again.
+  linked. The same bank again is refused before its token is exchanged, the step that uses one of
+  your 10: to share more accounts of that login, use **Add accounts** on its connection; to repair
+  it, use **Reconnect**. If it really is a different login at the same bank (someone else's, or a
+  business login), tick **"A different login at a bank I've already linked"** in the dialog before
+  you link. Even then, an account whose name and last digits match one already linked there is
+  refused, because that is the same login again. The refusal can't undo what happened in Plaid's
+  window: at some banks (Plaid names Chase, PNC, Navy Federal and Schwab) signing in to the same
+  login a second time already breaks the first connection. If that happens, its pill says
+  **Reconnect needed**: use **Reconnect** on it.
 - Problems are always repaired **in place**: Reconnect, Renew consent, Add accounts and "Grant
   access to statement details" reopen the same connection in Plaid's window and never use another
   one ([Reconnecting and renewing](reconnecting.md)).
@@ -175,9 +178,11 @@ by the reason. The reason tells you whether a connection was used:
   the last step. Linking stays paused until the time shown; before you link again, check Plaid's
   Dashboard (dashboard.plaid.com) for a new Item at that bank, as the message says.
 - **It says the bank "is already linked"**: you picked a bank you have linked before, so the app
-  stopped before Plaid created anything. Use **Add accounts** or **Reconnect** on that bank's
-  connection instead, or, if it really is another login, link again with "A different login at a
-  bank I've already linked" ticked.
+  stopped before exchanging the token, the step that uses a connection. Use **Add accounts** or
+  **Reconnect** on that bank's connection instead, or, if it really is another login, link again
+  with "A different login at a bank I've already linked" ticked. If that bank's connection now
+  says **Reconnect needed** (signing in again can break the first link at some banks), click
+  **Reconnect** on it.
 - **Any other reason** (you closed Plaid's window, a Dashboard checklist item isn't done, the bank
   refused, Keychain wanted your approval first): nothing was linked and no connection was used.
   Fix the cause and try again.
@@ -210,10 +215,11 @@ knows which bank it is), or all 10 connections used.
 ### Keep a copy of the access token (recommended)
 
 Each connection's access token in Keychain is that connection. If one is ever lost, the only way
-back without using another connection is a copy. Once, after each link: open **Keychain
-Access**, search for `budgetapp`, open the item whose account is
-`plaid.access_token.production.<id>` (one per connection; `<id>` is Plaid's id for it), tick
-**Show password** and copy the value into your password manager. Don't change the item there, and
+back without using another connection is a copy. Once, after each link: on the Connection page,
+the connection's **Keychain item** line names its item, `plaid.access_token.production.<id>`
+(one per connection; `<id>` is Plaid's id for it). Open **Keychain Access**, search for
+`budgetapp`, open the item with that account name, tick **Show password** and copy the value into
+your password manager, labelled with the bank. Don't change the item there, and
 never put the token anywhere else. With that copy, `./run setup --env production --access-token`
 can restore it at any time; the app checks it with Plaid, which also says which connection it
 belongs to, before saving.
@@ -250,9 +256,11 @@ bank or card** button.
 - **Each bank login uses 1 of your 10 Plaid connections, for good.** The page's header says how
   many the app has created so far, and the dialog says it again before Plaid's window opens.
 - **Never link the same login twice.** One login usually covers all its accounts (checking,
-  savings, a card at the same bank). The app refuses a bank you have already linked, before
-  anything is created, unless you tick "A different login at a bank I've already linked" for a
-  genuinely different login.
+  savings, a card at the same bank). The app refuses a bank you have already linked before
+  exchanging its token (the step that uses one of the 10), unless you tick "A different login at a
+  bank I've already linked" for a genuinely different login. Don't count on the refusal, though:
+  at some banks, signing in to the same login again in Plaid's window can break the first
+  connection before the app sees anything (then use **Reconnect** on it).
 - **New accounts at a bank you already linked** (a new card, a new savings account): click **Add
   accounts** on that bank's connection. Plaid's window opens for the same connection and lets you
   pick the accounts to share. No new connection is used, and the next sync brings the new
@@ -284,7 +292,9 @@ needs linking again. Its access token was saved as `plaid.access_token.productio
 afterwards moves it to the connection's own Keychain item (it writes the new item, reads it back,
 then deletes the old one). If macOS asks, click **Always Allow**. If the move can't happen, the old
 item keeps working, linking another bank waits, and `./run doctor --env production` says what to
-do.
+do. If only the old item couldn't be deleted (the background agents can't ask for your approval),
+nothing waits: every later sync tries again, and `./run sync --env production` in Terminal
+deletes it once you click **Always Allow**.
 
 ## Stopping the agents
 

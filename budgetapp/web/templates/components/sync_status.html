@@ -11,17 +11,20 @@
       GET  /connection/sync-status  polled every 4 s while a sync runs; polling
                                     stops when a response no longer says syncing.
     Context: conn = services.status.ConnectionStatus (or None). Reads conn.state,
-    .label, .syncing, .stale, .needs_reconnect, .consent_expired,
-    .last_sync_success_at, .items[*] (.institution_name, .state, .syncing) and
-    .primary.institution_name / .error_message / .error_code. Uses the
+    .label, .syncing, .stale, .needs_reconnect, .consent_expired, .syncable,
+    .last_sync_success_at, .items[*] (.display_name, .state, .syncing) and
+    .primary.display_name / .error_message / .error_code. Uses the
     `relative_time` filter (web/templating.py).
     Pill:   Syncing… · Reconnect needed · Sync problem · Not linked ·
             "Synced 5 min ago" (healthy; amber when stale) · Connected. It shows
-            the worst connection; its tooltip names the institution, and with
+            the worst connection; its tooltip names the connection, and with
             several connections each one with its state (BANK-6).
-    Action: Link account (not linked) · Reconnect (needs reconnect) · Renew
-            access (consent expired) · a disabled, spinning Sync now (a sync
-            is running) · otherwise Sync now.
+    Action: Link account (not linked) · Reconnect / Renew access when no
+            connection can sync (each needs reconnecting or its consent
+            expired: conn.syncable is false) · a disabled, spinning Sync now
+            (a sync is running) · otherwise Sync now. So with several
+            connections one broken bank never takes Sync now away from the
+            others; its pill and every-page banner lead to the repair.
     ========================================================================== -#}
 {%- import "components/ui.html" as ui -%}
 {%- set c = conn|default(none) -%}
@@ -31,12 +34,13 @@
 {%- set label = (c.label|default(none)) if c else none -%}
 {%- set reconnect = (c.state != 'not_linked' and (c.needs_reconnect|default(c.state == 'needs_reconnect'))) if c else false -%}
 {%- set expired = (c.consent_expired|default(false)) if c else false -%}
+{%- set can_sync = (c.syncable|default(not reconnect and not expired)) if c else false -%}
 {%- set problem = ((item.error_message|default(none)) or (item.error_code|default(none))) if item else none -%}
-{%- set inst = (item.institution_name|default(none)) if item else none -%}
+{%- set inst = (item.display_name|default(none) or item.institution_name|default(none)) if item else none -%}
 {%- set many = (c.items|default([])|length > 1) if c else false -%}
 {%- set words = {'needs_reconnect': 'reconnect needed', 'error': 'sync problem', 'stale': 'data out of date', 'healthy': 'connected'} -%}
 {%- set each = [] -%}
-{%- if many %}{% for it in c.items %}{% set _ = each.append((it.institution_name|default(none) or 'A bank connection') ~ ': ' ~ ('syncing' if it.syncing|default(false) else words.get(it.state, it.state))) %}{% endfor %}{% endif -%}
+{%- if many %}{% for it in c.items %}{% set _ = each.append((it.display_name|default(none) or it.institution_name|default(none) or 'A bank connection') ~ ': ' ~ ('syncing' if it.syncing|default(false) else words.get(it.state, it.state))) %}{% endfor %}{% endif -%}
 {%- set detail = none -%}
 {%- if not c -%}
   {%- set state, text = 'not_linked', 'Status unavailable' -%}
@@ -67,7 +71,7 @@
 {%- if c %}
 {%- if c.state == 'not_linked' %}
 <a class="btn btn--sm btn--primary" href="/connection">{{ ui.icon('link') }}<span>Link account</span></a>
-{%- elif reconnect or expired %}
+{%- elif not can_sync %}
 <a class="btn btn--sm" href="/connection">{{ ui.icon('link') }}<span>{{ 'Reconnect' if reconnect else 'Renew access' }}</span></a>
 {%- elif syncing %}
 <button type="button" class="btn btn--sm sync-now is-busy" disabled aria-label="Sync now (a sync is already running)">{{ ui.icon('refresh', class='icon--spin') }}<span class="sync-now__label">Sync now</span></button>

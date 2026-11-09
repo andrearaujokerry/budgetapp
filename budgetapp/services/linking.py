@@ -345,19 +345,24 @@ def orphaned_production_items(
     ]
 
 
+def legacy_state(
+    session: Session, *, store: secrets.SecretStore | None = None
+) -> secrets.LegacyTokenState:
+    """Where the v1 token (C6) stands against this database's Items
+    (:func:`secrets.legacy_token_state`)."""
+    ids = list(session.scalars(select(PlaidItem.plaid_item_id).order_by(PlaidItem.id)))
+    return secrets.legacy_token_state(ids, store=store)
+
+
 def legacy_unplaced(session: Session, *, store: secrets.SecretStore | None = None) -> bool:
-    """The v1 token (C6) is in Keychain and the database can't place it by itself: there is no
-    Item, or several, or the one Item already has a different token of its own (so the v1 token
-    may belong to a connection the database lost). Re-attach asks Plaid whose it is. With exactly
-    one Item and no other token for it, the next sync or link moves it there instead."""
-    legacy = secrets.legacy_production_token(store=store)
-    if not legacy:
+    """The v1 token (C6) is in Keychain and the database can't place it by itself: it matches no
+    Item's own token, and there is no Item, or several, or the one Item already has a different
+    token of its own (so the v1 token may belong to a connection the database lost). Re-attach
+    asks Plaid whose it is. With exactly one Item and no other token for it, the next sync or link
+    moves it there instead; a copy of an Item's own token is only deleted."""
+    if not secrets.legacy_production_token(store=store):
         return False
-    ids = list(session.scalars(select(PlaidItem.plaid_item_id)))
-    if len(ids) != 1:
-        return True
-    own = secrets.get_access_token("production", ids[0], store=store)
-    return own is not None and own != legacy
+    return legacy_state(session, store=store).state == "unplaced"
 
 
 def connections_used(
@@ -386,21 +391,23 @@ def link_blocks(
     progress, no unsaved token in a recovery file, no token in Keychain without its connection,
     and fewer than 10 Items created.
 
-    The v1 token (C6) blocks unless the database can place it (:func:`legacy_unplaced`) and no
-    move was tried yet (``after_move`` False: the page, which never writes): a link first moves
-    it (:func:`new_link_token`), so a v1 token still there ``after_move`` would lose its owner
-    once a second Item exists, and blocks. One it can't place needs Re-attach first."""
+    The v1 token (C6, :func:`legacy_state`): one the database can't place needs Re-attach first.
+    One it can place (the only Item has no token of its own) blocks only once a move was tried
+    (``after_move``; the page, which never writes, passes False): a link first moves it
+    (:func:`new_link_token`), and a v1 token still unmoved then would lose its owner once a
+    second Item exists. A copy of a token already saved under its Item's own key never blocks:
+    it can't lose its owner (placing it compares values), and syncs delete it."""
     today = clock.today()
     reasons: list[str] = []
     orphans = orphaned_production_items(session, store=store)
-    legacy = bool(secrets.legacy_production_token(store=store))
-    if orphans or legacy_unplaced(session, store=store):
+    legacy = legacy_state(session, store=store)
+    if orphans or legacy.state == "unplaced":
         reasons.append(
             "Keychain holds the access token of a connection that this database doesn't show: "
             "re-attach it first (Re-attach existing connection), so the app can tell which bank "
             "it is and never links the same login twice."
         )
-    elif legacy and after_move:
+    elif legacy.state == "movable" and after_move:
         reasons.append(
             "Keychain couldn't save the access token of your first connection under its new name "
             "yet, so linking another waits. Run ./run doctor --env production in Terminal: it "
@@ -639,12 +646,15 @@ def duplicate_problem(
     * With that choice, still refused when any picked account's name and mask match an account
       already linked at that institution (the same login again). Masks are compared with masks
       only, never with account numbers (the app never has those).
-    * With connections in place, Link metadata without an institution (or, with the choice,
-      without the picked accounts) can't be checked, so it is refused too (fail safe)."""
+    * With connections in place, Link metadata without the institution's id (or, with the
+      choice, without the picked accounts) can't be checked, so it is refused too (fail safe).
+      Plaid's ``onSuccess`` names the institution with both its id and its name (RESEARCH T2:
+      ``institution: {name, institution_id} | null``); every Item this app saves has the id, so a
+      name alone would match none of them."""
     items = list(session.scalars(select(PlaidItem).order_by(PlaidItem.id)))
     if not items:
         return None
-    if not meta.institution_id and not meta.institution_name:
+    if not meta.institution_id:
         return (
             "Plaid didn't say which bank you picked, so the app can't check that you haven't "
             "linked it already. This new link was not completed (its token was not exchanged); "
@@ -702,14 +712,14 @@ def _exchange_problem(
             "this new link was not completed (its token was not exchanged). Store that token "
             "with ./run setup --env production --access-token, then re-attach it here."
         )
-    legacy = secrets.legacy_production_token(store=store)
-    if orphaned_production_items(session, store=store) or legacy_unplaced(session, store=store):
+    legacy = legacy_state(session, store=store)
+    if orphaned_production_items(session, store=store) or legacy.state == "unplaced":
         return (
             "Keychain holds the access token of a connection that this database doesn't show, "
             "so this new link was not completed (its token was not exchanged). Re-attach the "
             "saved connection on this page first."
         )
-    if legacy:
+    if legacy.state == "movable":  # the move just tried (exchange) failed
         return (
             "Keychain couldn't save the access token of your first connection under its new name "
             "yet, so this new link was not completed (its token was not exchanged). Run ./run "
@@ -1324,7 +1334,14 @@ def _recover_locked(
     if settings.is_production:
         legacy = secrets.legacy_production_token(store=store)
         if legacy and legacy not in {token for _, token in candidates}:
-            candidates.append((None, legacy))
+            with session_factory() as s:
+                where = legacy_state(s, store=store)
+            if where.state == "copy" and where.item_id is not None:
+                # Only a copy of a token saved under its Item's own key: nothing to re-attach;
+                # delete it if Keychain allows (else a later sync does).
+                secrets.move_legacy_production_token(where.item_id, store=store)
+            else:
+                candidates.append((None, legacy))
     results = []
     for expected_id, token in candidates:
         if not token:
@@ -1624,6 +1641,13 @@ class AccountView:
         """``"Checking"``, ``"Savings"``, ``"Credit card"``… (Plaid's subtype, capitalised)."""
         return (self.subtype or self.type or "account").capitalize()
 
+    @property
+    def no_longer_shared(self) -> bool:
+        """Plaid stopped listing this account (unticked in Add accounts, or closed at the bank):
+        its history stays, and its balance is the last one Plaid sent
+        (:func:`sync.no_longer_shared`)."""
+        return sync_service.is_not_shared_notice(self.notice)
+
 
 @dataclass(frozen=True, slots=True)
 class ItemView:
@@ -1647,10 +1671,18 @@ class ItemView:
     accounts: tuple[AccountView, ...]
     institution_id: str | None = None
     is_amex: bool = False
+    #: the Keychain item that holds this connection's access token (a name, never the token):
+    #: ``plaid.access_token.<env>.<Plaid's item id>``, for the copy going-live.md suggests
+    keychain_item: str | None = None
 
     @property
     def needs_reconnect(self) -> bool:
         return self.status.item_status == "needs_reconnect"
+
+    @property
+    def shared_accounts(self) -> tuple[AccountView, ...]:
+        """The accounts Plaid still shares (``accounts`` also keeps those it stopped listing)."""
+        return tuple(a for a in self.accounts if not a.no_longer_shared)
 
     @property
     def consent_expired(self) -> bool:
@@ -1674,6 +1706,13 @@ class ItemView:
 
     @property
     def name(self) -> str:
+        """The connection's title: the institution, or with another login at the same bank
+        "Chase (Freedom ··5678)"."""
+        return self.status.display_name or "Bank connection"
+
+    @property
+    def institution(self) -> str:
+        """The institution itself, for sentences about the bank ("Not reported by Chase")."""
         return self.institution_name or "Bank connection"
 
 
@@ -1782,6 +1821,10 @@ def connection_overview(
         accounts = session.scalars(
             select(Account).where(Account.item_id == item.id).order_by(Account.id)
         )
+        try:
+            keychain_item = secrets.access_token_key(settings.plaid_env, item.plaid_item_id)
+        except ValueError:  # an id Keychain names can't hold (never one of Plaid's)
+            keychain_item = None
         items.append(
             ItemView(
                 id=item.id,
@@ -1792,7 +1835,9 @@ def connection_overview(
                 error_message=item.error_message,
                 error_display_message=item.error_display_message,
                 error_help=sync_service.describe_error(
-                    item.error_code, institution=item.institution_name
+                    item.error_code,
+                    institution=by_id[item.id].display_name,
+                    amex=status_service.is_amex(item),
                 ),
                 transactions_update_status=item.transactions_update_status,
                 history_complete_at=item.history_complete_at,
@@ -1804,6 +1849,7 @@ def connection_overview(
                 accounts=tuple(_account_view(a) for a in accounts),
                 institution_id=item.institution_id,
                 is_amex=status_service.is_amex(item),
+                keychain_item=keychain_item,
             )
         )
     order = {s.item_id: n for n, s in enumerate(status.items)}  # worst first, like the status
@@ -1812,7 +1858,7 @@ def connection_overview(
         RunView(
             run.id,
             run.item_id,
-            name,
+            by_id[run.item_id].display_name if run.item_id in by_id else name,
             run.trigger,
             run.status,
             run.started_at,

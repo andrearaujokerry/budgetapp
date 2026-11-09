@@ -9,11 +9,12 @@ touch your money. This page lists what protects it, and the few things that are 
   payment, due date). It never asks for products that can pay or move money.
 - The app's Plaid code allows a fixed list of calls: create a Plaid window, exchange its result
   for an access token, read transactions, ask Plaid to refresh them, read the connection, the
-  card's balance and statement details, and look up institutions, plus three test-only calls that
-  refuse to run outside the Sandbox. A test fails if any other call appears, and none of them can
-  pay, transfer or change anything at American Express.
-- You sign in to American Express in Plaid's window and Amex's own pop-up. The app never sees your
-  Amex password; it keeps only Plaid's access token.
+  accounts' balances and the cards' statement details, and look up institutions, plus three
+  test-only calls that refuse to run outside the Sandbox. A test fails if any other call appears,
+  and none of them can pay, transfer or change anything at your banks or card companies.
+- You sign in to your bank or card company in Plaid's window (many banks open their own sign-in
+  in a pop-up). The app never sees your bank password; it keeps only Plaid's access token for each
+  connection.
 
 ## Only this Mac can reach it
 
@@ -33,16 +34,16 @@ touch your money. This page lists what protects it, and the few things that are 
 
 ## Secrets stay in Keychain
 
-- Plaid keys, the access token and the database passwords live only in your login Keychain
-  ([the list](setup.md#what-keychain-holds)). They are never written to the database, files, git,
-  logs, error messages, web pages or command lines.
+- Plaid keys, each connection's access token and the database passwords live only in your login
+  Keychain ([the list](setup.md#what-keychain-holds)). They are never written to the database,
+  files, git, logs, error messages, web pages or command lines.
 - You type keys only into `./run setup`, with hidden input.
 - Logs remove anything that looks like a Plaid token or a key the app has loaded, even inside
   error reports.
 - The background agents never show a Keychain dialog. When macOS wants your approval, they stop,
   tell you, and wait until you run `./run doctor --env production` in Terminal.
-- In the rare case Keychain can't save the access token during the link, it goes to a recovery
-  file only you can read, never to a log.
+- In the rare case Keychain can't save an access token during a link, it goes to a recovery file
+  only you can read, never to a log.
 
 ## Your data goes only to Plaid
 
@@ -79,7 +80,8 @@ touch your money. This page lists what protects it, and the few things that are 
   logs out of the repository, and `./run doctor` checks tracked files for Plaid tokens. Never force
   such a file into git, especially if the repository is public.
 - **Delete CSV downloads** from your Downloads folder once they are imported.
-- **Keep the access token's only copy outside Keychain in your password manager**, nowhere else.
+- **Keep each access token's only copy outside Keychain in your password manager**, nowhere
+  else.
 - **Protect your Plaid account** with a strong password and two-step verification: it holds your
   keys.
 - **After macOS or Homebrew upgrades**, run `./run doctor --env production`.
@@ -88,9 +90,10 @@ touch your money. This page lists what protects it, and the few things that are 
 
 - **A Plaid secret:** rotate it in Plaid's Dashboard (Developers → Keys), then type the new one
   into `./run setup --keys-only`.
-- **The access token:** a token works only together with your client ID and secret. If you think
+- **An access token:** a token works only together with your client ID and secret. If you think
   both leaked, rotate the secret in Plaid's Dashboard right away: the token is then useless to
   anyone else, and the app keeps working once you have saved the new secret.
 - **Your Mac or a backup disk is lost:** FileVault and an encrypted backup disk keep the data
-  unreadable. Rotate your Plaid secrets as a precaution. You can also withdraw Plaid's access in
-  your American Express account; the app then shows Reconnect needed and keeps the data it has.
+  unreadable. Rotate your Plaid secrets as a precaution. You can also withdraw Plaid's access at
+  each bank or card company; the app then shows Reconnect needed for that connection and keeps the
+  data it has.

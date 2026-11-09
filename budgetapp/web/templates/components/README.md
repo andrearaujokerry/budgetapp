@@ -104,34 +104,40 @@ The web shell passes `env="demo"` when it serves a demo database (`serve --demo 
 | --- | --- | --- | --- |
 | base + partial | `conn.state` | `"healthy"` \| `"stale"` \| `"error"` \| `"needs_reconnect"` \| `"not_linked"` | pill state; `not_linked` suppresses the reconnect banner |
 | base + partial | `conn.needs_reconnect` | bool (property) | reconnect banner; pill and action "Reconnect" |
-| base | `conn.reconnect_names` | tuple of str (property) | the reconnect banner names each institution that needs it (wave 3, BANK-6) |
-| base | `conn.consent_warning` | bool (property) | consent banner |
-| base | `conn.consent_item` | `ItemStatus` or `None` (property) | the connection whose consent is due first among those with a warning: its `.institution_name`, `.is_amex` (the "every 12 months" sentence is American Express's), `.consent_days_left` (int, negative = expired) and `.consent_due_at` (aware datetime: `.astimezone().date()` then `\|date_long`) |
-| partial | `conn.consent_expired` | bool (property) | "Renew access" when any connection's consent has expired |
-| partial | `conn.items[*].institution_name`, `.state`, `.syncing` | str or `None`, str, bool | with several connections the pill's tooltip lists each one and its state |
+| base | `conn.reconnect_names` | tuple of str (property) | the reconnect banner names each connection that needs it (wave 3, BANK-6) |
+| base | `conn.consent_items` | tuple of `ItemStatus` (property) | the consent banner: every connection whose consent is due (a warning, or expired), soonest first, except one that needs reconnecting (its own Reconnect renews it). Each: `.display_name`, `.is_amex` (the "every 12 months" sentence is American Express's), `.consent_days_left` (int, negative = expired) and `.consent_due_at` (aware datetime: `.astimezone().date()` then `\|date_long`). `conn.consent_item` is the first of them |
+| partial | `conn.consent_expired` | bool (property) | "Renew access" (when nothing can sync) rather than "Reconnect" |
+| partial | `conn.syncable` | bool (property) | some connection neither needs reconnecting nor has an expired consent: the action stays Sync now |
+| partial | `conn.items[*].display_name`, `.state`, `.syncing` | str or `None`, str, bool | with several connections the pill's tooltip lists each one and its state |
 | partial | `conn.label` | str | pill text fallback |
 | partial | `conn.syncing` | bool (property) | "Syncing…" pill, polling, disabled Sync now |
 | partial | `conn.stale` | bool (property) | warning-toned "Synced 2 days ago" pill |
 | partial | `conn.last_sync_success_at` | aware datetime or `None` (property) | "Synced " + `\|relative_time` |
 | partial | `conn.primary` | `ItemStatus` or `None` (property) | the worst Item (its fields below) |
-| partial | `conn.primary.institution_name` | str or `None` | healthy tooltip "American Express via Plaid"; the problem tooltips start with it |
+| partial | `conn.primary.display_name` | str or `None` | healthy tooltip "American Express via Plaid"; the problem tooltips start with it |
 | partial | `conn.primary.error_message`, `conn.primary.error_code` | str or `None` | error / reconnect tooltip ("TD Bank: …") |
 
 Since wave 3 a connection's consent can have no due date (a bank whose consent doesn't expire:
 `consent_due_at`, `consent_days_left` are `None` and `consent_warning` is false), so read the
-properties above rather than comparing `consent_days_left` yourself.
+properties above rather than comparing `consent_days_left` yourself. `display_name` is the
+institution's name, or, when another connection has the same one (a second login at a bank, or
+Sandbox test Items at one test bank), a label that tells them apart: "Chase (Freedom ··5678)".
 
 Notices (between the top bar and the page, only rendered when there is one):
 
 - `#reconnect-banner` (tone `over`, role alert, **Reconnect** → `/connection`) when
-  `conn.needs_reconnect` and `conn.state != "not_linked"`, naming the institutions:
-  "TD Bank needs attention." / "Citibank and Chase need attention."
-- Otherwise `#consent-banner` when `conn.consent_warning`, for `conn.consent_item`: days < 0 →
-  `over` "Your American Express consent has expired" ("…it lapsed on Oct 25, 2026"); days = 0 →
-  `over` "expires today"; else `warn` "Renew your TD Bank connection by Nov 20, 2026 (23 days
-  left)." Only American Express's banner says it asks "every 12 months". Action **Renew now** →
-  `/connection`. (One Plaid update-mode session fixes both, so the consent banner waits while the
-  reconnect banner shows.)
+  `conn.needs_reconnect` and `conn.state != "not_linked"`, naming the connections:
+  "TD Bank needs attention. Syncing it is paused…" / "Citibank and Chase need attention.
+  Syncing them is paused…"
+- `#consent-banner` when `conn.consent_items` isn't empty, also below the reconnect banner (a
+  reconnect at one bank renews nothing at another). One connection: days < 0 → `over` "Your
+  American Express consent has expired" ("…it lapsed on Oct 25, 2026"); days = 0 → `over`
+  "expires today"; else `warn` "Renew your TD Bank connection by Nov 20, 2026 (23 days left)."
+  Several: one title naming them by state, "Your American Express consent has expired. Renew your
+  TD Bank and Citibank connections by Nov 20, 2026 (23 days left)." (the earliest date). Only
+  American Express's banner says it asks "every 12 months". Action **Renew now** →
+  `/connection`. A connection that needs reconnecting is never in `consent_items`: its one Plaid
+  update-mode session fixes both.
 - **Not on the Connection page** (`active_nav == "connection"`): that page shows Reconnect /
   Renew consent itself (with the due date and days left), and a banner there would only link to
   the page already open.
@@ -158,10 +164,9 @@ The pill and the action are chosen independently (first match wins in each list)
 | Action: situation | Action |
 | --- | --- |
 | `conn.state == "not_linked"` | primary **Link account** link → `/connection` |
-| `conn.needs_reconnect` | **Reconnect** link → `/connection` |
-| `conn.consent_expired` (any connection's consent has expired) | **Renew access** link → `/connection` |
+| not `conn.syncable` (no connection can sync: each needs reconnecting or its consent expired) | **Reconnect** link → `/connection` when one needs reconnecting, else **Renew access** |
 | `conn.syncing` | disabled Sync now with a spinning icon |
-| otherwise | **Sync now**: `<form method="post" action="/connection/sync">` with a button carrying `hx-post="/connection/sync" hx-target="#sync-status" hx-swap="outerHTML"`, so it also works without JS |
+| otherwise | **Sync now**: `<form method="post" action="/connection/sync">` with a button carrying `hx-post="/connection/sync" hx-target="#sync-status" hx-swap="outerHTML"`, so it also works without JS. With several connections it stays while one of them can sync, even if another needs reconnecting (the pill and the reconnect banner lead to that repair), and the route then leaves the connections that need reconnecting out |
 
 Route contract (SYNC package, `routes/connection.py`) — **both routes return this one partial**,
 rendered with a fresh `conn`:

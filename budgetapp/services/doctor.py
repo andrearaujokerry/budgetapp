@@ -869,14 +869,6 @@ def _linked_items(ctx: DoctorContext) -> list[tuple[str, str]]:
     return [(row[0], row[1] or f"Item {row[0]}") for row in rows]
 
 
-def _read(ctx: DoctorContext, account: str) -> str | None:
-    """A Keychain value for comparing two items (never shown); errors read as unknown."""
-    try:
-        return secrets.get_secret(account, store=ctx.store)
-    except secrets.SecretStoreError:
-        return None
-
-
 def _production_token_checks(ctx: DoctorContext, present: dict[str, bool]) -> list[Check]:
     """BANK-4/BANK-7: every production Item's own token, tokens without a connection, and the
     v1 token (C6). Run only for production, where the database is the production one."""
@@ -884,13 +876,19 @@ def _production_token_checks(ctx: DoctorContext, present: dict[str, bool]) -> li
     problems: list[Check] = []
     linked = _linked_items(ctx)
     known = {pid for pid, _ in linked}
+    names = dict(linked)
     legacy = present.get(secrets.LEGACY_PRODUCTION_TOKEN, False)
-    sole = linked[0][0] if len(linked) == 1 else None
+    where: secrets.LegacyTokenState | None = None
+    if legacy and ctx.database()[0]:
+        try:
+            where = secrets.legacy_token_state([pid for pid, _ in linked], store=ctx.store)
+        except secrets.SecretStoreError:
+            where = None  # an unreadable item is reported above; nothing to say about it here
     for pid, name in linked:
         account = secrets.production_access_token_key(pid)
         if present.get(account, True):
             continue
-        if legacy and pid == sole:
+        if where is not None and where.state == "movable" and pid == where.item_id:
             continue  # the v1 token is this Item's; reported below
         problems.append(
             Check(
@@ -920,28 +918,31 @@ def _production_token_checks(ctx: DoctorContext, present: dict[str, bool]) -> li
                 fix="Connection page → Re-attach existing connection (never link again).",
             )
         )
-    if legacy and ctx.database()[0]:
-        own = secrets.production_access_token_key(sole) if sole else None
-        same = own is not None and _read(ctx, own) == _read(ctx, secrets.LEGACY_PRODUCTION_TOKEN)
-        if own is not None and not present.get(own):
+    if where is not None and where.state != "none":
+        name = names.get(where.item_id or "") or f"Item {where.item_id}"
+        if where.state == "movable" and where.item_id is not None:
             problems.append(
                 Check(
                     section,
                     WARN,
-                    f"The access token of {linked[0][1]} still uses its v1 Keychain name",
-                    detail=f"{secrets.LEGACY_PRODUCTION_TOKEN} → {own}",
+                    f"The access token of {name} still uses its v1 Keychain name",
+                    detail=f"{secrets.LEGACY_PRODUCTION_TOKEN} → "
+                    f"{secrets.production_access_token_key(where.item_id)}",
                     fix="./run sync --env production moves it (click Always Allow if macOS asks); "
                     "if it stays, the sync log says why.",
                 )
             )
-        elif same:
+        elif where.state == "copy":
+            # The move saved and read back the new item; only deleting the old one failed. Every
+            # production sync tries again (sync.access_token_for); in Terminal macOS can ask.
             problems.append(
                 Check(
                     section,
                     INFO,
-                    f"An old copy of the access token of {linked[0][1]} is still saved",
+                    f"An old copy of the access token of {name} is still saved",
                     detail=secrets.LEGACY_PRODUCTION_TOKEN,
-                    fix="./run sync --env production deletes it.",
+                    fix="./run sync --env production in Terminal deletes it (click Always Allow "
+                    "if macOS asks).",
                 )
             )
         else:
@@ -1437,7 +1438,9 @@ def check_connection(ctx: DoctorContext) -> Iterable[Check]:
         yield Check(section, INFO, f"Nothing is linked in {ctx.settings.env} yet")
         return
     for item in status.items:
-        name = item.institution_name or "The connection"
+        # Every line names its connection (with several, "Chase (Freedom ··5678)" tells two
+        # logins at one bank apart), and each fix names the button on that connection.
+        name = item.display_name or "The connection"
         due = item.consent_due_at.astimezone().date() if item.consent_due_at else None
         if item.item_status == "needs_reconnect":
             yield Check(
@@ -1445,7 +1448,7 @@ def check_connection(ctx: DoctorContext) -> Iterable[Check]:
                 FAIL,
                 f"{name} needs you to reconnect",
                 detail=item.error_code,
-                fix="Connection page → Reconnect",
+                fix=f"Connection page → Reconnect on {name}",
             )
         elif item.item_status == "error":
             yield Check(
@@ -1463,14 +1466,14 @@ def check_connection(ctx: DoctorContext) -> Iterable[Check]:
                 section,
                 FAIL,
                 f"{name} consent expired on {due:%b %-d, %Y}",
-                fix="Connection page → Renew",
+                fix=f"Connection page → Renew consent on {name}",
             )
         elif item.consent_warning:
             yield Check(
                 section,
                 WARN,
                 f"Renew {name} consent by {due:%b %-d, %Y} ({item.consent_days_left} days left)",
-                fix="Connection page → Renew",
+                fix=f"Connection page → Renew consent on {name}",
             )
         else:
             yield Check(section, PASS, f"{name} consent is valid until {due:%b %-d, %Y}")
@@ -1479,31 +1482,34 @@ def check_connection(ctx: DoctorContext) -> Iterable[Check]:
             # BANK-7: a bank login without cards has no statement details (never a warning).
             yield Check(section, INFO, f"Statement details don't apply to {name} (no cards)")
         elif liabilities == "ok":
-            yield Check(section, PASS, "Liabilities (statement balance, due date) are synced")
+            yield Check(
+                section, PASS, f"Statement details of {name} (balance, due date) are synced"
+            )
         elif liabilities == "not_consented":
             yield Check(
                 section,
                 WARN,
-                "Liabilities wasn't consented (no statement balance or due date)",
-                fix="Connection page → add Liabilities (a short Plaid update session)",
+                f"{name} doesn't share statement details (no statement balance or due date)",
+                fix=f"Connection page → Grant access to statement details on {name} (a short "
+                "Plaid window)",
             )
         elif liabilities == "error":
             yield Check(
                 section,
                 WARN,
-                "Liabilities failed at the last sync",
+                f"Reading the statement details of {name} failed at the last sync",
                 fix="Connection page → Sync now",
             )
         elif liabilities == "unsupported":
-            yield Check(section, INFO, f"Plaid doesn't offer Liabilities for {name}'s cards")
+            yield Check(section, INFO, f"Plaid doesn't offer statement details for {name}'s cards")
         else:
-            yield Check(section, INFO, "Liabilities hasn't been fetched yet")
+            yield Check(section, INFO, f"The statement details of {name} haven't been read yet")
         if item.stale:
             since = item.last_sync_success_at or item.linked_at
             yield Check(
                 section,
                 WARN,
-                f"No successful sync for {_hours(ctx.now - since)}",
+                f"No successful sync of {name} for {_hours(ctx.now - since)}",
                 fix=f"./run sync --env {ctx.settings.env}; check the sync agent with ./run doctor",
             )
 

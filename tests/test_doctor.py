@@ -849,11 +849,31 @@ class TestProductionTokens:
         assert "The access token of American Express is missing" not in titles
 
     def test_a_v1_copy_left_after_the_move(self, prod, db):
+        """Safety review (major): the fix must be a command that really deletes it: every
+        production sync retries the delete (sync.access_token_for), and in Terminal macOS can
+        ask for the approval the agents can't."""
         make_item(db, plaid_item_id="item-amex")
         store = self.store(index=("item-amex",))
         store.values[self.AMEX] = store.values[app_secrets.LEGACY_PRODUCTION_TOKEN] = "same"
+        checks = prod.run(doctor.check_keychain_items, store=RecordingStore(store))
+        (copy,) = [c for c in checks if "old copy" in c.title]
+        assert copy.status == INFO
+        assert copy.title == "An old copy of the access token of American Express is still saved"
+        assert copy.fix == (
+            "./run sync --env production in Terminal deletes it (click Always Allow if macOS asks)."
+        )
+
+    def test_a_v1_copy_beside_a_second_connection_is_still_only_a_copy(self, prod, db):
+        """Its value names its owner however many connections exist: never "can't tell which
+        connection it belongs to" (which would send the owner to Re-attach for nothing)."""
+        make_item(db, plaid_item_id="item-amex")
+        make_item(db, plaid_item_id="item-td", institution_name="TD Bank")
+        store = self.store(self.TD, index=("item-amex", "item-td"))
+        store.values[self.AMEX] = store.values[app_secrets.LEGACY_PRODUCTION_TOKEN] = "same"
         titles = self.titles(prod, store)
         assert titles["An old copy of the access token of American Express is still saved"] == INFO
+        assert not any("can't tell" in title for title in titles)
+        assert set(titles.values()) == {INFO, PASS}
 
     def test_a_v1_token_beside_the_one_items_own_token_is_never_called_dead(self, prod, db):
         """The one Item has a different token of its own, so the v1 token may be the only
@@ -1184,7 +1204,9 @@ class TestConnection:
         assert check.status == WARN and "(15 days left)" in check.title
         make_item(db, last_consented_at=NOW - dt.timedelta(days=400), liabilities_status="ok")
         expired = [c for c in dr.run(doctor.check_connection) if c.status == FAIL]
-        assert expired[0].title.startswith("American Express consent expired on")
+        # two Amex logins without accounts: the label tells them apart (UX review)
+        assert expired[0].title.startswith("American Express (login 2) consent expired on")
+        assert expired[0].fix == "Connection page → Renew consent on American Express (login 2)"
 
     def test_reconnect_errors_liabilities_and_staleness(self, dr, db, freeze_today):
         freeze_today(now=NOW)
@@ -1198,8 +1220,11 @@ class TestConnection:
         make_account(db, item)
         checks = {c.title: c.status for c in dr.run(doctor.check_connection)}
         assert checks["American Express needs you to reconnect"] == FAIL
-        assert checks["Liabilities wasn't consented (no statement balance or due date)"] == WARN
-        assert checks["No successful sync for 2 days"] == WARN
+        details = (
+            "American Express doesn't share statement details (no statement balance or due date)"
+        )
+        assert checks[details] == WARN
+        assert checks["No successful sync of American Express for 2 days"] == WARN
 
     def test_a_bank_without_cards_has_no_statement_details_to_warn_about(
         self, dr, db, freeze_today
@@ -1220,6 +1245,55 @@ class TestConnection:
             "TD Bank consent has no end date (Plaid reports none)": INFO,
             "Statement details don't apply to TD Bank (no cards)": INFO,
         }
+
+    def test_every_line_names_its_connection(self, dr, db, freeze_today):
+        """UX review: with several connections each line says which one it is about, and the
+        fixes name the button on that connection."""
+        freeze_today(now=NOW)
+        amex = make_item(
+            db,
+            liabilities_status="not_consented",
+            consented_products=["transactions"],
+            last_sync_success_at=NOW - dt.timedelta(hours=50),
+        )
+        make_account(db, amex)
+        chase = make_item(
+            db,
+            institution_name="Chase",
+            institution_id="ins_3",
+            liabilities_status="ok",
+            consent_expires_at=None,
+            last_sync_success_at=NOW - dt.timedelta(hours=1),
+        )
+        make_account(db, chase, name="Freedom", mask="5678")
+        checks = dr.run(doctor.check_connection)
+        assert all(("American Express" in c.title) != ("Chase" in c.title) for c in checks)
+        by_title = {c.title: c for c in checks}
+        details = by_title[
+            "American Express doesn't share statement details (no statement balance or due date)"
+        ]
+        assert details.status == WARN
+        assert details.fix.startswith(
+            "Connection page → Grant access to statement details on American Express"
+        )
+        assert by_title["No successful sync of American Express for 2 days"].status == WARN
+        assert by_title["Statement details of Chase (balance, due date) are synced"].status == PASS
+
+    def test_two_logins_at_one_bank_are_told_apart(self, dr, db, freeze_today):
+        freeze_today(now=NOW)
+        for name, mask, status in (("Sapphire", "1234", "healthy"), ("Freedom", "5678", None)):
+            values = {"status": "needs_reconnect", "error_code": "ITEM_LOGIN_REQUIRED"}
+            item = make_item(
+                db,
+                institution_name="Chase",
+                institution_id="ins_3",
+                liabilities_status="ok",
+                **({} if status else values),
+            )
+            make_account(db, item, name=name, mask=mask)
+        (check,) = [c for c in dr.run(doctor.check_connection) if c.status == FAIL]
+        assert check.title == "Chase (Freedom ··5678) needs you to reconnect"
+        assert check.fix == "Connection page → Reconnect on Chase (Freedom ··5678)"
 
     def test_rejected_plaid_keys_point_to_setup(self, dr, db, freeze_today):
         """Final review ops-4: the fix said to click Sync now, which can't help."""

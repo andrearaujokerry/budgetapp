@@ -493,6 +493,7 @@ def test_demo_data_shows_the_page_but_never_reaches_plaid(db, demo_client):
     response = demo_client.get("/connection")
     html = main(response.text)
     assert "Demo data." in text(html)
+    assert "Keychain item" not in text(html)  # demo data never saves a token
     assert PLAID_SCRIPT not in response.text
     assert "plaid" not in response.headers["content-security-policy"]
     assert re.search(r'data-link-mode="update" data-item-id="\d+" id="renew-\d+" disabled', html)
@@ -639,3 +640,116 @@ def test_the_link_dialog_shows_nothing_behind_its_modal(prod_client):
     start = source[source.index("function start(button)") :]
     assert start.index("dialog.close()") < start.index("showError(")
     assert "setBusy([button, opener]" in start
+
+
+# ---------------------------------------------------------- W3-BANK review fixes (safety, UX)
+
+
+def test_a_v1_copy_left_behind_still_lets_the_owner_link_another_bank(
+    db, prod_client, prod_plaid, secrets
+):
+    """Safety review (major): the v1 token moved, but its old copy couldn't be deleted (the web
+    agent runs without Keychain prompts). The page offers Link, and clicking it works (it used
+    to be refused with a reason that blamed a failed save)."""
+    fake = prod_plaid.add_item(item_id="item-amex")
+    item = make_item(db, plaid_item_id="item-amex")
+    make_account(db, item, plaid_account_id=fake.default_account_id, mask="1005")
+    secrets.values[app_secrets.production_access_token_key("item-amex")] = fake.access_token
+    secrets.values[app_secrets.PRODUCTION_ITEM_INDEX] = '["item-amex"]'
+    legacy = app_secrets.LEGACY_PRODUCTION_TOKEN
+    secrets.values[legacy] = fake.access_token
+    secrets.fail_on[("delete", legacy)] = app_secrets.KeychainApprovalNeeded(legacy, -25308)
+    html = main(page(prod_client))
+    assert re.search(r'data-dialog-open="confirm-link" id="link-open">', html)
+    assert "Linking is paused." not in text(html) and "A saved connection" not in text(html)
+    answer = prod_client.post("/connection/link-token", json={"mode": "new"})
+    assert answer.status_code == 200 and answer.json()["attempt"]
+
+
+def test_an_account_plaid_no_longer_shares_is_marked_on_its_tile(
+    db, client, fake_plaid, secrets, settings, session_factory, notifier
+):
+    """UX review: an account unticked in Add accounts dropped out of Plaid's answers but still
+    looked live. After the next sync its tile says so, and the summary counts it apart."""
+    from budgetapp.services import sync as sync_service
+    from tests.factories import plaid_account
+
+    def bank_account(account_id, name, mask, subtype, current):
+        return plaid_account(
+            account_id=account_id,
+            name=name,
+            official_name=None,
+            mask=mask,
+            type="depository",
+            subtype=subtype,
+            current=current,
+            available=current,
+        )
+
+    fake = fake_plaid.add_item(
+        item_id="td",
+        institution_id="ins_14",
+        institution_name="TD Bank",
+        consented_products=("transactions",),
+        accounts=[
+            bank_account("td-chk", "Checking", "4417", "checking", "100.00"),
+            bank_account("td-sav", "Savings", "9902", "savings", "5000.00"),
+        ],
+    )
+    result = linking.exchange(
+        session_factory,
+        fake_plaid,
+        secrets,
+        settings,
+        fake_plaid.public_token_for(fake),
+        {"institution": {"institution_id": "ins_14", "name": "TD Bank"}},
+    )
+
+    def sync_td():
+        sync_service.sync_item(
+            session_factory,
+            fake_plaid,
+            secrets,
+            settings,
+            result.item_id,
+            trigger="update",
+            notifier=notifier,
+            sleep=lambda _s: None,
+        )
+
+    sync_td()
+    fake.accounts = [a for a in fake.accounts if a["account_id"] != "td-sav"]
+    sync_td()
+    html = main(page(client))
+    words = text(html)
+    assert "1 bank account (1 no longer shared) · linked" in words
+    tile = html[html.index('id="account-') :]
+    tile = text(tile[tile.index("Savings ··9902") :])
+    assert tile.startswith("Savings ··9902 Savings No longer shared. Plaid stopped sharing")
+    assert "the balance shown is the last one Plaid sent" in tile
+
+
+def test_each_connection_names_its_keychain_item(db, prod_client, production, secrets):
+    """UX review: going-live.md asks for a copy of each connection's token; the page says which
+    Keychain item is which connection (its name only, never the token)."""
+    for pid, name, inst in (
+        ("item-amex", "American Express", "ins_10"),
+        ("item-td", "TD Bank", "ins_14"),
+    ):
+        make_item(db, plaid_item_id=pid, institution_name=name, institution_id=inst)
+        app_secrets.store_access_token(production, pid, f"access-production-{pid}", store=secrets)
+    html = main(page(prod_client))
+    for pid in ("item-amex", "item-td"):
+        assert f'<code class="keychain-item">plaid.access_token.production.{pid}</code>' in html
+    assert "access-production-item-" not in html
+
+
+def test_two_logins_at_one_bank_have_their_own_titles(db, client):
+    first = make_item(db, institution_name="Chase", institution_id="ins_3")
+    make_account(db, first, name="Sapphire Preferred", mask="1234")
+    second = make_item(db, institution_name="Chase", institution_id="ins_3")
+    make_account(db, second, name="Freedom Unlimited", mask="5678")
+    html = main(page(client))
+    assert f'id="item-{first.id}-title">Chase (Sapphire Preferred ··1234)</h2>' in html
+    assert f'id="item-{second.id}-title">Chase (Freedom Unlimited ··5678)</h2>' in html
+    assert "Plaid's last update from Chase" in text(html)  # sentences name the bank itself

@@ -20,6 +20,8 @@ Keychain account                          Value
 ``plaid.access_token.production`` (:data:`LEGACY_PRODUCTION_TOKEN`) is the v1 name of the one
 production token. :func:`move_legacy_production_token` moves it once to its Item's own key (write,
 read back and compare, then delete the old key); on any doubt the old key stays and keeps working.
+:func:`legacy_token_state` says where it stands; a copy left because the old key couldn't be
+deleted is deleted later by :func:`delete_legacy_copy` (every production use of a token tries).
 
 Rules: values are never written to the database, files (except the 0600 recovery file below), logs,
 exceptions, process arguments or templates; every value read is registered with the log redactor;
@@ -45,7 +47,7 @@ import secrets as _stdlib_secrets
 import sys
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -555,6 +557,68 @@ def move_legacy_production_token(
         return LegacyTokenMove(
             "kept", item_id, f"Keychain couldn't save it under the new name ({type(exc).__name__})"
         )
+    try:
+        store.delete(LEGACY_PRODUCTION_TOKEN)
+    except Exception as exc:
+        return LegacyTokenMove(
+            "moved", item_id, f"the old copy couldn't be deleted yet ({type(exc).__name__})"
+        )
+    return LegacyTokenMove("moved", item_id)
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyTokenState:
+    """Where the v1 production token stands (C6). Never holds a token.
+
+    ``state``:
+
+    * ``none``: there is no v1 key.
+    * ``copy``: the same token is saved under ``item_id``'s own key (the move wrote and read it
+      back; only deleting the old key failed). A leftover: it can't lose its owner, because every
+      decision compares values, and :func:`delete_legacy_copy` removes it when Keychain allows.
+    * ``movable``: exactly one Item in the database (``item_id``) and no key of its own: the next
+      sync or link moves the token there (:func:`move_legacy_production_token`).
+    * ``unplaced``: no Item, several, or the one Item has a different token of its own, so the v1
+      token may be the only token of a connection the database lost: Re-attach asks Plaid whose
+      it is (``/item/get``).
+    """
+
+    state: str
+    item_id: str | None = None
+
+
+def legacy_token_state(
+    db_item_ids: Sequence[str], *, store: SecretStore | None = None
+) -> LegacyTokenState:
+    """Classify the v1 token against the production Items: ``db_item_ids`` (the database's, oldest
+    first) and the Keychain index. Only reads; Keychain errors propagate (fail safe)."""
+    legacy = legacy_production_token(store=store)
+    if not legacy:
+        return LegacyTokenState("none")
+    known = list(dict.fromkeys([*db_item_ids, *production_item_ids(store=store)]))
+    own = {item_id: get_access_token("production", item_id, store=store) for item_id in known}
+    for item_id, token in own.items():
+        if token == legacy:
+            return LegacyTokenState("copy", item_id)
+    if len(db_item_ids) == 1 and own.get(db_item_ids[0]) is None:
+        return LegacyTokenState("movable", db_item_ids[0])
+    return LegacyTokenState("unplaced")
+
+
+def delete_legacy_copy(
+    item_id: str, access_token: str, *, store: SecretStore | None = None
+) -> LegacyTokenMove:
+    """Delete the v1 key when it holds exactly ``access_token``, which the caller has just read
+    from ``item_id``'s own key: a copy left by a move whose last step failed (C6). Never raises
+    (it is retried by the next caller): ``none`` when there is no such copy (or Keychain didn't
+    let it be read), ``moved`` when the old key is gone, ``moved`` with a reason when it still
+    couldn't be deleted."""
+    store = store or get_store()
+    try:
+        if store.get(LEGACY_PRODUCTION_TOKEN) != access_token:
+            return LegacyTokenMove("none")
+    except Exception:
+        return LegacyTokenMove("none")
     try:
         store.delete(LEGACY_PRODUCTION_TOKEN)
     except Exception as exc:

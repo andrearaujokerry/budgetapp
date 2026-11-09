@@ -135,3 +135,8 @@
   padding-top: 12px;
   border-top: 1px solid var(--border);
 }
+
+/* A connection's Keychain item name is one long word: it may break anywhere on a phone. */
+.keychain-item {
+  overflow-wrap: anywhere;
+}

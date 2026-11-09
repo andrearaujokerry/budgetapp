@@ -278,14 +278,15 @@ def _age_text(delta: dt.timedelta) -> str:
     return _days(hours // 24)
 
 
-def _institution(item: PlaidItem) -> str:
-    """The institution's name to start a connection alert ("TD Bank sync failed", BANK-7)."""
-    return item.institution_name or DEFAULT_INSTITUTION
+def _institution(state: status.ItemStatus) -> str:
+    """The connection's name to start an alert ("TD Bank sync failed", BANK-7); with another login
+    at the same bank, the label that tells them apart ("Chase (Freedom ··5678) sync failed")."""
+    return state.display_name or DEFAULT_INSTITUTION
 
 
-def _bank(item: PlaidItem) -> str:
-    """The institution's name inside a sentence ("Reconnect TD Bank", "… your bank")."""
-    return item.institution_name or "your bank"
+def _bank(state: status.ItemStatus) -> str:
+    """The connection's name inside a sentence ("Reconnect TD Bank", "… your bank")."""
+    return state.display_name or "your bank"
 
 
 # --------------------------------------------------------------------------- after a sync
@@ -336,7 +337,11 @@ def _load_item(
         return None
     settings = get_app_settings(session)
     state = status.item_status(
-        item, now=clock.now(), today=today, reminder_days=settings.consent_reminder_days
+        item,
+        now=clock.now(),
+        today=today,
+        reminder_days=settings.consent_reminder_days,
+        label=status.connection_label(session, item),
     )
     return item, settings, state
 
@@ -356,14 +361,18 @@ def _sync_problems(
     if not settings.sync_alerts_enabled:
         return []
     results: list[AlertResult] = []
-    name = _institution(item)
+    name = _institution(state)
     stale_note = _stale_sentence(state) if state.stale else ""
     if item.status == "needs_reconnect" or outcome.needs_reconnect:
-        results.append(_reconnect(session, notifier, item, outcome, name, stale_note))
+        results.append(_reconnect(session, notifier, item, outcome, state, stale_note))
     elif outcome.status == "error":
         code = outcome.error_code or "UNKNOWN"
         detail = _error_detail(
-            outcome.error_code, outcome.error_type, outcome.display_message, item.institution_name
+            outcome.error_code,
+            outcome.error_type,
+            outcome.display_message,
+            state.display_name,
+            amex=state.is_amex,
         )
         message = f"{detail}. Code: {code}."
         if stale_note:
@@ -397,14 +406,19 @@ def _sync_problems(
 
 
 def _error_detail(
-    code: str | None, error_type: str | None, display: str | None, institution: str | None = None
+    code: str | None,
+    error_type: str | None,
+    display: str | None,
+    institution: str | None = None,
+    *,
+    amex: bool = False,
 ) -> str:
     """Plain words for a failed sync (the Connection page's, naming the institution), without a
     final full stop."""
     from budgetapp.services import sync as sync_service  # sync imports this module
 
     text = (
-        sync_service.describe_error(code, error_type, institution)
+        sync_service.describe_error(code, error_type, institution, amex=amex)
         or display
         or "Plaid reported an error"
     )
@@ -416,12 +430,16 @@ def _reconnect(
     notifier: Notifier,
     item: PlaidItem,
     outcome: SyncOutcome,
-    name: str,
+    state: status.ItemStatus,
     stale_note: str,
 ) -> AlertResult:
     code = outcome.error_code or item.error_code
     detail = _error_detail(
-        code, outcome.error_type, item.error_display_message, item.institution_name
+        code,
+        outcome.error_type,
+        item.error_display_message,
+        state.display_name,
+        amex=state.is_amex,
     )
     message = f"{detail}. Open the Connection page and click Reconnect."
     if stale_note:
@@ -431,7 +449,7 @@ def _reconnect(
         notifier,
         kind=KIND_RECONNECT,
         dedupe_key=f"reconnect:{item.id}:open",
-        title=f"Reconnect {_bank(item)}",
+        title=f"Reconnect {_bank(state)}",
         message=message,
         item_id=item.id,
     )
@@ -451,7 +469,7 @@ def _stale_sentence(state: status.ItemStatus) -> str:
     now = clock.now()
     if state.last_sync_success_at is None:
         age = _age_text(now - state.linked_at)
-        what = state.institution_name or "this connection"
+        what = state.display_name or "this connection"
         return f"No transactions have arrived since {what} was linked {age} ago."
     age = _age_text(now - state.last_sync_success_at)
     return f"The last successful sync was {age} ago ({_when_text(state.last_sync_success_at)})."
@@ -482,7 +500,7 @@ def _consent(
     ):
         return []
     due = state.consent_due_at.astimezone().date()
-    name = _bank(item)
+    name = _bank(state)
     left = state.consent_days_left
     if left > 1:
         when = f"ends on {_date_text(due)} ({_days(left)} left)"
@@ -498,7 +516,7 @@ def _consent(
             notifier,
             kind=KIND_CONSENT,
             dedupe_key=f"consent:{item.id}:{due.isoformat()}",
-            title=f"Renew your {item.institution_name or 'bank'} connection",
+            title=f"Renew your {state.display_name or 'bank'} connection",
             message=(
                 f"Plaid's access to {name} {when}. Renew it on the Connection page so syncing "
                 "keeps working; it takes a minute and keeps this connection."

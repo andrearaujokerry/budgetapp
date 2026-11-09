@@ -334,6 +334,61 @@ class TestLegacyTokenMove:
         assert sec.move_legacy_production_token("item-1") == sec.LegacyTokenMove("moved", "item-1")
         assert LEGACY_PRODUCTION_TOKEN not in secrets.values
 
+    @pytest.mark.parametrize(
+        ("db_ids", "values", "expected"),
+        [
+            (["item-1"], {}, ("none", None)),
+            (["item-1"], {LEGACY_PRODUCTION_TOKEN: PROD_TOKEN}, ("movable", "item-1")),
+            (  # the move's delete failed: a copy, however many Items exist
+                ["item-1", "item-2"],
+                {LEGACY_PRODUCTION_TOKEN: PROD_TOKEN, ITEM_1_KEY: PROD_TOKEN},
+                ("copy", "item-1"),
+            ),
+            (  # a copy of a token whose Item row is lost (in the index only)
+                [],
+                {LEGACY_PRODUCTION_TOKEN: PROD_TOKEN, ITEM_1_KEY: PROD_TOKEN},
+                ("copy", "item-1"),
+            ),
+            (  # the one Item has another token: the v1 one may be a lost connection's
+                ["item-1"],
+                {LEGACY_PRODUCTION_TOKEN: PROD_TOKEN, ITEM_1_KEY: OTHER_TOKEN},
+                ("unplaced", None),
+            ),
+            (["item-1", "item-2"], {LEGACY_PRODUCTION_TOKEN: PROD_TOKEN}, ("unplaced", None)),
+            ([], {LEGACY_PRODUCTION_TOKEN: PROD_TOKEN}, ("unplaced", None)),
+        ],
+        ids=["none", "movable", "copy", "copy-of-orphan", "beside-own", "several", "no-item"],
+    )
+    def test_where_the_v1_token_stands(self, secrets, db_ids, values, expected):
+        secrets.values.update(values)
+        if ITEM_1_KEY in values:
+            secrets.values[PRODUCTION_ITEM_INDEX] = '["item-1"]'
+        assert sec.legacy_token_state(db_ids) == sec.LegacyTokenState(*expected)
+
+    def test_a_copy_is_deleted_only_when_it_holds_that_token(self, secrets):
+        """Safety review: the retry of a failed delete (every production use of a token)."""
+        secrets.values[LEGACY_PRODUCTION_TOKEN] = PROD_TOKEN
+        assert sec.delete_legacy_copy("item-2", OTHER_TOKEN) == sec.LegacyTokenMove("none")
+        assert secrets.values[LEGACY_PRODUCTION_TOKEN] == PROD_TOKEN
+        secrets.fail_on[("delete", LEGACY_PRODUCTION_TOKEN)] = KeychainApprovalNeeded(
+            LEGACY_PRODUCTION_TOKEN, -25308
+        )
+        move = sec.delete_legacy_copy("item-1", PROD_TOKEN)
+        assert move.status == "moved" and "KeychainApprovalNeeded" in move.reason
+        assert PROD_TOKEN not in repr(move)
+        del secrets.fail_on[("delete", LEGACY_PRODUCTION_TOKEN)]
+        assert sec.delete_legacy_copy("item-1", PROD_TOKEN) == sec.LegacyTokenMove(
+            "moved", "item-1"
+        )
+        assert LEGACY_PRODUCTION_TOKEN not in secrets.values
+        assert sec.delete_legacy_copy("item-1", PROD_TOKEN) == sec.LegacyTokenMove("none")
+
+    def test_deleting_a_copy_never_raises(self, secrets):
+        secrets.fail_on[("get", LEGACY_PRODUCTION_TOKEN)] = KeychainApprovalNeeded(
+            LEGACY_PRODUCTION_TOKEN, -25308
+        )
+        assert sec.delete_legacy_copy("item-1", PROD_TOKEN) == sec.LegacyTokenMove("none")
+
     def test_approval_needed_for_the_old_key_is_not_swallowed(self, secrets):
         secrets.fail_on[("get", LEGACY_PRODUCTION_TOKEN)] = KeychainApprovalNeeded(
             LEGACY_PRODUCTION_TOKEN, -25308

@@ -40,6 +40,7 @@ from budgetapp.logsetup import setup_logging
 from budgetapp.models import PlaidItem
 from budgetapp.plaid_gateway import PlaidGateway, RealPlaidGateway
 from budgetapp.services import backup as backups
+from budgetapp.services import status as status_service
 from budgetapp.services import sync as sync_service
 from budgetapp.services.events import SyncOutcome
 from budgetapp.services.notify import Notifier, get_notifier
@@ -119,12 +120,16 @@ class Runtime:
         sync_service.ensure_database(self.settings, self.session_factory.kw["bind"])
 
     def item_names(self) -> dict[int, str]:
-        """Every Item's database id → a short name, in id order."""
+        """Every Item's database id → a short name, in id order. Two logins at one bank (or
+        Sandbox test Items at one test bank) are told apart as everywhere else: "Chase (Freedom
+        ··5678)" (``status.connection_labels``)."""
         with self.session_factory() as s:
-            rows = s.execute(
-                select(PlaidItem.id, PlaidItem.institution_name).order_by(PlaidItem.id)
-            ).all()
-        return {row.id: row.institution_name or f"Item {row.id}" for row in rows}
+            items = list(s.scalars(select(PlaidItem).order_by(PlaidItem.id)))
+            labels = status_service.connection_labels(s, items)
+            return {
+                item.id: labels.get(item.id) or item.institution_name or f"Item {item.id}"
+                for item in items
+            }
 
     def plaid_item_ids(self) -> dict[int, str]:
         """Every Item's database id → its Plaid ``item_id``."""

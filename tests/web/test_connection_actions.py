@@ -1003,3 +1003,47 @@ def test_the_page_shows_a_bank_connection_with_its_kind_of_tiles(
     assert "Statement details" not in words and 'data-link-mode="liabilities"' not in section
     assert "Consent No end date (Plaid reports none for TD Bank)" in words
     assert f'id="accounts-{td.id}"' in section and f'id="renew-{td.id}"' not in section
+
+
+# ------------------------------------------------------------------ W3-BANK review fixes (UX)
+
+
+def test_sync_now_leaves_out_a_bank_that_needs_reconnecting(
+    db, client, jobs, fake_plaid, secrets, settings
+):
+    """UX review: Sync now stays in the top bar while a healthy connection can sync; pressing
+    it syncs that one and doesn't keep retrying the bank only Reconnect can fix."""
+    _, amex = linked(db, fake_plaid, secrets, settings)
+    _, td = linked(
+        db,
+        fake_plaid,
+        secrets,
+        settings,
+        item_id="item-td",
+        institution_id="ins_14",
+        institution_name="TD Bank",
+        status="needs_reconnect",
+        error_code="ITEM_LOGIN_REQUIRED",
+    )
+    response = client.post("/connection/sync", headers=HTMX)
+    assert toasts(response.text) == ["Sync started. TD Bank waits for you to reconnect first."]
+    assert jobs.waiting_keys() == [f"refresh:{amex.id}"]
+    assert [(r.item_id, r.status) for r in runs(db)] == [(amex.id, "running")]
+
+
+def test_sync_now_tries_every_connection_when_none_can_sync(
+    db, client, jobs, fake_plaid, secrets, settings
+):
+    """With every connection waiting for a reconnect the Connection page's Sync now still tries
+    them all, as before (it shows Plaid's current answer)."""
+    _, item = linked(
+        db,
+        fake_plaid,
+        secrets,
+        settings,
+        status="needs_reconnect",
+        error_code="ITEM_LOGIN_REQUIRED",
+    )
+    response = client.post("/connection/sync", headers=HTMX)
+    assert toasts(response.text) == ["Sync started"]
+    assert jobs.waiting_keys() == [f"refresh:{item.id}"]

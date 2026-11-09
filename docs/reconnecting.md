@@ -7,8 +7,11 @@ categories, notes and budgets stay as they are. While a connection is broken not
 from that bank, but nothing is lost either: the next successful sync catches up on everything that
 happened in between. Your other connections keep syncing meanwhile.
 
-**Never link the same bank login a second time to fix a problem.** The app refuses it anyway, before
-anything is created.
+**Never link the same bank login a second time to fix a problem.** It would use another of your 10
+connections, and at some banks (Plaid names Chase, PNC, Navy Federal and Schwab) signing in to the
+same login again in Plaid's window breaks the first connection. The app refuses to finish such a
+link (it never exchanges its token), but it can't undo what happened in Plaid's window: if the
+first connection then says **Reconnect needed**, reconnect it as below.
 
 ## Reconnect
 
@@ -18,9 +21,10 @@ bank locked the sign-in, you withdrew the app's access at your bank, or the cons
 **How you notice:**
 
 - the top bar says **Reconnect needed**, and its tooltip names the bank;
-- every page shows "*Bank* needs attention. Syncing *bank* is paused until you sign in again
-  through Plaid. Your existing data is safe." (with several banks: "*Bank* and *bank* need
-  attention.");
+- every page shows "*Bank* needs attention. Syncing it is paused until you sign in again through
+  Plaid. Your existing data is safe." (with several banks: "*Bank* and *bank* need attention.");
+  two logins at the same bank are told apart by their first account, as in "Chase (Freedom
+  ··5678)";
 - a Mac notification, if sync problem alerts are on ([Alerts and notifications](alerts.md));
 - `./run doctor --env production` reports "*Bank* needs you to reconnect";
 - the code under **Recent syncs** on the Connection page, and in `./run sync`'s "failed (…)"
@@ -53,14 +57,15 @@ year.** If a consent runs out, syncing that bank stops until you renew it.
   has no end date: its Connection page says "No end date" and no reminder is sent.
 - **Reminders start 30 days before** (change the number under Settings → Alerts → Consent
   renewal reminder): every page shows "Renew your *bank* connection by *date* (*N* days left).",
-  and a Mac notification arrives once for each due date, even with sync problem alerts off (but
-  not while the connection needs reconnecting: reconnecting renews the consent too).
+  naming every bank that is due, and a Mac notification arrives once for each due date, even with
+  sync problem alerts off (but not while that same connection needs reconnecting: reconnecting it
+  renews its consent too). Another bank that needs reconnecting never hides the reminder.
 - **To renew:** Connection → **Renew consent** on that bank's connection (or **Renew now** in the
   banner). Plaid's window opens for the same connection; sign in and confirm. The page then says
   "Access is renewed until *date*." when Plaid reports the new date.
 - **If you miss it,** the banner says "Your *bank* consent has expired." and syncing that bank
-  stops. **Renew now** in the banner (or **Renew access** in the top bar) fixes it the same way,
-  and the next sync fetches what you missed.
+  stops. **Renew now** in the banner (or **Renew access** in the top bar, when no connection can
+  sync) fixes it the same way, and the next sync fetches what you missed.
 
 ## Add accounts
 
@@ -70,7 +75,9 @@ bank's connection. Plaid's window opens for the same connection and lists the lo
 savings, money market and credit-card accounts; pick the ones to share. No new connection is used.
 The page says "Your account choice at *bank* is saved. Syncing now: accounts you added appear once
 Plaid sends them." An account you untick there stops being shared with the app; what it already
-synced stays.
+synced stays. After the next sync its tile says **No longer shared.**, its balance is the last one
+Plaid sent, and the connection's summary counts it apart ("1 no longer shared"). Plaid does the
+same for an account you close at the bank. Tick it again in **Add accounts** to share it again.
 
 ## Statement details
 
@@ -139,6 +146,9 @@ Everything above can be tried safely with test data:
 
 Then open http://127.0.0.1:8766/connection and click **Reconnect**. Sign in with the test
 user the connection was made with (for example `user_good` / `pass_good`, or
-`user_transactions_dynamic` with any password). **Add accounts** and **Renew consent** work the
-same way on a test connection. Sandbox test connections also expire after 30 days and are
-repaired the same way.
+`user_transactions_dynamic` with any password). **Add accounts** works the same way on a test
+connection. **Renew consent** appears only on a connection with a consent date, and First
+Platypus Bank, where test connections are made by default, has none. For one that has,
+`./run sandbox-link --institution ins_129644` creates a test connection at First Platypus Bank -
+OAuth, whose consent ends 30 days after it is created. Sandbox test connections also expire after
+30 days and are repaired the same way.

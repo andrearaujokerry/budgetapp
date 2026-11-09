@@ -172,6 +172,30 @@ def test_one_item_by_id_and_an_unknown_id(db, make_rt, out, fake_plaid, secrets,
     assert "there is no Item 999999" in out.text
 
 
+def test_two_logins_at_one_bank_are_told_apart(db, make_rt, out, fake_plaid, secrets, settings):
+    """W3-BANK UX review: every place that names a connection uses the label that tells two
+    logins at one bank apart (and Sandbox test Items at one test bank), the sync output too."""
+    from tests.factories import make_account
+
+    ids = []
+    for item_id, card, mask in (("one", "Sapphire", "1234"), ("two", "Freedom", "5678")):
+        _, item = link(
+            db,
+            fake_plaid,
+            secrets,
+            settings,
+            item_id=item_id,
+            institution_name="Chase",
+            institution_id="ins_3",
+        )
+        make_account(db, item, name=card, mask=mask)
+        ids.append(item.id)
+    names = ["Chase (Sapphire ··1234)", "Chase (Freedom ··5678)"]
+    assert make_rt().item_names() == dict(zip(ids, names, strict=True))
+    assert sync_cmd.sync_command(args(), make_rt()) == 0
+    assert [line.split(":")[0] for line in out] == names
+
+
 def test_a_negative_age_is_a_usage_error(make_rt):
     assert sync_cmd.sync_command(args(min_age_hours=-1.0), make_rt()) == 2
 

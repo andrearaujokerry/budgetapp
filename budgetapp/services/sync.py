@@ -208,15 +208,22 @@ def access_token_for(
     holds THE token and the database (``source``) has exactly this one Item, the v1 token is
     this Item's: it is moved to the Item's key (write, read back, then delete the old key) and
     used; if the move fails the old key stays and keeps working (``./run doctor`` explains).
+    When the Item's own key exists and the v1 key still holds the same token (a move whose
+    delete failed, say for want of Keychain approval in an agent), the old copy is deleted now,
+    best effort: ``./run sync --env production`` in Terminal is what doctor suggests for it.
     """
     token = secrets.get_access_token(settings.plaid_env, plaid_item_id, store=store)
     if token:
+        if settings.is_production:
+            _log_copy(secrets.delete_legacy_copy(plaid_item_id, token, store=store))
         return token
     if settings.is_production and source is not None:
         legacy = secrets.legacy_production_token(store=store)
-        if legacy and _item_ids(source) == [plaid_item_id]:
-            _log_move(secrets.move_legacy_production_token(plaid_item_id, store=store))
-            return legacy
+        if legacy:
+            where = secrets.legacy_token_state(_item_ids(source), store=store)
+            if where.state == "movable" and where.item_id == plaid_item_id:
+                _log_move(secrets.move_legacy_production_token(plaid_item_id, store=store))
+                return legacy
     raise MissingAccessToken(
         f"No access token for Item {plaid_item_id} in Keychain. Restore it with ./run setup "
         f"--env {settings.plaid_env} --access-token (never link a new connection)."
@@ -227,16 +234,23 @@ def migrate_legacy_token(
     source: Session | sessionmaker[Session], settings: Settings, store: secrets.SecretStore
 ) -> secrets.LegacyTokenMove:
     """Production: move the v1 token to its Item's key now, when exactly one Item exists (the
-    first run of the wave-3 code does it; later calls find nothing to do). With no Item or with
-    several, the v1 token is left for Re-attach, which asks Plaid whose token it is."""
+    first run of the wave-3 code does it; later calls find nothing to do), or delete the v1 key
+    when it is only a copy of a token already saved under its Item's own key (a move whose last
+    step failed). With no Item or with several, a v1 token that matches no Item's own token is
+    left for Re-attach, which asks Plaid whose token it is."""
     if not settings.is_production or not secrets.legacy_production_token(store=store):
         return secrets.LegacyTokenMove("none")
     ids = _item_ids(source)
+    where = secrets.legacy_token_state(ids, store=store)
+    if where.state in ("copy", "movable") and where.item_id is not None:
+        move = secrets.move_legacy_production_token(where.item_id, store=store)
+        _log_move(move)
+        return move
     if len(ids) != 1:
-        return secrets.LegacyTokenMove(
-            "kept", None, f"the database has {len(ids)} connections, so Plaid must say whose it is"
-        )
-    move = secrets.move_legacy_production_token(ids[0], store=store)
+        reason = f"the database has {len(ids)} connections, so Plaid must say whose it is"
+    else:
+        reason = "a different token is already saved under the new name"
+    move = secrets.LegacyTokenMove("kept", None, reason)
     _log_move(move)
     return move
 
@@ -254,6 +268,21 @@ def _log_move(move: secrets.LegacyTokenMove) -> None:
         )
 
 
+def _log_copy(move: secrets.LegacyTokenMove) -> None:
+    """What :func:`secrets.delete_legacy_copy` did (nothing to say when there was no copy)."""
+    if move.status != "moved":
+        return
+    if move.reason:
+        log.info(
+            "The old copy of Item %s's access token under the v1 Keychain name stays for now (%s); "
+            "./run sync --env production in Terminal deletes it",
+            move.item_id,
+            move.reason,
+        )
+    else:
+        log.info("Deleted the old copy of Item %s's access token (v1 Keychain name)", move.item_id)
+
+
 def ensure_database(settings: Settings, bind: Any) -> None:
     """Every entry point: wait for the database (up to ~120 s), then the schema guard.
 
@@ -265,17 +294,31 @@ def ensure_database(settings: Settings, bind: Any) -> None:
 
 
 def describe_error(
-    error_code: str | None, error_type: str | None = None, institution: str | None = None
+    error_code: str | None,
+    error_type: str | None = None,
+    institution: str | None = None,
+    *,
+    amex: bool = False,
 ) -> str | None:
     """A plain sentence about a stored sync error, for the Connection page and alerts; it names
-    the ``institution`` ("TD Bank needs you to sign in again…") when known (BANK-7, C9)."""
+    the ``institution`` ("TD Bank needs you to sign in again…") when known (BANK-7, C9).
+
+    A sign-in Plaid needs again is about consent for American Express (``amex``: its consent
+    runs out every 12 months); at another bank it can as well follow a password change or
+    access withdrawn at the bank (RESEARCH T2.4, ITEM_LOGIN_REQUIRED's causes)."""
     if not error_code:
         return None
     bank = institution or "The bank"
     if error_code in ("ITEM_LOGIN_REQUIRED", "PENDING_EXPIRATION", "PENDING_DISCONNECT"):
+        if amex:
+            return (
+                f"{bank} needs you to sign in again through Plaid (the consent expired or was "
+                "revoked). Reconnect fixes it and keeps this connection."
+            )
         return (
-            f"{bank} needs you to sign in again through Plaid (the consent expired or was "
-            "revoked). Reconnect fixes it and keeps this connection."
+            f"{bank} needs you to sign in again through Plaid (for example after a password "
+            "change, an expired consent or access you withdrew at the bank). Reconnect fixes it "
+            "and keeps this connection."
         )
     if error_code in ("ACCESS_NOT_GRANTED", "USER_PERMISSION_REVOKED", "USER_SETUP_REQUIRED"):
         return (
@@ -979,9 +1022,46 @@ def reissue_account(account: Account, new_id: str, now: dt.datetime) -> None:
     )
 
 
+#: How the notice of an account Plaid stopped listing begins. De-selected (unticked in Add
+#: accounts) or revoked accounts are treated like closed ones: "Plaid will stop returning the
+#: account" (RESEARCH.md T2 gotchas; T2.4: "Any de-selected accounts will no longer be shared"),
+#: so its history stays and its balance stops changing.
+NOT_SHARED_NOTICE = "Plaid stopped sharing this account"
+
+
+def is_not_shared_notice(text: str | None) -> bool:
+    """``Account.notice`` says Plaid stopped listing the account (:func:`mark_not_shared`)."""
+    return bool(text) and str(text).startswith(NOT_SHARED_NOTICE)
+
+
+def no_longer_shared(account: Account) -> bool:
+    """A linked account Plaid no longer lists (unticked in Add accounts, or closed at the bank):
+    what it synced stays, but its balance is the last one Plaid sent, so totals of current
+    balances (the Dashboard's Accounts card) should leave it out."""
+    return account.item_id is not None and is_not_shared_notice(account.notice)
+
+
+def mark_not_shared(account: Account, now: dt.datetime) -> bool:
+    """Tell the user (``notice``) that ``/accounts/get`` no longer lists ``account``; True when
+    the notice is new. Nothing is deleted. The next listing of the account clears it again
+    (:func:`update_account`)."""
+    if is_not_shared_notice(account.notice):
+        return False
+    account.notice = (
+        f"{NOT_SHARED_NOTICE} on {now.astimezone():%b %-d, %Y}: it was unticked in Add accounts, "
+        "or closed or removed at the bank. What it synced stays here; the balance shown is the "
+        "last one Plaid sent. If the account is still open, Add accounts can share it again."
+    )
+    return True
+
+
 def update_account(account: Account, data: Mapping[str, Any], now: dt.datetime) -> bool:
-    """Copy an AccountBase (``/accounts/get`` or a sync page) onto ``account``; True if changed."""
+    """Copy an AccountBase (``/accounts/get`` or a sync page) onto ``account``; True if changed.
+    An account Plaid lists is shared again, so a "stopped sharing" notice goes."""
     changed = False
+    if is_not_shared_notice(account.notice):
+        account.notice = None
+        changed = True
     for name in ("name", "official_name", "mask", "type", "subtype"):
         value = _text(data.get(name))
         if value is not None:
@@ -1154,7 +1234,9 @@ def _side_error(
 def refresh_accounts(
     session_factory: sessionmaker[Session], gateway: PlaidGateway, token: str, item_id: int
 ) -> bool:
-    """``/accounts/get`` → names, masks and balances of every account (SYNC-7)."""
+    """``/accounts/get`` → names, masks and balances of every account (SYNC-7). An account of the
+    Item that Plaid no longer lists (and that no re-issued id replaces) keeps its history and
+    gets a notice that it isn't shared any more (:func:`mark_not_shared`)."""
     try:
         body = gateway.get_accounts(token)
     except PlaidGatewayError as err:
@@ -1186,6 +1268,10 @@ def refresh_accounts(
                 s.add(account)
             known[pid] = account
             update_account(account, data, now)
+        if entries:  # an empty answer can't say which accounts went away
+            for pid, account in known.items():
+                if pid not in listed and mark_not_shared(account, now):
+                    log.info("Item %s: Plaid no longer lists account %s", item_id, account.id)
     return True
 
 

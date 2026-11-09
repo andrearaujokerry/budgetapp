@@ -111,7 +111,9 @@ database, files, logs or git.
 Versions before banks were supported kept the one token as `plaid.access_token.production`. The
 first sync after the upgrade moves it to its connection's own item (it writes the new item, reads
 it back, then deletes the old one); if that can't happen, the old item keeps working and
-`./run doctor --env production` says what to do.
+`./run doctor --env production` says what to do. If only the old item couldn't be deleted, it is
+a leftover copy: every later sync tries again, and `./run sync --env production` in Terminal
+deletes it once you click **Always Allow**.
 
 Let the app create and change these items itself, through `./run setup`. Don't create or edit
 them with Keychain Access or the `security` command: macOS trusts the program that created an

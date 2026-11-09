@@ -1998,3 +1998,186 @@ def test_a_re_issued_bank_account_is_called_an_account(db):
     card = make_account(db)
     sync.reissue_account(card, "acc-new-card", NOW)
     assert "this card's account" in card.notice and "American Express" not in card.notice
+
+
+# ------------------------------------------------------------- W3-BANK review fixes (safety, UX)
+
+
+def v1_production(db, tmp_path, secrets):
+    """The owner's live state before wave 3: one Amex Item, its token under the v1 name."""
+    from budgetapp.config import load_settings
+
+    production = load_settings("production", state_dir=tmp_path / "state")
+    prod_plaid = FakePlaidGateway(plaid_env="production")
+    fake_item = prod_plaid.add_item(item_id="item-amex")
+    item = make_item(db, plaid_item_id="item-amex", last_sync_success_at=None)
+    secrets.values[app_secrets.LEGACY_PRODUCTION_TOKEN] = fake_item.access_token
+    return production, prod_plaid, fake_item, item
+
+
+def test_a_v1_copy_the_move_could_not_delete_is_deleted_by_a_later_sync(
+    db, session_factory, tmp_path, secrets, notifier, at_now, caplog
+):
+    """Safety review (major): the move saved the new key and read it back, but deleting the old
+    one failed (an agent can't ask for Keychain approval). Syncs keep working and keep trying, so
+    ./run sync --env production in Terminal, which doctor suggests, deletes the old copy."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="budgetapp")
+    production, prod_plaid, fake_item, item = v1_production(db, tmp_path, secrets)
+    legacy = app_secrets.LEGACY_PRODUCTION_TOKEN
+    own = app_secrets.production_access_token_key("item-amex")
+    secrets.fail_on[("delete", legacy)] = app_secrets.KeychainApprovalNeeded(legacy, -25308)
+
+    def sync_once():
+        return sync.sync_item(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            item.id,
+            trigger="schedule",
+            notifier=notifier,
+            sleep=no_sleep,
+        )
+
+    assert sync_once().status == "success"  # the move: new key written and read back
+    assert secrets.values[own] == secrets.values[legacy] == fake_item.access_token
+    assert app_secrets.legacy_token_state(["item-amex"], store=secrets) == (
+        app_secrets.LegacyTokenState("copy", "item-amex")
+    )
+    assert sync_once().status == "success"  # Keychain still refuses: the sync goes on
+    assert legacy in secrets.values
+    del secrets.fail_on[("delete", legacy)]  # in Terminal macOS can ask, and the owner allows
+    assert sync_once().status == "success"
+    assert legacy not in secrets.values and secrets.values[own] == fake_item.access_token
+    assert "Deleted the old copy of Item item-amex's access token" in caplog.text
+    assert fake_item.access_token not in caplog.text
+
+
+def test_a_v1_copy_keychain_wont_even_read_never_fails_a_sync(
+    db, session_factory, tmp_path, secrets, notifier, at_now
+):
+    """The retry is best effort: a v1 key that needs approval to be read is left alone."""
+    production, prod_plaid, fake_item, item = v1_production(db, tmp_path, secrets)
+    app_secrets.store_access_token(production, "item-amex", fake_item.access_token, store=secrets)
+    legacy = app_secrets.LEGACY_PRODUCTION_TOKEN
+    secrets.fail_on[("get", legacy)] = app_secrets.KeychainApprovalNeeded(legacy, -25308)
+    out = sync.sync_item(
+        session_factory,
+        prod_plaid,
+        secrets,
+        production,
+        item.id,
+        trigger="schedule",
+        notifier=notifier,
+        sleep=no_sleep,
+    )
+    assert out.status == "success" and secrets.values[legacy] == fake_item.access_token
+
+
+def test_a_v1_copy_keeps_its_owner_beside_another_connection(
+    db, session_factory, tmp_path, secrets, at_now
+):
+    """A second bank linked while the copy was left: values are compared, so the copy is still
+    American Express's. It is deleted, never moved, never re-attached, and no other Item's use of
+    its own token touches it."""
+    production, prod_plaid, fake_item, item = v1_production(db, tmp_path, secrets)
+    app_secrets.store_access_token(production, "item-amex", fake_item.access_token, store=secrets)
+    make_item(db, plaid_item_id="item-td", institution_id="ins_14", institution_name="TD Bank")
+    app_secrets.store_access_token(production, "item-td", "access-production-td", store=secrets)
+    legacy = app_secrets.LEGACY_PRODUCTION_TOKEN
+    copy = app_secrets.LegacyTokenState("copy", "item-amex")
+    assert linking.legacy_state(db, store=secrets) == copy
+    assert not linking.legacy_unplaced(db, store=secrets)
+    assert not linking.reattach_available(db, production, store=secrets)
+    td = sync.access_token_for(production, "item-td", secrets, source=session_factory)
+    assert td == "access-production-td" and legacy in secrets.values
+    move = sync.migrate_legacy_token(session_factory, production, secrets)
+    assert (move.status, move.item_id, move.reason) == ("moved", "item-amex", None)
+    assert legacy not in secrets.values
+    assert secrets.values[app_secrets.production_access_token_key("item-amex")] == (
+        fake_item.access_token
+    )
+
+
+def test_an_account_plaid_stops_listing_keeps_its_history_and_says_so(
+    linked, fake_plaid, db, freeze_today
+):
+    """UX review: an account unticked in Add accounts (or closed) drops out of /accounts/get
+    ("Plaid will stop returning the account", RESEARCH T2 gotchas). Its history and last balance
+    stay, a notice says it isn't shared any more, and a later listing clears the notice."""
+    shared = fake_plaid.add_account(
+        linked.fake_item,
+        account_id="acc-savings",
+        name="Savings",
+        mask="0002",
+        type="depository",
+        subtype="savings",
+        current="5000.00",
+    )
+    fake_plaid.add_transaction(
+        linked.fake_item, account_id="acc-savings", amount="-4.17", name="INTEREST"
+    )
+    linked.sync()
+    savings = db.scalars(select(Account).where(Account.plaid_account_id == "acc-savings")).one()
+    assert savings.notice is None and not sync.no_longer_shared(savings)
+
+    later = NOW + dt.timedelta(days=3)
+    freeze_today(now=later)
+    linked.fake_item.accounts = [
+        a for a in linked.fake_item.accounts if a["account_id"] != "acc-savings"
+    ]
+    linked.sync()
+    savings = db.get(Account, savings.id)
+    assert sync.no_longer_shared(savings)
+    assert savings.notice.startswith(
+        f"Plaid stopped sharing this account on {later.astimezone():%b %-d, %Y}"
+    )
+    assert savings.current_balance == Decimal("5000.00")  # the last balance Plaid sent
+    history = select(func.count()).select_from(Transaction)
+    assert db.scalar(history.where(Transaction.account_id == savings.id)) == 1
+    card = db.scalars(select(Account).where(Account.plaid_account_id == linked.account_pid)).one()
+    assert card.notice is None  # the card Plaid still lists is untouched
+
+    first_notice = savings.notice
+    freeze_today(now=later + dt.timedelta(days=1))
+    linked.sync()
+    assert db.get(Account, savings.id).notice == first_notice  # keeps the day it stopped
+
+    linked.fake_item.accounts.append(shared)  # ticked again in Add accounts
+    linked.sync()
+    assert db.get(Account, savings.id).notice is None
+
+
+def test_an_empty_account_list_marks_nothing(db, session_factory, linked, fake_plaid):
+    """An answer without accounts can't say which went away: nothing is marked."""
+    linked.sync()
+    linked.fake_item.accounts = []
+    token = linked.fake_item.access_token
+    assert sync.refresh_accounts(session_factory, fake_plaid, token, linked.item.id)
+    db.expire_all()
+    assert linked.account().notice is None
+
+
+def test_a_re_issued_account_is_not_called_unshared(linked, fake_plaid, db):
+    """Churn (a new id for the same card) re-points the account: it is listed, not unshared."""
+    linked.sync()
+    old = linked.fake_item.accounts[0]
+    linked.fake_item.accounts = [{**old, "account_id": "acc-reissued"}]
+    token = linked.fake_item.access_token
+    assert sync.refresh_accounts(linked.session_factory, fake_plaid, token, linked.item.id)
+    db.expire_all()
+    account = linked.account()
+    assert account.plaid_account_id == "acc-reissued"
+    assert account.notice.startswith("Plaid re-issued") and not sync.no_longer_shared(account)
+
+
+def test_a_sign_in_again_is_about_consent_only_for_american_express():
+    """UX review: ITEM_LOGIN_REQUIRED at another bank often follows a password change or access
+    withdrawn at the bank (RESEARCH T2.4); only American Express's text blames the consent."""
+    bank = sync.describe_error("ITEM_LOGIN_REQUIRED", institution="TD Bank")
+    assert bank.startswith("TD Bank needs you to sign in again through Plaid (for example after")
+    assert "password change" in bank and "the consent expired or was revoked" not in bank
+    amex = sync.describe_error("ITEM_LOGIN_REQUIRED", institution="American Express", amex=True)
+    assert "(the consent expired or was revoked)" in amex

@@ -24,7 +24,7 @@
 </div>
 
 {%- if item.needs_reconnect %}
-{% call ui.banner("over", item.error_display_message or item.error_help or (item.name ~ " needs you to sign in again through Plaid."), title="Reconnect needed.") %}
+{% call ui.banner("over", item.error_display_message or item.error_help or (item.institution ~ " needs you to sign in again through Plaid."), title="Reconnect needed.") %}
 {{ ui.button("Reconnect", variant="danger", size="sm", icon="link", data_link_mode="update", data_item_id=item.id, id="reconnect-" ~ item.id, disabled=not link_enabled) }}
 {% endcall %}
 {%- elif s.state == "error" %}
@@ -50,7 +50,7 @@
 {{ ui.button("Renew consent", size="sm", icon="refresh", data_link_mode="update", data_item_id=item.id, id="renew-" ~ item.id, disabled=not link_enabled) }}
 {%- endif %}
 {%- if not item.needs_reconnect %}
-{{ ui.button("Reconnect", size="sm", variant="ghost", icon="link", data_link_mode="update", data_item_id=item.id, id="reconnect-" ~ item.id, disabled=not link_enabled, tooltip="Sign in to " ~ item.name ~ " again, in a Plaid window. The connection stays the same.") }}
+{{ ui.button("Reconnect", size="sm", variant="ghost", icon="link", data_link_mode="update", data_item_id=item.id, id="reconnect-" ~ item.id, disabled=not link_enabled, tooltip="Sign in to " ~ item.institution ~ " again, in a Plaid window. The connection stays the same.") }}
 {%- endif %}
 </div>
 {%- endset %}
@@ -64,7 +64,7 @@
 {%- set statements %}
 {%- if not item.liabilities_consented %}Not shared
 {%- elif item.liabilities_status == "ok" %}Shared
-{%- elif item.liabilities_status == "unsupported" %}{{ item.name }} doesn't provide them for these cards
+{%- elif item.liabilities_status == "unsupported" %}{{ item.institution }} doesn't provide them for these cards
 {%- elif item.liabilities_status == "error" %}Couldn't be read last time; the next sync tries again
 {%- else %}Shared; read on the next sync{% endif %}
 {%- endset %}
@@ -74,15 +74,21 @@
 {%- endset %}
 {%- set consent %}
 {%- if item.consent_known %}{{ cx.consent_text(s) }}{% if s.consent_estimated %} <span class="muted">(estimated: a year after you last confirmed)</span>{% endif %}
-{%- else %}No end date <span class="muted">(Plaid reports none for {{ item.name }})</span>{% endif %}
+{%- else %}No end date <span class="muted">(Plaid reports none for {{ item.institution }})</span>{% endif %}
 {%- endset %}
 {%- set rows = [
   ("Last successful sync", cx.stamp(s.last_sync_success_at, now)),
-  ("Plaid's last update from " ~ item.name, plaid_update),
+  ("Plaid's last update from " ~ item.institution, plaid_update),
   ("History", history),
   ("Consent", consent),
 ] %}
 {%- if item.has_cards %}{% set _ = rows.append(("Statement details", statements)) %}{% endif %}
+{#- The Keychain item's name (never the token) tells the copies of several connections apart
+    (going-live.md "Keep a copy of the access token"). Demo data has no Keychain item. -#}
+{%- if item.keychain_item and not demo %}
+{%- set keychain %}<code class="keychain-item">{{ item.keychain_item }}</code>{% endset %}
+{%- set _ = rows.append(("Keychain item", keychain)) %}
+{%- endif %}
 {{ ui.kv(rows) }}
 {% endcall %}
 
@@ -93,7 +99,9 @@
 {%- endset %}
 {%- set subtitle = a.kind ~ (" · " ~ a.official_name if a.official_name and a.official_name != a.display_name else "") %}
 {% call ui.card(a.display_name, subtitle=subtitle, id="account-" ~ a.id, footer=footer) %}
-{%- if a.notice %}
+{%- if a.no_longer_shared %}
+{{ ui.banner("warn", a.notice, title="No longer shared.") }}
+{%- elif a.notice %}
 {{ ui.banner("warn", a.notice, title="Check this " ~ ("card." if a.is_card else "account.")) }}
 {%- endif %}
 {%- if a.is_card %}
@@ -119,7 +127,7 @@
 {%- else %}
 <div class="grid grid--2{{ ' mt-4' if a.notice }}">
 {{ ui.stat("Current balance", ui.money(a.current_balance), sub="In the account, as the bank reports it", icon="home") }}
-{{ ui.stat("Available balance", ui.money(a.available_balance), sub="What you can spend or withdraw now" if a.available_balance is not none else "Not reported by " ~ item.name, icon="check-circle") }}
+{{ ui.stat("Available balance", ui.money(a.available_balance), sub="What you can spend or withdraw now" if a.available_balance is not none else "Not reported by " ~ item.institution, icon="check-circle") }}
 </div>
 {%- endif %}
 {% endcall %}
