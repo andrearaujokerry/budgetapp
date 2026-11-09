@@ -152,7 +152,7 @@ def describe_outcome(name: str, outcome: SyncOutcome) -> str:
     if outcome.status == "error":
         code = outcome.error_code or "error"
         detail = outcome.display_message or sync_service.describe_error(
-            outcome.error_code, outcome.error_type
+            outcome.error_code, outcome.error_type, name
         )
         line = f"{name}: failed ({code})."
         if detail:
@@ -266,7 +266,7 @@ def sync_command(args: argparse.Namespace, rt: Runtime) -> int:
         rt.ensure_database()
         names = rt.item_names()
         if not names:
-            rt.out("Nothing is linked yet. Link your Amex card on the Connection page.")
+            rt.out("Nothing is linked yet. Link a bank or card on the Connection page.")
             return EXIT_OK
         if item_id is not None and item_id not in names:
             known = ", ".join(f"{i} ({n})" for i, n in names.items())

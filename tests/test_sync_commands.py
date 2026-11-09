@@ -124,7 +124,7 @@ def runs(db) -> list[SyncRun]:
 
 def test_sync_with_nothing_linked_says_so(make_rt, out):
     assert sync_cmd.sync_command(args(), make_rt()) == 0
-    assert out == ["Nothing is linked yet. Link your Amex card on the Connection page."]
+    assert out == ["Nothing is linked yet. Link a bank or card on the Connection page."]
 
 
 def test_sync_syncs_every_item_and_reports_the_counts(
@@ -305,7 +305,7 @@ def test_each_missing_secret_names_the_command_that_saves_it():
             app_secrets.PLAID_CLIENT_ID,
             app_secrets.plaid_secret_key("sandbox"),
             app_secrets.db_password_key("budgetapp_dev"),
-            app_secrets.PRODUCTION_ACCESS_TOKEN,
+            app_secrets.production_access_token_key("item-amex"),
         )
     }
     assert list(commands.values()) == [

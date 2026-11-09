@@ -28,9 +28,9 @@ read only the Sandbox items).
 
 Production link guard (ARCHITECTURE §7, Principle 4 "One Plaid link per bank login, ever"):
 :func:`production_link_blockers` lists every reason outside the database not to issue a new
-production link — an unexpired link-in-progress marker (one link at a time), a production token
-waiting in a recovery file, or a v1 token that could not be moved to its Item's key yet.
-``services.linking`` adds the reasons that need the database (orphaned tokens, the 10 Items).
+production link — an unexpired link-in-progress marker (one link at a time) or a production token
+waiting in a recovery file. ``services.linking`` adds the reasons that need the database (tokens
+without their Item row, the v1 token, the 10 Items).
 """
 
 from __future__ import annotations
@@ -714,17 +714,12 @@ def production_link_blockers(settings: Settings, *, store: SecretStore | None = 
     """Every reason, outside the database, not to issue a production new-link token (§7).
 
     The guard (``services.linking``, under ``db.link_lock``) adds the reasons that need the
-    database. Reasons here: an unexpired link-in-progress marker (one link at a time), an unsaved
-    production token in a recovery file (a connection that exists: store it, then re-attach), or
-    the v1 token still under its old name (it is moved before a link when exactly one Item
-    exists; otherwise it must be re-attached first). Keychain errors propagate (fail safe).
+    database: tokens without their Item row, the v1 token, the 10 Items. Reasons here: an
+    unexpired link-in-progress marker (one link at a time), or an unsaved production token in a
+    recovery file (a connection that exists: store it, then re-attach). Keychain errors
+    propagate (fail safe).
     """
     reasons: list[str] = []
-    if legacy_production_token(store=store):
-        reasons.append(
-            "Keychain still holds a production access token under its v1 name: re-attach the "
-            "existing connection (or let the next sync move it) before linking another."
-        )
     expires = get_link_in_progress(plaid_env="production", store=store)
     if expires is not None:
         reasons.append(

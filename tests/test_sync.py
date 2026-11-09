@@ -1790,3 +1790,211 @@ def test_not_ready_leaves_the_last_success_alone_until_data_arrives(
     assert result.not_due == () and [o.added for o in result.outcomes] == [1]
     linked.db.expire_all()
     assert linked.db.get(PlaidItem, linked.item.id).last_sync_success_at == NOW
+
+
+# ------------------------------------------------------------------------- wave 3 (BANK-4, BANK-7)
+
+
+def bank_accounts() -> list[dict[str, Any]]:
+    """A bank login's accounts: checking and savings (Plaid ``depository``)."""
+    from tests.factories import plaid_account
+
+    return [
+        plaid_account(
+            account_id="acc-checking",
+            name="Everyday Checking",
+            official_name=None,
+            mask="0001",
+            type="depository",
+            subtype="checking",
+            current="2450.10",
+            available="2400.00",
+        ),
+        plaid_account(
+            account_id="acc-savings",
+            name="Savings",
+            official_name=None,
+            mask="0002",
+            type="depository",
+            subtype="savings",
+            current="10000.00",
+            available="10000.00",
+        ),
+    ]
+
+
+def test_a_bank_only_connection_never_asks_for_statement_details(
+    db, session_factory, fake_plaid, secrets, settings, notifier, at_now
+):
+    """BANK-7: Liabilities don't apply without a card: never "unsupported", never a warning,
+    and Plaid isn't asked (even when the login granted no Liabilities consent)."""
+    bank = Linked(
+        db,
+        session_factory,
+        fake_plaid,
+        secrets,
+        settings,
+        notifier,
+        item_id="item-bank",
+        consented=("transactions",),
+        institution_id="ins_14",
+        institution_name="TD Bank",
+        liabilities_status="not_consented",  # what an earlier version stored
+    )
+    bank.fake_item.accounts = bank_accounts()
+    fake_plaid.add_transaction(bank.fake_item, account_id="acc-checking", amount="-2000.00")
+    out = bank.sync()
+    assert out.status == "success"
+    assert fake_plaid.calls_to("get_liabilities") == []
+    assert bank.item.liabilities_status is None
+    accounts = db.scalars(select(Account).where(Account.item_id == bank.item.id)).all()
+    assert {(a.type, a.subtype, a.current_balance, a.available_balance) for a in accounts} == {
+        ("depository", "checking", Decimal("2450.10"), Decimal("2400.00")),
+        ("depository", "savings", Decimal("10000.00"), Decimal("10000.00")),
+    }
+    status = sync.refresh_liabilities(session_factory, fake_plaid, "unused", bank.item.id)
+    assert status == sync.NOT_APPLICABLE and fake_plaid.calls_to("get_liabilities") == []
+
+
+def test_a_bank_login_with_a_card_still_reads_its_statement_details(
+    db, session_factory, fake_plaid, secrets, settings, notifier, at_now
+):
+    bank = Linked(
+        db,
+        session_factory,
+        fake_plaid,
+        secrets,
+        settings,
+        notifier,
+        item_id="item-bank",
+        institution_id="ins_14",
+        institution_name="TD Bank",
+    )
+    bank.fake_item.accounts = [*bank_accounts(), *bank.fake_item.accounts]
+    bank.sync()
+    assert len(fake_plaid.calls_to("get_liabilities")) == 1
+    assert bank.item.liabilities_status == "ok"
+
+
+def test_every_production_item_reads_only_its_own_token(
+    db, session_factory, tmp_path, secrets, notifier, at_now
+):
+    """BANK-4 (C6): two production Items, two Keychain keys; each sync uses its own token."""
+    from budgetapp.config import load_settings
+
+    production = load_settings("production", state_dir=tmp_path / "state")
+    prod_plaid = FakePlaidGateway(plaid_env="production")
+    linked = [
+        Linked(db, session_factory, prod_plaid, secrets, production, notifier, item_id=pid)
+        for pid in ("item-amex", "item-bank")
+    ]
+    for one in linked:
+        assert one.sync().status == "success"
+    tokens = {c["access_token"] for c in prod_plaid.calls_to("transactions_sync")}
+    assert tokens == {one.fake_item.access_token for one in linked}
+    for one in linked:
+        assert (
+            sync.access_token_for(production, one.item.plaid_item_id, secrets)
+            == one.fake_item.access_token
+        )
+
+
+def test_the_v1_token_is_moved_on_the_first_sync_and_keeps_working(
+    db, session_factory, tmp_path, secrets, notifier, at_now
+):
+    """C6: a live database and Keychain from waves 1-2 (one Amex Item, its token under the v1
+    name) upgrade without a new link: the first sync moves the token and syncs with it."""
+    from budgetapp.config import load_settings
+
+    production = load_settings("production", state_dir=tmp_path / "state")
+    prod_plaid = FakePlaidGateway(plaid_env="production")
+    fake_item = prod_plaid.add_item(item_id="item-amex")
+    item = make_item(db, plaid_item_id="item-amex", last_sync_success_at=None)
+    secrets.values[app_secrets.LEGACY_PRODUCTION_TOKEN] = fake_item.access_token
+    out = sync.sync_item(
+        session_factory,
+        prod_plaid,
+        secrets,
+        production,
+        item.id,
+        trigger="schedule",
+        notifier=notifier,
+        sleep=no_sleep,
+    )
+    assert out.status == "success"
+    assert secrets.values == {
+        app_secrets.PRODUCTION_ITEM_INDEX: '["item-amex"]',
+        "plaid.access_token.production.item-amex": fake_item.access_token,
+    }
+    assert sync.migrate_legacy_token(session_factory, production, secrets).status == "none"
+
+
+def test_a_v1_token_that_cannot_be_moved_still_syncs(
+    db, session_factory, tmp_path, secrets, notifier, at_now, caplog
+):
+    from budgetapp.config import load_settings
+
+    production = load_settings("production", state_dir=tmp_path / "state")
+    prod_plaid = FakePlaidGateway(plaid_env="production")
+    fake_item = prod_plaid.add_item(item_id="item-amex")
+    item = make_item(db, plaid_item_id="item-amex", last_sync_success_at=None)
+    secrets.values[app_secrets.LEGACY_PRODUCTION_TOKEN] = fake_item.access_token
+    secrets.fail_on[("set", "plaid.access_token.production.item-amex")] = RuntimeError("locked")
+    out = sync.sync_item(
+        session_factory,
+        prod_plaid,
+        secrets,
+        production,
+        item.id,
+        trigger="schedule",
+        notifier=notifier,
+        sleep=no_sleep,
+    )
+    assert out.status == "success"
+    assert secrets.values[app_secrets.LEGACY_PRODUCTION_TOKEN] == fake_item.access_token
+    assert "Kept the v1 production access token" in caplog.text
+    assert fake_item.access_token not in caplog.text
+
+
+def test_the_v1_token_never_reaches_one_of_several_items(
+    db, session_factory, tmp_path, secrets, notifier, at_now
+):
+    """With two Items in the database the app can't tell whose the v1 token is: no guessing
+    (Re-attach asks Plaid); the Item without a token of its own reports it missing."""
+    from budgetapp.config import load_settings
+
+    production = load_settings("production", state_dir=tmp_path / "state")
+    make_item(db, plaid_item_id="item-amex")
+    make_item(db, plaid_item_id="item-bank")
+    secrets.values[app_secrets.LEGACY_PRODUCTION_TOKEN] = "access-production-v1"
+    with pytest.raises(sync.MissingAccessToken):
+        sync.access_token_for(production, "item-amex", secrets, source=session_factory)
+    move = sync.migrate_legacy_token(session_factory, production, secrets)
+    assert move.status == "kept" and "2 connections" in move.reason
+    assert secrets.values[app_secrets.LEGACY_PRODUCTION_TOKEN] == "access-production-v1"
+
+
+def test_the_sandbox_never_uses_a_v1_production_token(db, session_factory, settings, secrets):
+    make_item(db, plaid_item_id="item-x")
+    secrets.values[app_secrets.LEGACY_PRODUCTION_TOKEN] = "access-production-v1"
+    with pytest.raises(sync.MissingAccessToken):
+        sync.access_token_for(settings, "item-x", secrets, source=session_factory)
+    assert sync.migrate_legacy_token(session_factory, settings, secrets).status == "none"
+
+
+def test_error_help_names_the_institution():
+    """BANK-7 (C9): "TD Bank needs you to sign in again", or a neutral sentence."""
+    login = sync.describe_error("ITEM_LOGIN_REQUIRED", institution="TD Bank")
+    assert login.startswith("TD Bank needs you to sign in again through Plaid")
+    assert sync.describe_error("INSTITUTION_DOWN").startswith("The bank isn't answering Plaid")
+    assert "Amex" not in sync.describe_error("ACCESS_NOT_GRANTED", institution="Chase")
+
+
+def test_a_re_issued_bank_account_is_called_an_account(db):
+    account = make_account(db, type="depository", subtype="checking")
+    sync.reissue_account(account, "acc-new", NOW)
+    assert account.notice.startswith("Plaid re-issued this account on")
+    assert "an account number change" in account.notice
+    card = make_account(db)
+    sync.reissue_account(card, "acc-new-card", NOW)
+    assert "this card's account" in card.notice and "American Express" not in card.notice

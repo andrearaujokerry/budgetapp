@@ -237,13 +237,6 @@ class TestProductionLinkGuard:
         sec.store_access_token(prod, "item-1", PROD_TOKEN)
         assert sec.production_link_blockers(prod) == []
 
-    def test_a_v1_token_under_its_old_name_blocks_until_it_is_moved(self, prod, secrets):
-        secrets.values[LEGACY_PRODUCTION_TOKEN] = PROD_TOKEN
-        [reason] = sec.production_link_blockers(prod)
-        assert "v1 name" in reason and "re-attach" in reason and PROD_TOKEN not in reason
-        assert sec.move_legacy_production_token("item-1").status == "moved"
-        assert sec.production_link_blockers(prod) == []
-
     def test_a_token_stuck_in_a_recovery_file_blocks_after_the_marker_expires(
         self, prod, secrets, freeze_today
     ):
