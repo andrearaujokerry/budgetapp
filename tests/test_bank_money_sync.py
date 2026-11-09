@@ -2,7 +2,9 @@
 
 A bank Item with a checking and a savings account syncs: each row lands in its bank category,
 an edit made to a pending transfer survives its posting (step 0 never drops it on a bank), and
-large-charge alerts announce spending only.
+large-charge alerts announce spending only. Every test runs twice (wave-3 integration): in the
+Sandbox and with production settings, where the Item's token is BANK's per-Item Keychain key
+(W3-PLAN C6), so bank money always syncs through the token of its own connection.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from sqlalchemy import select
 
 from budgetapp import clock
 from budgetapp import secrets as app_secrets
+from budgetapp.config import load_settings
 from budgetapp.models import Category, Transaction
 from budgetapp.periods import month_of
 from budgetapp.services import sync
@@ -22,6 +25,7 @@ from budgetapp.services.events import SyncOutcome
 from budgetapp.services.spending import period_spending
 from tests.bank_factories import BANK_INSTITUTION_ID, BANK_NAME
 from tests.factories import get_category, make_item, make_rule, plaid_account, set_app_settings
+from tests.fake_plaid import FakePlaidGateway
 
 NOW = dt.datetime(2026, 10, 20, 15, 0, tzinfo=dt.UTC)
 CHECKING, SAVINGS = "harbor-chk", "harbor-sav"
@@ -104,10 +108,37 @@ class Bank:
         return self.db.get(Category, row.category_id).name, row.category_source
 
 
-@pytest.fixture
-def bank(db, session_factory, fake_plaid, secrets, settings, notifier, freeze_today) -> Bank:
+@pytest.fixture(params=["sandbox", "production"])
+def bank(
+    request, db, session_factory, fake_plaid, secrets, settings, notifier, freeze_today, tmp_path
+) -> Bank:
     freeze_today(now=NOW)
+    if request.param == "production":  # fakes and a settings override only: nothing real
+        settings = load_settings(
+            "production",
+            state_dir=tmp_path / "state",
+            logs_dir=tmp_path / "logs",
+            backups_dir=tmp_path / "backups",
+            install_dir=tmp_path / "venv",
+        )
+        fake_plaid = FakePlaidGateway(plaid_env="production")
     return Bank(db, session_factory, fake_plaid, secrets, settings, notifier)
+
+
+def test_the_bank_syncs_with_its_own_connections_token(bank):
+    """Wave-3 integration (C6 × MON-1): the token sits under BANK's per-Item key
+    ``plaid.access_token.<env>.item-harbor`` and is the only one the bank's sync uses."""
+    env = bank.settings.plaid_env
+    key = app_secrets.access_token_key(env, "item-harbor")
+    assert bank.store.values[key] == bank.fake_item.access_token
+    assert app_secrets.item_ids(env, store=bank.store) == ["item-harbor"]
+    assert app_secrets.LEGACY_PRODUCTION_TOKEN not in bank.store.values
+    bank.add(transaction_id="pay", amount="-3412.18", date=today(), name="ACME ROBOTICS PAYROLL",
+             pfc_primary="INCOME", pfc_detailed="INCOME_SALARY")  # fmt: skip
+    assert bank.sync().status == "success"
+    used = {call["access_token"] for call in bank.fake.calls_to("transactions_sync")}
+    assert used == {bank.fake_item.access_token}
+    assert bank.category("pay") == ("Paycheck", "plaid")
 
 
 def today() -> dt.date:
