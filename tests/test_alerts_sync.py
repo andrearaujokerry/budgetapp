@@ -113,7 +113,7 @@ def test_a_failed_sync_alerts_once_per_code_and_day(db, notifier, item):
     (sent,) = notifier.sent
     assert sent.title == "American Express sync failed"
     assert sent.message == (
-        "Amex isn't answering Plaid right now. The next sync will try again. "
+        "American Express isn't answering Plaid right now. The next sync will try again. "
         "Code: INSTITUTION_NOT_RESPONDING."
     )
     key = f"sync-error:{item.id}:INSTITUTION_NOT_RESPONDING:{today().isoformat()}"
@@ -161,9 +161,9 @@ def test_reconnect_alerts_once_per_occurrence(db, notifier, item):
     (sent,) = notifier.sent
     assert sent.title == "Reconnect American Express"
     assert sent.message == (
-        "Amex needs you to sign in again through Plaid (the consent expired or was revoked). "
-        "Reconnect fixes it and keeps this connection. Open the Connection page and click "
-        "Reconnect."
+        "American Express needs you to sign in again through Plaid (the consent expired or was "
+        "revoked). Reconnect fixes it and keeps this connection. Open the Connection page and "
+        "click Reconnect."
     )
     assert keys(db) == [f"reconnect:{item.id}:open"]
     at(NOW + DAY)  # still broken the next day: no daily nagging, and no "sync failed" either
@@ -201,7 +201,7 @@ def test_a_transient_error_does_not_end_the_reconnect_occurrence(db, notifier, i
 
 def test_consent_revoked_and_locked_items_say_so(db, notifier, item):
     evaluate(db, notifier, fail(item, "ITEM_LOCKED", reconnect=True))
-    assert notifier.sent[0].message.startswith("Amex didn't accept the sign-in.")
+    assert notifier.sent[0].message.startswith("American Express didn't accept the sign-in.")
 
 
 # --------------------------------------------------------------------------- ALR-2 stale
@@ -214,7 +214,7 @@ def test_stale_data_alerts_once_a_day(db, notifier):
     (sent,) = notifier.sent
     assert sent.title == "American Express data is out of date"
     assert sent.message == (
-        "No transactions have arrived since the card was linked 40 hours ago. Check the "
+        "No transactions have arrived since American Express was linked 40 hours ago. Check the "
         "Connection page; Sync now tries again."
     )
     assert keys(db) == [f"stale:{linked.id}:{today().isoformat()}"]
@@ -237,7 +237,7 @@ def test_a_failure_on_stale_data_sends_one_notification(db, notifier):
     last = (NOW - 3 * DAY).astimezone()
     when = f"{last:%b} {last.day} at {last.strftime('%I:%M %p').lstrip('0')}"
     assert sent.message == (
-        "Amex isn't answering Plaid right now. The next sync will try again. Code: "
+        "American Express isn't answering Plaid right now. The next sync will try again. Code: "
         f"INSTITUTION_DOWN. The last successful sync was 3 days ago ({when})."
     )
     stale = event(db, f"stale:{old.id}:{today().isoformat()}")
@@ -336,6 +336,36 @@ def test_no_consent_reminder_while_a_reconnect_is_needed(db, notifier, item):
     item.consent_expires_at = NOW + 20 * DAY  # a reconnect that did not move the date
     evaluate(db, notifier, succeed(item))
     assert notifier.titles[-1] == "Renew your American Express connection"
+
+
+def test_a_bank_connection_names_its_bank_and_has_no_estimated_consent(db, notifier):
+    """BANK-6/BANK-7: connection alerts name the institution; only American Express gets the
+    12-month consent estimate, so a bank without a date from Plaid never gets a reminder."""
+    bank = make_item(
+        db,
+        institution_id="ins_14",
+        institution_name="TD Bank",
+        last_sync_success_at=NOW - 2 * HOUR,
+        linked_at=NOW - 400 * DAY,
+        last_consented_at=NOW - 400 * DAY,
+    )
+    evaluate(db, notifier, fail(bank, "ITEM_LOGIN_REQUIRED", reconnect=True))
+    assert notifier.titles == ["Reconnect TD Bank"]
+    assert notifier.sent[0].message.startswith("TD Bank needs you to sign in again through Plaid")
+    evaluate(db, notifier, succeed(bank))
+    assert keys(db, "consent") == [] and notifier.titles == ["Reconnect TD Bank"]
+    bank.consent_expires_at = NOW + 10 * DAY  # Plaid sends a date: it counts
+    evaluate(db, notifier, succeed(bank))
+    assert notifier.titles[-1] == "Renew your TD Bank connection"
+
+
+def test_a_connection_without_a_name_stays_neutral(db, notifier):
+    nameless = make_item(
+        db, institution_name=None, institution_id=None, last_sync_success_at=NOW - 2 * HOUR
+    )
+    evaluate(db, notifier, fail(nameless, "INSTITUTION_DOWN"))
+    assert notifier.titles == ["Your bank sync failed"]
+    assert notifier.sent[0].message.startswith("The bank isn't answering Plaid right now.")
 
 
 # --------------------------------------------------------------------------- ALR-3

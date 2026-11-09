@@ -193,17 +193,26 @@ class TestPlaidKeyPrompts:
 
 
 class FakeItemGateway:
-    def __init__(self, error=None):
+    def __init__(self, error=None, item_id="item-prod-1", institution="American Express"):
         self.error = error
+        self.item_id = item_id
+        self.institution = institution
 
     def get_item(self, token):
         if self.error:
             raise self.error
-        return {"item": {"item_id": "item-prod-1", "institution_id": "ins_10"}}
+        return {
+            "item": {
+                "item_id": self.item_id,
+                "institution_id": "ins_10",
+                "institution_name": self.institution,
+            }
+        }
 
 
 class TestAccessTokenReentry:
     TOKEN = "access-production-11111111-2222-3333-4444-555555555555"
+    KEY = "plaid.access_token.production.item-prod-1"  # C6: the Item's own key
 
     def _settings(self, tmp_path):
         return load_settings("production", state_dir=tmp_path / "state")
@@ -213,7 +222,9 @@ class TestAccessTokenReentry:
         rc = setup.enter_access_token(
             settings, input_fn=lambda _: self.TOKEN, gateway=FakeItemGateway(), store=secrets
         )
-        assert rc == 0 and secrets.values["plaid.access_token.production"] == self.TOKEN
+        assert rc == 0 and secrets.values[self.KEY] == self.TOKEN
+        assert sec.production_item_ids(store=secrets) == ["item-prod-1"]
+        assert sec.LEGACY_PRODUCTION_TOKEN not in secrets.values
         assert self.TOKEN not in capsys.readouterr().out
         assert (
             setup.enter_access_token(
@@ -222,21 +233,47 @@ class TestAccessTokenReentry:
             == 0
         )
 
+    def test_any_connections_token_goes_to_its_own_key(self, tmp_path, secrets, capsys):
+        """BANK-4: a second connection's token is saved beside the first, never over it."""
+        settings = self._settings(tmp_path)
+        other = "access-production-99999999-2222-3333-4444-555555555555"
+        for token, item_id in ((self.TOKEN, "item-prod-1"), (other, "item-td")):
+            gateway = FakeItemGateway(item_id=item_id, institution="TD Bank")
+            assert (
+                setup.enter_access_token(
+                    settings, input_fn=lambda _, t=token: t, gateway=gateway, store=secrets
+                )
+                == 0
+            )
+        assert secrets.values[self.KEY] == self.TOKEN
+        assert secrets.values["plaid.access_token.production.item-td"] == other
+        assert "Saved the access token for Item item-td (TD Bank)" in capsys.readouterr().out
+
+    def test_the_v1_copy_of_the_same_token_is_removed(self, tmp_path, secrets, capsys):
+        settings = self._settings(tmp_path)
+        secrets.values[sec.LEGACY_PRODUCTION_TOKEN] = self.TOKEN
+        rc = setup.enter_access_token(
+            settings, input_fn=lambda _: self.TOKEN, gateway=FakeItemGateway(), store=secrets
+        )
+        assert rc == 0 and secrets.values[self.KEY] == self.TOKEN
+        assert sec.LEGACY_PRODUCTION_TOKEN not in secrets.values
+        assert "Removed the old copy" in capsys.readouterr().out
+
     def test_reentering_a_token_from_a_recovery_file_unblocks_linking(
         self, tmp_path, secrets, capsys
     ):
         settings = self._settings(tmp_path)
-        secrets.fail_on[("set", "plaid.access_token.production")] = RuntimeError("Keychain")
+        secrets.fail_on[("set", self.KEY)] = RuntimeError("Keychain")
         with pytest.raises(sec.TokenNotSavedError):
             sec.store_access_token(settings, "item-prod-1", self.TOKEN)
         assert sec.production_link_blockers(settings)
-        del secrets.fail_on[("set", "plaid.access_token.production")]
+        del secrets.fail_on[("set", self.KEY)]
         rc = setup.enter_access_token(
             settings, input_fn=lambda _: self.TOKEN, gateway=FakeItemGateway(), store=secrets
         )
         assert rc == 0 and sec.unsaved_production_tokens(settings) == []
         assert "Marked the recovery file as saved" in capsys.readouterr().out
-        assert [("re-attach" in r) for r in sec.production_link_blockers(settings)] == [True]
+        assert sec.production_link_blockers(settings) == []  # re-attach it, then link others
 
     def test_rejected_or_conflicting_tokens_are_not_saved(self, tmp_path, secrets):
         settings = self._settings(tmp_path)
@@ -247,15 +284,15 @@ class TestAccessTokenReentry:
             )
             == 1
         )
-        assert "plaid.access_token.production" not in secrets.values
-        secrets.values["plaid.access_token.production"] = self.TOKEN + "-other"
+        assert self.KEY not in secrets.values
+        secrets.values[self.KEY] = self.TOKEN + "-other"
         assert (
             setup.enter_access_token(
                 settings, input_fn=lambda _: self.TOKEN, gateway=FakeItemGateway(), store=secrets
             )
             == 1
         )
-        assert secrets.values["plaid.access_token.production"] == self.TOKEN + "-other"
+        assert secrets.values[self.KEY] == self.TOKEN + "-other"
 
     def test_sandbox_tokens_and_wrong_env_are_refused(self, tmp_path, secrets):
         settings = self._settings(tmp_path)

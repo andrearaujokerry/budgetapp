@@ -12,7 +12,8 @@
    typed with hidden input (never echoed, never on a command line) and saved in Keychain.
 
 ``--keys-only`` does only step 6. ``--env production --access-token`` re-enters a saved production
-access token (for example from your password manager), verified with ``/item/get`` first.
+access token of any connection (for example from your password manager): ``/item/get`` verifies it
+first and names its Item, and the token is saved under that Item's own Keychain key (C6).
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ Next steps:
   1. Plaid keys (if you skipped them):     ./run setup --keys-only
   2. Allow notifications (one time):       ./run notify-test
   3. Start the Sandbox app:                ./run      → http://127.0.0.1:8766
-Your real Amex is linked later, once, from the production app (./run live)."""
+Your real banks and cards are linked later, from the production app (./run live)."""
 
 
 def register(subparsers: Any) -> None:
@@ -200,7 +201,10 @@ def enter_access_token(
     gateway: Any = None,
     store: secrets.SecretStore | None = None,
 ) -> int:
-    """Re-enter a saved production access token after verifying it with ``/item/get``."""
+    """Re-enter a saved production access token of any connection (BANK-4): ``/item/get``
+    verifies it and names its Item, then it is saved under that Item's own Keychain key. A
+    different token already saved for that Item is never replaced; a v1 copy of the same token
+    (``plaid.access_token.production``) is removed once the new key is read back."""
     from budgetapp.plaid_gateway import (
         PlaidError,
         PlaidTransportError,
@@ -221,17 +225,6 @@ def enter_access_token(
     except Exception as exc:
         print(str(exc))
         return 1
-    existing = secrets.get_access_token("production", store=store)
-    if existing == token:
-        print("This token is already saved in Keychain. Nothing to do.")
-        _mark_recovery_files(settings, token)
-        return 0
-    if existing:
-        print(
-            "A different production access token is already saved; it is never replaced "
-            "automatically. Remove it in Keychain Access only if you are sure it is dead."
-        )
-        return 1
     gateway = gateway or RealPlaidGateway.from_settings(settings, store=store)
     try:
         body = gateway.get_item(token)
@@ -243,18 +236,37 @@ def enter_access_token(
         return 1
     item = body.get("item") or {}
     item_id = item.get("item_id")
-    if not item_id:
+    if not item_id or not isinstance(item_id, str):
         print("Plaid's answer did not include an Item id; nothing was saved.")
         return 1
-    secrets.store_access_token(settings, item_id, token, store=store)
     institution = (
         item.get("institution_name") or item.get("institution_id") or "unknown institution"
     )
-    print(f"Saved the access token for Item {item_id} ({institution}) in Keychain.")
+    try:
+        existing = secrets.get_access_token("production", item_id, store=store)
+    except ValueError:
+        print("Plaid's answer named an Item id the app can't use; nothing was saved.")
+        return 1
+    if existing == token:
+        print(f"This token is already saved in Keychain for Item {item_id} ({institution}).")
+    elif existing:
+        print(
+            f"A different access token is already saved for Item {item_id} ({institution}); it "
+            "is never replaced automatically. Remove it in Keychain Access only if you are sure "
+            "it is dead."
+        )
+        return 1
+    else:
+        secrets.store_access_token(settings, item_id, token, store=store)
+        print(f"Saved the access token for Item {item_id} ({institution}) in Keychain.")
+    if secrets.legacy_production_token(store=store) == token:
+        move = secrets.move_legacy_production_token(item_id, store=store)
+        if move.status == "moved" and not move.reason:
+            print("Removed the old copy saved under the v1 Keychain name.")
     _mark_recovery_files(settings, token)
     print(
-        "If the app has no connection yet, open ./run live → Connection → "
-        "“Re-attach existing connection”. Never link a new one."
+        "If the app doesn't show this connection yet, open ./run live → Connection → “Re-attach "
+        "existing connection”. Never link the same login again."
     )
     return 0
 

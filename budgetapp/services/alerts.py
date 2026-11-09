@@ -94,7 +94,8 @@ MAX_CHARGE_NOTIFICATIONS = 3
 PERIOD_START_SLACK = dt.timedelta(days=10)
 #: Budget events older than this can't belong to the current period or year.
 _BUDGET_LOOKBACK = dt.timedelta(days=400)
-DEFAULT_INSTITUTION = "American Express"
+#: An Item saved without an institution name (rare): connection alerts stay neutral (C9).
+DEFAULT_INSTITUTION = "Your bank"
 
 _BUDGET_KEY = re.compile(
     r"^budget:(?P<scope>overall|\d+):(?P<token>\d{4}(?:-\d{2}-\d{2})?):(?P<threshold>\d+)$"
@@ -278,6 +279,7 @@ def _age_text(delta: dt.timedelta) -> str:
 
 
 def _institution(item: PlaidItem) -> str:
+    """The institution's name for a connection alert ("TD Bank sync failed", BANK-7)."""
     return item.institution_name or DEFAULT_INSTITUTION
 
 
@@ -355,7 +357,9 @@ def _sync_problems(
         results.append(_reconnect(session, notifier, item, outcome, name, stale_note))
     elif outcome.status == "error":
         code = outcome.error_code or "UNKNOWN"
-        detail = _error_detail(outcome.error_code, outcome.error_type, outcome.display_message)
+        detail = _error_detail(
+            outcome.error_code, outcome.error_type, outcome.display_message, item.institution_name
+        )
         message = f"{detail}. Code: {code}."
         if stale_note:
             message += f" {stale_note}"
@@ -387,11 +391,18 @@ def _sync_problems(
     return results
 
 
-def _error_detail(code: str | None, error_type: str | None, display: str | None) -> str:
-    """Plain words for a failed sync (the Connection page's), without a final full stop."""
+def _error_detail(
+    code: str | None, error_type: str | None, display: str | None, institution: str | None = None
+) -> str:
+    """Plain words for a failed sync (the Connection page's, naming the institution), without a
+    final full stop."""
     from budgetapp.services import sync as sync_service  # sync imports this module
 
-    text = sync_service.describe_error(code, error_type) or display or "Plaid reported an error"
+    text = (
+        sync_service.describe_error(code, error_type, institution)
+        or display
+        or "Plaid reported an error"
+    )
     return text.strip().rstrip(".")
 
 
@@ -404,7 +415,9 @@ def _reconnect(
     stale_note: str,
 ) -> AlertResult:
     code = outcome.error_code or item.error_code
-    detail = _error_detail(code, outcome.error_type, item.error_display_message)
+    detail = _error_detail(
+        code, outcome.error_type, item.error_display_message, item.institution_name
+    )
     message = f"{detail}. Open the Connection page and click Reconnect."
     if stale_note:
         message += f" {stale_note}"
@@ -433,7 +446,8 @@ def _stale_sentence(state: status.ItemStatus) -> str:
     now = clock.now()
     if state.last_sync_success_at is None:
         age = _age_text(now - state.linked_at)
-        return f"No transactions have arrived since the card was linked {age} ago."
+        what = state.institution_name or "this connection"
+        return f"No transactions have arrived since {what} was linked {age} ago."
     age = _age_text(now - state.last_sync_success_at)
     return f"The last successful sync was {age} ago ({_when_text(state.last_sync_success_at)})."
 
@@ -449,12 +463,18 @@ def _stale_advice(item: PlaidItem) -> str:
 def _consent(
     session: Session, notifier: Notifier, item: PlaidItem, state: status.ItemStatus
 ) -> list[AlertResult]:
-    """SYNC-6: renewal due within ``consent_reminder_days``, once per due date.
+    """SYNC-6: renewal due within ``consent_reminder_days``, once per due date, naming the
+    institution. A bank whose consent has no end date gets none (BANK-6).
 
     Not while the Item needs reconnecting (as on the Connection page): reconnecting is update mode,
     which renews the consent too, and the reconnect alert already asks for it.
     """
-    if not state.consent_warning or item.status == "needs_reconnect":
+    if (
+        not state.consent_warning
+        or state.consent_due_at is None
+        or state.consent_days_left is None
+        or item.status == "needs_reconnect"
+    ):
         return []
     due = state.consent_due_at.astimezone().date()
     name = _institution(item)
