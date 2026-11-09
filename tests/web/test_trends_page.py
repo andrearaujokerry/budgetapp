@@ -128,7 +128,7 @@ def test_linked_but_nothing_has_arrived(client, db):
 
     make_item(db)
     page = client.get("/trends").text
-    assert "Your card is linked, but no transactions have arrived yet." in page
+    assert "Your accounts are linked, but no transactions have arrived yet." in page
     assert 'href="/import"' not in re.search(
         r'id="trends-empty".*?</div>\n</div>', page, re.S
     ).group(0)

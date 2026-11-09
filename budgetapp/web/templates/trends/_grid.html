@@ -1,11 +1,27 @@
 {#- Every month per category (INS-2): one row per category with spending in range (largest
     total first): its total and monthly average (in view on a phone), then one column per
     month. A month
-    before the history shows "—" (no data), a month without charges $0. -#}
+    before the history shows "—" (no data), a month without charges $0.
+    With income shown (INC-4) the table is a monthly income statement: All spending, then each
+    income category (Credits & Rewards on its own line), All income and Net (income − all
+    spending). Each income amount opens that month's income transactions, whose Net is the
+    amount (money in is negative there, as Plaid signs it). -#}
 {%- import "components/ui.html" as ui -%}
 {%- import "trends/_macros.html" as tm -%}
-{% call ui.card('Every month', subtitle='Whole dollars; choose a category for its month-by-month detail', flush=true, id='trends-grid-card') %}
-{%- if t.categories %}
+{%- macro month_cells(amounts) -%}
+{%- for amount in amounts %}
+<td class="num{{ ' trends-grid__current' if t.months[loop.index0].status == 'current' }}">{% if amount is none %}<span class="muted">—</span>{% else %}{{ ui.money(amount, cents=false) }}{% endif %}</td>
+{%- endfor %}
+{%- endmacro -%}
+{%- macro income_cells(line, ids, what) -%}
+{%- for amount in line.amounts %}
+{%- set m = t.months[loop.index0] %}
+<td class="num{{ ' trends-grid__current' if m.status == 'current' }}">{% if amount is none %}<span class="muted">—</span>{% elif amount == 0 %}<span class="trends-zero">{{ ui.money_text(amount, cents=false) }}</span>{% else %}<a class="trends-income" href="{{ income_href(ids, m.period) }}" aria-label="{{ ui.money_text(amount) }} {{ what }} in {{ m.period.start|month_label }}: see the transactions">{{ ui.money(amount, cents=false) }}</a>{% endif %}</td>
+{%- endfor %}
+{%- endmacro -%}
+{%- set subtitle = 'Whole dollars; choose a category for its month-by-month detail' ~ ('. Income and net follow spending.' if show_income else '') -%}
+{% call ui.card('Every month', subtitle=subtitle, flush=true, id='trends-grid-card') %}
+{%- if t.categories or show_income %}
 <div class="table-wrap">
 <table class="table table--compact trends-grid" id="trends-grid">
 <thead><tr>
@@ -28,6 +44,45 @@
 </tr>
 {%- endfor %}
 </tbody>
+{%- if show_income %}
+{%- set inc = t.income %}
+<tbody class="trends-grid__totals">
+<tr id="grid-spending">
+<th scope="row" class="trends-grid__name">All spending</th>
+<td class="num">{{ ui.money(t.totals.total, cents=false) }}</td>
+<td class="num trends-grid__sum">{{ ui.money(t.totals.average, cents=false) }}</td>
+{{- month_cells(t.totals.amounts) }}
+</tr>
+</tbody>
+<tbody class="trends-grid__income" id="grid-income">
+<tr class="trends-grid__group">
+<th scope="rowgroup" class="trends-grid__name" id="grid-income-heading">Income</th>
+<td colspan="{{ 2 + t.months|length }}"></td>
+</tr>
+{%- for line in inc.categories %}
+<tr id="grid-income-{{ line.category.id }}">
+<th scope="row" class="trends-grid__name">{{ ui.category_badge(line.category) }}</th>
+<td class="num strong">{{ ui.money(line.total, cents=false) }}</td>
+<td class="num trends-grid__sum">{{ ui.money(line.average, cents=false) }}</td>
+{{- income_cells(line, [line.category.id], 'from ' ~ line.category.name) }}
+</tr>
+{%- endfor %}
+<tr class="trends-grid__subtotal" id="grid-income-total">
+<th scope="row" class="trends-grid__name">All income</th>
+<td class="num strong">{{ ui.money(inc.totals.total, cents=false) }}</td>
+<td class="num trends-grid__sum">{{ ui.money(inc.totals.average, cents=false) }}</td>
+{{- income_cells(inc.totals, inc.category_ids, 'of income') }}
+</tr>
+</tbody>
+<tfoot><tr id="grid-net">
+<th scope="row" class="trends-grid__name">Net <span class="trends-grid__note">income − spending</span></th>
+<td class="num">{{ ui.money(inc.net_total, signed=true, cents=false, tone='neutral') }}</td>
+<td class="num trends-grid__sum">{{ ui.money(inc.net_average, signed=true, cents=false, tone='neutral') }}</td>
+{%- for amount in inc.net %}
+<td class="num{{ ' trends-grid__current' if t.months[loop.index0].status == 'current' }}">{% if amount is none %}<span class="muted">—</span>{% else %}{{ ui.money(amount, signed=true, cents=false, tone='neutral') }}{% endif %}</td>
+{%- endfor %}
+</tr></tfoot>
+{%- else %}
 <tfoot><tr>
 <th scope="row" class="trends-grid__name">All spending</th>
 <td class="num">{{ ui.money(t.totals.total, cents=false) }}</td>
@@ -36,6 +91,7 @@
 <td class="num{{ ' trends-grid__current' if t.months[loop.index0].status == 'current' }}">{% if amount is none %}<span class="muted">—</span>{% else %}{{ ui.money(amount, cents=false) }}{% endif %}</td>
 {%- endfor %}
 </tr></tfoot>
+{%- endif %}
 </table>
 </div>
 {%- else %}

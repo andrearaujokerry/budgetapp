@@ -1,0 +1,20 @@
+{#- The "Show income" switch (INC-2), on the Dashboard and Trends: a form that saves
+    app_settings.show_income for every page and visit.
+
+    switch(action, on, target, swap='outerHTML', include=none, next_url=none)
+    * With JavaScript a change posts the form (hx-trigger="change") and swaps `target` with the
+      page's region rendered for the new choice (`include`: more fields to send, e.g. Trends'
+      filter bar); the switch itself is outside that region, so keyboard focus stays on it,
+      and the response's toast tells screen readers what changed.
+    * Without JavaScript it is a plain form with a Save button (in <noscript>); the route
+      redirects back (`next_url`: where to, checked by the route).
+    * An unchecked switch sends nothing: the route reads a missing `show_income` as "off".
+    * The control is a checkbox with role="switch" and a visible label, so it is reached with
+      Tab, toggled with Space and read as "Show income, switch, on". -#}
+{%- macro switch(action, on, target, swap='outerHTML', include=none, next_url=none) -%}
+<form class="income-switch" id="income-switch" method="post" action="{{ action }}" hx-post="{{ action }}" hx-trigger="change" hx-target="{{ target }}" hx-swap="{{ swap }}" hx-sync="this:queue last"{% if include %} hx-include="{{ include }}"{% endif %}>
+{%- if next_url %}<input type="hidden" name="next" value="{{ next_url }}">{% endif %}
+<label class="check income-switch__control" for="show-income"><input class="switch" type="checkbox" role="switch" id="show-income" name="show_income" value="1"{% if on %} checked{% endif %}><span class="check__text"><span>Show income</span></span></label>
+<noscript><button class="btn btn--sm" type="submit">Save</button></noscript>
+</form>
+{%- endmacro -%}

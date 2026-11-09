@@ -1,5 +1,6 @@
 /* Dashboard (INS-1): rows of a budget or category (name left, figure right), the ranked bars of
-   the top categories and small notes. Tiles, cards, meters and tables come from app.css. */
+   the top categories and small notes; the "Show income" switch and the Accounts card (wave 3).
+   Tiles, cards, meters and tables come from app.css. */
 
 .dash-grid {
   align-items: start;
@@ -125,6 +126,84 @@ a.dash-row__name:hover .cat__name {
 
 .dash-total {
   flex: 1;
+}
+
+/* The "Show income" switch in the page header, next to the buttons (Trends has the same). */
+.income-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 32px;
+  margin: 0;
+}
+
+.income-switch__control {
+  align-items: center;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
+.income-switch__control .switch {
+  margin: 0;
+}
+
+/* Accounts: the bank accounts ("Cash") and the cards ("Owed on cards") side by side when the
+   card is wide enough, one above the other on a phone. */
+.dash-accounts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: var(--sp-6) var(--sp-10);
+}
+
+.dash-accounts__group {
+  display: grid;
+  align-content: start;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.dash-accounts__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.dash-accounts__title {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+}
+
+.dash-accounts__total {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dash-accounts__list {
+  gap: var(--sp-3);
+}
+
+.dash-account {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dash-account__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dash-account__meta {
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 599px) {

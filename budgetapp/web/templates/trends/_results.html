@@ -1,6 +1,9 @@
 {#- Trends results (#trends-results): tiles, the monthly chart, then either the change from
     last month per category and every month per category (all categories), or one category
-    month by month. Rendered alone for the filter bar's HTMX requests. -#}
+    month by month. Rendered alone for the filter bar's and the switch's HTMX requests.
+    With income shown (show_income: the switch is on and all categories are shown, INC-4) the
+    first row of tiles is the month's spending, income and net, and an "Income and spending"
+    chart comes before the spending chart. -#}
 {%- import "components/ui.html" as ui -%}
 {%- import "trends/_macros.html" as tm -%}
 {%- set ref = t.selected_ref -%}
@@ -36,7 +39,7 @@
 {{ ui.empty_state('No data in these months', 'Your history starts on ' ~ (t.history_start|date_long) ~ '. Choose a later month under “Through”.', icon='calendar', compact=true) }}
 </div>
 {%- else %}
-<div class="grid grid--4" id="trends-kpis">
+<div class="grid {{ 'grid--3' if show_income else 'grid--4' }}" id="trends-kpis">
 {%- if t.ended %}
 {#- The latest month that has ended: its change from the month before, or why there is none
     (the history's first month has no month before it to compare with). -#}
@@ -47,6 +50,23 @@
 {{ ui.stat((ref.name ~ ' in ' if ref else 'Spent in ') ~ (t.ended.period.start|month_label), ui.money(t.amount_in(tr, t.ended), cents=false), sub=ended_sub, icon='calendar', id='trend-compare') }}
 {%- else %}
 {{ ui.stat('Last month', ui.money(none), sub='no complete month in this range yet', icon='calendar', id='trend-compare') }}
+{%- endif %}
+{%- if show_income %}
+{#- Income and net (INC-4) of the same month as the first tile (the month in progress when no
+    month has ended yet), linked to that month's income. -#}
+{%- set im = t.ended or t.current %}
+{%- set ii = t.months.index(im) %}
+{%- set im_label = (im.period.start|month_label) ~ (' so far' if im.status == 'current' else '') %}
+{%- set earned = t.income.totals.amounts[ii] %}
+{%- set top = t.income.largest_in(ii) %}
+{%- if im == t.ended and t.compare and t.income.change %}{% set income_sub = tm.change_text(t.income.change, short_month(t.previous), 'income')|trim %}
+{%- elif top %}{% set income_sub = ('all from ' if top.amounts[ii] == earned else 'largest: ') ~ top.category.name %}
+{%- else %}{% set income_sub = 'nothing came in' %}{% endif %}
+{{ ui.stat('Income in ' ~ im_label, ui.money(earned, cents=false), sub=income_sub, icon='download', href=income_href(t.income.category_ids, im.period) if earned else none, id='trend-income') }}
+{%- set kept = t.income.net[ii] %}
+{%- if t.income.net_average is not none %}{% set net_sub = 'average ' ~ ui.money_text(t.income.net_average, signed=true, cents=false) ~ ' over ' ~ (t.complete_months|pluralize('complete month')) %}
+{%- else %}{% set net_sub = 'income − all spending' %}{% endif %}
+{{ ui.stat('Net in ' ~ im_label, ui.money(kept, signed=true, cents=false, tone='neutral'), sub=net_sub, icon='receipt', id='trend-net') }}
 {%- endif %}
 {%- if t.current %}
 {%- set sc = tr.so_far_change %}
@@ -70,6 +90,9 @@
 
 {%- set chart_title = (ref.name ~ ' by month') if ref else 'Spending by month' %}
 {%- set chart_sub = range_label ~ ((' · ' ~ short_month(t.current.period) ~ ' so far') if t.current else '') %}
+{%- if show_income %}
+{% include "trends/_income.html" %}
+{%- endif %}
 {% call ui.card(chart_title, subtitle=chart_sub, id='trends-chart-card') %}
 {% call ui.chart('trends-chart', chart, height=300, label=('Bar chart of ' ~ (ref.name if ref else 'spending by category') ~ ' per month, ' ~ range_label)) %}
 <table><caption>{{ chart_title }}, {{ range_label }}</caption><tbody>

@@ -23,10 +23,11 @@
 {%- endif -%}
 {%- endmacro -%}
 
-{#- change_text(ch, previous_label): the same in words for a tile ("+$571 (+20%) from Sep"). -#}
-{%- macro change_text(ch, previous_label) -%}
+{#- change_text(ch, previous_label, what='spending'): the same in words for a tile ("$571 more
+    than Sep (+20%)"); `what` names the figure when there was none ("no income in Sep either"). -#}
+{%- macro change_text(ch, previous_label, what='spending') -%}
 {%- if ch is none -%}nothing to compare with in {{ previous_label }}
-{%- elif ch.kind == 'none' -%}no spending in {{ previous_label }} either
+{%- elif ch.kind == 'none' -%}no {{ what }} in {{ previous_label }} either
 {%- elif ch.kind == 'new' -%}nothing in {{ previous_label }}
 {%- elif ch.kind == 'same' -%}the same as {{ previous_label }}
 {%- else -%}{{ ui.money_text(ch.amount|abs, cents=false) }} {{ 'more' if ch.amount > 0 else 'less' }} than {{ previous_label }}{% if ch.percent is not none %} ({{ ch.percent|pct if ch.percent <= 0 else '+' ~ (ch.percent|pct) }}){% endif %}
