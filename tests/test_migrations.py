@@ -20,7 +20,7 @@ from tests.factories import make_account, make_item
 
 VERSIONS = Path(__file__).parent.parent / "budgetapp/migrations/versions"
 MIGRATION_2 = VERSIONS / "0002_seed_defaults.py"
-HEAD = "0003_f1_verification_fixes"
+HEAD = "0006_income_preference"
 
 # The palette values migration 0003 gives the seeded categories (ui.color_value / resolveColor).
 PALETTE = {

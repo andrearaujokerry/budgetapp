@@ -576,6 +576,8 @@ class AppSettings(TimestampMixin, Base):
     )
     statement_settle_days: Mapped[int] = mapped_column(Integer, default=3, server_default=text("3"))
     ai_enabled: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+    #: The Dashboard's and Trends' "Show income" switch (INC-2): income and net next to spending.
+    show_income: Mapped[bool] = mapped_column(default=True, server_default=text("true"))
 
     budget_cycle_account: Mapped[Account | None] = relationship()
 
