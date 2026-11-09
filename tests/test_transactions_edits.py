@@ -645,6 +645,30 @@ class TestOneClickDraft:
         )
         assert txns.one_click_draft(db, txn.id).is_payment
 
+    def test_a_card_payment_from_checking_is_flagged(self, db, cats):
+        """Rules skip it (W3-MONEY review), so the form says a rule won't change it."""
+        checking = make_bank_account(db)
+        txn = make_transaction(
+            db,
+            checking,
+            name="AMEX EPAYMENT ACH PMT",
+            amount="900.00",
+            pfc_primary="LOAN_PAYMENTS",
+            pfc_detailed="LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+            category=cats["payments"],
+            category_source="plaid",
+        )
+        assert txns.one_click_draft(db, txn.id).is_payment
+        transfer = make_transaction(
+            db,
+            checking,
+            name="ONLINE TRANSFER TO SAV",
+            amount="500.00",
+            pfc_primary="TRANSFER_OUT",
+            pfc_detailed="TRANSFER_OUT_SAVINGS",
+        )
+        assert not txns.one_click_draft(db, transfer.id).is_payment
+
     def test_missing(self, db):
         with pytest.raises(txns.TransactionNotFound):
             txns.one_click_draft(db, 987654321)
@@ -925,6 +949,35 @@ class TestOneClickRule:
         assert result.changed == 0
         db.expire_all()
         assert payment.category_id == cats["payments"].id
+
+    def test_a_card_payment_from_checking_never_moves(self, db, cats):
+        """W3-MONEY review: a one-click rule made from the ACH text leaves the card's payment from
+        checking where it is (never spending, never counted twice)."""
+        checking = make_bank_account(db)
+        payment = make_transaction(
+            db,
+            checking,
+            name="AMEX EPAYMENT ACH PMT",
+            amount="900.00",
+            pfc_primary="LOAN_PAYMENTS",
+            pfc_detailed="LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+            category=cats["payments"],
+            category_source="plaid",
+        )
+        preview = txns.preview_one_click_rule(
+            db, payment.id, merchant_pattern="AMEX EPAYMENT", category_id=cats["shopping"].id
+        )
+        assert preview == txns.RulePreview(matches=1, will_change=0, user_edited=0, payments=1)
+        result = txns.create_one_click_rule(
+            db,
+            payment.id,
+            merchant_pattern="AMEX EPAYMENT",
+            category_id=cats["shopping"].id,
+            apply_to_past=True,
+        )
+        assert result.changed == 0
+        db.expire_all()
+        assert (payment.category_id, payment.rule_id) == (cats["payments"].id, None)
 
     @pytest.mark.parametrize(
         ("pattern", "category"), [("", "home"), ("x" * 301, "home"), ("Blue", None)]

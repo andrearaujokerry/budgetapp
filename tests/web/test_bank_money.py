@@ -1,6 +1,6 @@
 """Bank money on the pages this package touches (W3-PLAN MON-1, MON-3): the bank rows of the
-"Plaid & Amex categories" editor, the new categories, and the card-only Statements and Import
-pages. The Transactions and Settings pages have their own tests."""
+"Plaid & Amex categories" editor, the new categories, the card-only Statements and Import pages,
+and the Rules form's account picker. The Transactions and Settings pages have their own tests."""
 
 from __future__ import annotations
 
@@ -109,3 +109,19 @@ class TestCardOnlyPages:
         options = re.findall(r'<option value="([^"]*)"', page)
         assert options == [str(amex.id), "new"]
         assert "Everyday Checking" not in page
+
+
+def test_the_rule_form_picks_any_account(client, db, checking):
+    """W3-MONEY review: the rule form's account picker lists cards and bank accounts, so it is
+    labelled "Account" ("Any account"), not "Card"."""
+    card = make_account(db, name="Gold Card", mask="1001")
+    page = client.get("/rules/new").text
+    assert csp_problems(page, rendered=True) == []
+    field = re.search(
+        r'<label[^>]*for="f-account_id"[^>]*>(.*?)</label>\s*<select(.*?)</select>', page, re.S
+    )
+    assert field is not None
+    assert field.group(1).strip() == "Account"
+    options = re.findall(r'<option value="([^"]*)">([^<]*)</option>', field.group(2))
+    assert options[0] == ("", "Any account")
+    assert {value for value, _ in options[1:]} >= {str(card.id), str(checking.id)}

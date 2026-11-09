@@ -30,9 +30,10 @@ The same rules apply on every page and in every alert:
 - **Charges count as spending, in their category.** A refund in a spending category reduces that
   category's spending. Card payments ("Card Payments") and credits such as cash back ("Credits &
   Rewards") never count as spending.
-- **Bank accounts count the same way.** Rent, debit-card purchases and ATM withdrawals ("Cash &
-  ATM") from checking are spending; paying your card from checking is a card payment, so the money
-  counts once, as the card's charges; moving money between your own accounts ("Transfers") is
+- **Bank accounts count the same way.** Rent, debit-card purchases, loan payments (a car,
+  mortgage or student loan) and ATM withdrawals ("Cash & ATM") from checking are spending; paying
+  your card from checking is a card payment, so the money counts once, as the card's charges;
+  moving money between your own accounts, or money a lender puts in your account ("Transfers"), is
   neither spending nor income; paychecks, interest and other money coming in go to "Paycheck",
   "Interest" and "Other Income".
 - **A budget period** is a calendar month, or your Amex statement cycle if you choose that in
@@ -257,15 +258,17 @@ Charges no rule matches go by Plaid's or Amex's category (above).
 
 - **New rule:** a merchant and/or description text (contains, is exactly, starts with, or a
   regular expression; upper or lower case and extra spaces don't matter), an optional amount range
-  (charges are positive, credits negative) and an optional card. Every condition you fill in must
-  match. The form previews the past transactions the rule matches; tick **Also apply to past
-  transactions** to change them too. A regular expression that takes too long to check (a repeat
-  inside a repeat, like `(a|aa)+`) is refused: simplify it.
+  (charges are positive, credits negative) and an optional account (a card or a bank account).
+  Every condition you fill in must match. The form previews the past transactions the rule
+  matches; tick **Also apply to past transactions** to change them too. A regular expression that
+  takes too long to check (a repeat inside a repeat, like `(a|aa)+`) is refused: simplify it.
 - **Move up** and **Move down** change the order; the switch turns a rule off (it is kept but
   categorizes nothing); **Edit** and **Delete** do what they say.
-- Rules never touch two things: payments on your card always go to Card Payments, and a category
-  you set yourself on a transaction never changes. On a bank account your rules come first, so a
-  rule can, for example, turn a regular transfer into income.
+- Rules never touch two things: card payments, and a category you set yourself on a transaction.
+  A payment on your card always goes to Card Payments, and paying your card from checking goes
+  where its **Bank accounts** row on the Plaid & Amex categories tab says (Card Payments), so no
+  rule can count it as spending. Otherwise your rules come first on a bank account too, so a rule
+  can, for example, turn a regular transfer into income.
 
 **Re-apply rules to past transactions** runs card payments, your rules and the category mappings
 again on every past transaction, all of them, since a date, or only Uncategorized ones. **Preview

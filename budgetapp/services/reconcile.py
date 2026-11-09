@@ -7,7 +7,8 @@ one, so every charge is stored once, and attaches a manual (CSV-only) account to
   import and after attaching a manual account. It takes ``db.ledger_lock`` (re-entrant, so a
   caller that already holds it, like the sync apply transaction, is fine).
   - Candidates: unpaired CSV rows (``source = 'csv'``; a paired CSV row no longer exists) and
-    unpaired, posted Plaid rows (no ``csv_reference``) across all accounts of the Item, with equal
+    unpaired, posted Plaid rows (no ``csv_reference``) across all accounts of the Item except its
+    bank accounts (:func:`item_account_ids`: a CSV file holds card charges), with equal
     amounts, the CSV date within ``[COALESCE(authorized_date, date) − 3 days, date]`` — widened to
     ``[date − 30 days, date]`` when ``authorized_date`` is null. Pending Plaid rows are not
     candidates: a CSV file holds posted charges, and a pending row is replaced when it posts
@@ -77,7 +78,7 @@ from budgetapp.models import (
     TransactionTombstone,
 )
 from budgetapp.services import userstate
-from budgetapp.services.accounts import is_card
+from budgetapp.services.accounts import BANK, is_card
 from budgetapp.services.categorize import Categorizer, apply_carried_state
 
 #: The CSV date may be this many days before Plaid's authorized date (or posting date).
@@ -359,8 +360,18 @@ def _augment(
 
 
 def item_account_ids(session: Session, item_id: int) -> list[int]:
+    """The Item's accounts whose rows CSV rows may pair with: every account but a bank account.
+
+    An Amex CSV file holds card charges (MON-3), so a checking or savings account the same login
+    brought (W3-PLAN BANK-2) is never a candidate: a CSV charge must not merge into a transfer of
+    the same amount.
+    """
     return list(
-        session.scalars(select(Account.id).where(Account.item_id == item_id).order_by(Account.id))
+        session.scalars(
+            select(Account.id)
+            .where(Account.item_id == item_id, Account.type.is_distinct_from(BANK))
+            .order_by(Account.id)
+        )
     )
 
 

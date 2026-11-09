@@ -26,10 +26,16 @@ is never forced into Card Payments and a rule can still turn one into income. In
 ``<key>|bank`` mappings (:data:`BANK_KEY_SUFFIX`, detailed then primary; migration
 ``0005_bank_categories``) are tried before the card keys: paychecks go to Paycheck, interest and
 dividends to Interest, other income to Other Income, transfers in and out to Transfers, an ATM
-withdrawal to Cash & ATM, and a card payment from checking (positive on the bank side) to Card
-Payments. Every other code maps as for cards, and a positive bank row may land in a ``transfer``
-category (money leaving for savings or the card is a transfer, not a charge). Anything that is not
-on a bank account (a card, the manual CSV account, an account Plaid hasn't typed yet) is a card.
+withdrawal to Cash & ATM, a card payment from checking (positive on the bank side) to Card
+Payments, any other loan payment to spending (the car, mortgage, student loan, personal loan and
+buy-now-pay-later codes to their card category, the rest to Other) and money a lender deposits
+(``LOAN_DISBURSEMENTS``) to Transfers. Every other code maps as for cards, and a positive bank row
+may land in a ``transfer`` category (money leaving for savings or the card is a transfer, not a
+charge). Rules never apply to a bank row Plaid codes as a card payment
+(:func:`is_bank_card_payment`): paying the card from checking is never spending or income and
+never counted twice (W3-PLAN §0), even when a rule written for card rows matches its text; it
+keeps its bank mapping, and a category set on the row itself still wins. Anything that is not on
+a bank account (a card, the manual CSV account, an account Plaid hasn't typed yet) is a card.
 
 Refund rule: a row with ``transaction_code = 'refund'`` never lands in an ``income`` or
 ``transfer`` category; it takes the most recent expense category used for the same merchant, else
@@ -80,9 +86,9 @@ from budgetapp.textutil import strip_control_chars
 
 log = logging.getLogger(__name__)
 
-PAYMENT_PFC_DETAILED = frozenset(
-    {"LOAN_PAYMENTS_CREDIT_CARD_PAYMENT", "LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT"}
-)
+#: Plaid's code for a payment made to a credit card (RESEARCH T1.6), on either side of it.
+CARD_PAYMENT_PFC = "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"
+PAYMENT_PFC_DETAILED = frozenset({CARD_PAYMENT_PFC, "LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT"})
 PAYMENT_TEXT = re.compile(r"PAYMENT.*(THANK YOU|RECEIVED)|AUTOPAY", re.IGNORECASE)
 PAYMENT_REVERSAL_TEXT = re.compile(
     r"\bPAYMENT\b.*\b(RETURNED|REVERSED|REVERSAL)\b|\b(RETURNED|REVERSED)\b.*\bPAYMENT\b",
@@ -309,6 +315,20 @@ def is_payment(txn: TransactionLike, *, bank: bool | None = None) -> bool:
     return False
 
 
+def is_bank_card_payment(txn: TransactionLike, *, bank: bool | None = None) -> bool:
+    """A card payment from a bank account: a checking or savings row Plaid codes as a payment to a
+    credit card (:data:`CARD_PAYMENT_PFC`). Rules never apply to it, so a rule written for card
+    rows (where step 0 shields payments) can't turn the card's payment from checking into
+    spending or income; its bank mapping (Card Payments) decides (W3-PLAN §0, C3).
+
+    ``bank`` says whether the row is on a bank account; ``None`` works it out as
+    :func:`is_payment` does.
+    """
+    if txn.pfc_detailed != CARD_PAYMENT_PFC:
+        return False
+    return on_bank_account(txn) if bank is None else bank
+
+
 _AMEX_SEPARATOR = re.compile(r"\s*(?:-|–|—|>)\s*")
 
 
@@ -429,6 +449,11 @@ class Categorizer:
             self.account_types[account_id] = account.type if account is not None else None
         return self.account_types[account_id] == BANK
 
+    def card_payment_from_bank(self, txn: TransactionLike) -> bool:
+        """Whether rules skip ``txn``: a card payment from a bank account
+        (:func:`is_bank_card_payment`)."""
+        return is_bank_card_payment(txn, bank=self.on_bank(txn))
+
     def decide(self, txn: TransactionLike, *, inherited: UserState | None = None) -> Decision:
         """Apply the precedence (module docstring) to ``txn``.
 
@@ -448,14 +473,16 @@ class Categorizer:
     def automatic(self, txn: TransactionLike) -> Decision:
         """Steps 2–4 only (rules, mapping, Uncategorized), without the refund rule.
 
-        The mapping (step 3) is sign-aware and account-aware, see the module docstring.
+        The mapping (step 3) is sign-aware and account-aware, and rules skip a card payment from a
+        bank account; see the module docstring.
         """
         return self._automatic(txn, self.on_bank(txn))
 
     def _automatic(self, txn: TransactionLike, bank: bool) -> Decision:
-        for rule in self.rules:
-            if rule_matches(rule, txn):
-                return Decision(rule.category_id, "rule", rule.id, reason=f"rule {rule.id}")
+        if not is_bank_card_payment(txn, bank=bank):
+            for rule in self.rules:
+                if rule_matches(rule, txn):
+                    return Decision(rule.category_id, "rule", rule.id, reason=f"rule {rule.id}")
         found = self._mapped(txn, bank)
         if found is not None:
             category_id, source, label = found
@@ -733,11 +760,13 @@ def validate_rule(
         and "amount_min" not in errors
         and "amount_max" not in errors
     ):
-        errors["conditions"] = "Add at least one condition (merchant, description, amount or card)."
+        errors["conditions"] = (
+            "Add at least one condition (merchant, description, amount or account)."
+        )
     if category_id is None or session.get(Category, category_id) is None:
         errors["category_id"] = "Choose a category."
     if account_id is not None and session.get(Account, account_id) is None:
-        errors["account_id"] = "That card does not exist."
+        errors["account_id"] = "That account does not exist."
     if errors:
         raise RuleValidationError(errors)
     return {

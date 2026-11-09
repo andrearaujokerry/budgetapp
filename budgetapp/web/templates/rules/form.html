@@ -31,7 +31,7 @@
 {{ form.money_field("amount_min", "Amount at least", value=d.amount_min, allow_negative=true, optional=true, error=e.get("amount_min")) }}
 {{ form.money_field("amount_max", "Amount at most", value=d.amount_max, allow_negative=true, optional=true, error=e.get("amount_max"), help="Charges are positive, credits negative.") }}
 </div>
-{{ form.select_field("account_id", "Card", f.accounts, value=d.account_id, placeholder="Any card", error=e.get("account_id")) }}
+{{ form.select_field("account_id", "Account", f.accounts, value=d.account_id, placeholder="Any account", error=e.get("account_id")) }}
 <hr class="rule-form__rule">
 {{ form.category_select("category_id", f.categories, value=d.category_id, label="Put it in", placeholder="Choose a category…", required=true, error=e.get("category_id")) }}
 <div class="form-row">

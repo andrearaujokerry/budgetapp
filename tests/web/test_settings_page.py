@@ -94,10 +94,12 @@ class TestPage:
         assert 'name="budget_period_mode" value="calendar" checked' in html
         assert "No cards yet. Link your Amex" in html
         assert "AI assistant" in html and "Not available in this version" in html
-        # ALR-3 alerts a charge once, and also when a pending charge posts above the amount.
+        # ALR-3 alerts a charge once, and also when a pending charge posts above the amount;
+        # only spending alerts (W3-PLAN C5).
         assert (
-            "A notification for each charge over this amount, once per charge (also when a "
-            "pending charge posts above it). Leave it blank for none."
+            "A notification for each charge over this amount that counts as spending, on a card "
+            "or a bank account, once per charge (also when a pending charge posts above it). Card "
+            "payments, transfers and income never alert. Leave it blank for none."
         ) in html_lib.unescape(html)
         assert '<link rel="stylesheet" href="/static/css/pages/settings.css">' in html
         assert client.get("/static/css/pages/settings.css").status_code == 200

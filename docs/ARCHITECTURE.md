@@ -299,9 +299,11 @@ reversal): Amex files cash back and billing-inquiry credits under "Fees & Adjust
 `Fees & Adjustments|credit` and `Fees & Adjustments-Fees & Adjustments|credit` map to Credits &
 Rewards while positive fees stay in Fees & Interest. For a Plaid row on a bank account the keys
 with a `|bank` suffix come before all of those (detailed, then primary): migration
-`0005_bank_categories` seeds them for every `INCOME`, `TRANSFER_IN` and `TRANSFER_OUT` code and
-for `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` (§6), and the "Plaid & Amex categories" editor lists
-them with a "Bank accounts" badge next to the card mapping of the same code.
+`0005_bank_categories` seeds them for every `INCOME`, `TRANSFER_IN`, `TRANSFER_OUT`,
+`LOAN_DISBURSEMENTS` and `LOAN_PAYMENTS` code (§6), and the "Plaid & Amex categories" editor
+lists them with a "Bank accounts" badge next to the card mapping of the same code. A primary's
+`|bank` key comes before a detailed code's plain key, so a group with a primary bank key gives
+every detailed code its own bank key.
 
 ### rules (CAT-3)
 | column | type | notes |
@@ -517,17 +519,29 @@ in from savings or a deposit that reads like a payment is not forced into Card P
 tries the `|bank` mappings first (section 5): `INCOME_SALARY` (and PFC v1's `INCOME_WAGES`) →
 Paycheck; `INCOME_INTEREST_EARNED` and `INCOME_DIVIDENDS` → Interest; every other `INCOME` code
 → Other Income; `TRANSFER_IN` and `TRANSFER_OUT` codes → Transfers, except
-`TRANSFER_OUT_WITHDRAWAL` (ATM and cash) → Cash & ATM (spending); and
+`TRANSFER_OUT_WITHDRAWAL` (ATM and cash) → Cash & ATM (spending);
 `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, positive on the bank side, → Card Payments, so paying the
-card from checking is never spending and never counted twice. Every other code maps as for
-cards, and the positive-row guard is for cards only (money leaving for savings is a transfer, not
-a charge). Rules still come first, so a rule can turn a regular transfer into income; the refund
-rule applies as on cards. Plaid's `transaction_code` is mostly empty for US banks, so bank rows
-are classified by the PFC and the text. Anything not on a bank account (a card, the manual CSV
-account, an account Plaid hasn't typed yet) is a card. Re-applying rules (CAT-4) follows the
-same rules for bank rows. The categories (Paycheck, Interest, Other Income, Transfers, Cash & ATM)
-and the mappings come from migration `0005_bank_categories`, which only adds: a category whose
-name is taken keeps its kind, and a bank mapping goes only to a category of the intended kind.
+card from checking is never spending and never counted twice; any other loan payment is spending
+(the car, mortgage, student loan, personal loan and buy-now-pay-later codes keep their card
+category, Transportation, Home, Education, Utilities & Bills and Shopping; `LOAN_PAYMENTS` and its
+other codes → Other); and money a lender deposits (`LOAN_DISBURSEMENTS` codes) → Transfers,
+neither income nor spending. The cards' mappings of these codes are card-sided (on a card, money
+in under a loan code is the card's payment, Card Payments, and a cash advance is spending), so
+every loan code has a bank key and no bank row reaches them. Every other code maps as for cards,
+and the positive-row guard is for cards only (money leaving for savings is a transfer, not a
+charge). Rules still come first, so a rule can turn a regular transfer into income, with one
+exception: rules never apply to a bank row Plaid codes
+`LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` (`categorize.is_bank_card_payment`). A rule written for card
+rows, where step 0 shields payments, could otherwise match the payment's ACH text on checking and
+count the card's charges twice; the row keeps its bank mapping, and a category set on the row
+itself still wins. The refund rule applies as on cards. Plaid's `transaction_code` is mostly
+empty for US banks, so bank rows are classified by the PFC and the text. Anything not on a bank
+account (a card, the manual CSV account, an account Plaid hasn't typed yet) is a card.
+Re-applying rules (CAT-4) follows the same rules for bank rows. The categories (Paycheck,
+Interest, Other Income, Transfers, Cash & ATM) and the mappings come from migration
+`0005_bank_categories`, which only adds: a category whose name is taken keeps its kind, and a
+bank mapping goes only to a category of the intended kind. Its downgrade removes the bank
+mappings and only the categories it created (its transaction's `created_at`) that nothing uses.
 
 Every path that gives a row the user state of the row it replaces calls
 `categorize.apply_carried_state(categorizer, row, state)`, so this order never depends on call
@@ -579,7 +593,9 @@ applies.
 `reconcile.reconcile_item(session, item_id)` is a full pass, run by every sync that inserted
 rows or completed Plaid's history, after every CSV import and after attaching a manual account:
 - Candidates: unpaired CSV rows (`source = 'csv'`) and unpaired, posted Plaid rows (no
-  `csv_reference`) across all accounts of the Item, with equal amounts, the CSV date within
+  `csv_reference`) across all accounts of the Item except its bank accounts (a CSV file holds
+  card charges, and Link lets a login bring checking or savings accounts too), with equal
+  amounts, the CSV date within
   `[COALESCE(authorized_date, date) − 3 days, date]` — widened to `[date − 30 days, date]` when
   `authorized_date` is null. A CSV row whose Reference holds a plausible posting date pairs only
   with a Plaid row posted on that date or up to 3 days before it (never with a later charge of

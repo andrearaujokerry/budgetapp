@@ -1540,7 +1540,8 @@ class RuleDraft:
     priority: int
     #: The rule the new one is placed before (it matched this transaction first), if any.
     runs_before: str | None
-    #: Card payments are fixed (step 0); a rule never changes them.
+    #: Card payments are fixed (step 0 on a card; rules skip one from a bank account): a rule
+    #: never changes them.
     is_payment: bool
 
 
@@ -1577,7 +1578,9 @@ def one_click_draft(session: Session, transaction_id: int) -> RuleDraft:
         category_id=None if txn.category_id == uncategorized else txn.category_id,
         priority=priority,
         runs_before=runs_before,
-        is_payment=txn.category_source == "system" or categorize.is_payment(txn),
+        is_payment=txn.category_source == "system"
+        or categorize.is_payment(txn)
+        or categorize.is_bank_card_payment(txn),
     )
 
 
@@ -1666,7 +1669,7 @@ def preview_one_click_rule(
             user_edited += 1
             continue
         decision = categorizer.decide(row)
-        if decision.source == "system":
+        if decision.source == "system" or categorizer.card_payment_from_bank(row):
             payments += 1
         if decision.category_id != row.category_id:
             will_change += 1

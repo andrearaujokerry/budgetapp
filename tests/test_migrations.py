@@ -63,8 +63,8 @@ BANK_KINDS = {
     "Cash & ATM": "expense",
 }
 #: ``|bank`` keys of 0005: 15 INCOME codes (with PFC v1's INCOME_WAGES), 8 TRANSFER_IN, 9
-#: TRANSFER_OUT and the card payment.
-BANK_MAPPINGS = 33
+#: TRANSFER_OUT, 8 LOAN_DISBURSEMENTS and 10 LOAN_PAYMENTS (the card payment among them).
+BANK_MAPPINGS = 50
 
 # Exact catalog comparison: columns (type, nullability, default, identity), every constraint's
 # full definition (CHECK text, FK ON DELETE, UNIQUE NULLS NOT DISTINCT) and every index definition
@@ -376,6 +376,80 @@ def test_0005_reuses_a_category_of_the_right_kind(scratch_engine):
         assert target == "transfers"
 
 
+def _bank_map(conn) -> dict[str, str]:
+    return dict(
+        _rows(
+            conn,
+            "SELECT m.external_key, c.name FROM category_mappings m "
+            "JOIN categories c ON c.id = m.category_id WHERE m.external_key LIKE '%|bank'",
+        )
+    )
+
+
+def test_0005_downgrade_keeps_a_category_the_owner_made_before_it(scratch_engine):
+    """Review finding: the owner's own "Cash & ATM" (spending, the same icon) predates 0005,
+    which reused it; the downgrade deleted it as if 0005 had made it. Now only the categories
+    0005 created (its transaction's timestamp) go, and only while nothing uses them."""
+    run_migrations(scratch_engine, "0003_f1_verification_fixes")
+    with scratch_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO categories (name, kind, icon) VALUES ('Cash & ATM', 'expense', '🏧')")
+        )
+        before = _snapshot(conn)
+    run_migrations(scratch_engine)
+    with scratch_engine.connect() as conn:
+        assert _bank_map(conn)["TRANSFER_OUT_WITHDRAWAL|bank"] == "Cash & ATM"
+        made = {r[1] for r in _snapshot(conn)["categories"] - before["categories"]}
+        assert made == {"Paycheck", "Interest", "Other Income", "Transfers"}
+    downgrade_migrations(scratch_engine, "0003_f1_verification_fixes")
+    with scratch_engine.connect() as conn:
+        assert _snapshot(conn) == before
+    # upgrade, downgrade, upgrade again: the same result as the first upgrade
+    run_migrations(scratch_engine)
+    with scratch_engine.connect() as conn:
+        assert {r[1] for r in _snapshot(conn)["categories"] - before["categories"]} == made
+        assert len(_bank_map(conn)) == BANK_MAPPINGS
+
+
+def test_0005_loan_payments_on_bank_accounts_follow_the_owners_card_mappings(scratch_engine):
+    """A car payment from checking goes where the owner sends car payments on cards (when that
+    is spending): the ``LOAN_PAYMENTS|bank`` key (Other) must not take it."""
+    run_migrations(scratch_engine, "0003_f1_verification_fixes")
+    with scratch_engine.begin() as conn:
+        conn.execute(text("INSERT INTO categories (name, kind) VALUES ('Car', 'expense')"))
+        for code, category in (
+            ("LOAN_PAYMENTS_CAR_PAYMENT", "Car"),
+            ("LOAN_PAYMENTS_MORTGAGE_PAYMENT", "Credits & Rewards"),  # not spending: not copied
+        ):
+            conn.execute(
+                text(
+                    "UPDATE category_mappings SET category_id = "
+                    "(SELECT id FROM categories WHERE name = :category) "
+                    "WHERE source = 'plaid_pfc' AND external_key = :code"
+                ),
+                {"code": code, "category": category},
+            )
+    run_migrations(scratch_engine)
+    with scratch_engine.connect() as conn:
+        bank = _bank_map(conn)
+        assert bank["LOAN_PAYMENTS_CAR_PAYMENT|bank"] == "Car"
+        assert bank["LOAN_PAYMENTS_MORTGAGE_PAYMENT|bank"] == "Home"
+        assert bank["LOAN_PAYMENTS_STUDENT_LOAN_PAYMENT|bank"] == "Education"
+        assert bank["LOAN_PAYMENTS|bank"] == bank["LOAN_PAYMENTS_OTHER_PAYMENT|bank"] == "Other"
+        assert bank["LOAN_DISBURSEMENTS_CASH_ADVANCES|bank"] == "Transfers"
+        kinds = dict(
+            _rows(
+                conn,
+                "SELECT m.external_key, c.kind FROM category_mappings m "
+                "JOIN categories c ON c.id = m.category_id WHERE m.external_key LIKE 'LOAN_%|bank'",
+            )
+        )
+        assert {k for k, kind in kinds.items() if kind != "expense"} == {
+            "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT|bank",
+            *(k for k in kinds if k.startswith("LOAN_DISBURSEMENTS")),
+        }
+
+
 def test_models_match_the_migrations(engine):
     with engine.connect() as conn:
         context = MigrationContext.configure(
@@ -466,8 +540,8 @@ class TestSeedData:
         assert mapped["OTHER_OTHER"] == "Other"
 
     def test_bank_mappings(self, db):
-        """MON-1 / W3-PLAN C3: every INCOME, TRANSFER_IN and TRANSFER_OUT code has a bank
-        mapping; the card mappings of the same codes are unchanged."""
+        """MON-1 / W3-PLAN C3: every INCOME, TRANSFER_IN, TRANSFER_OUT, LOAN_DISBURSEMENTS and
+        LOAN_PAYMENTS code has a bank mapping; the card mappings of the same codes are unchanged."""
         mapped = dict(
             db.execute(
                 select(CategoryMapping.external_key, Category.name)
@@ -478,10 +552,9 @@ class TestSeedData:
         bank = {k.removesuffix("|bank"): v for k, v in mapped.items() if k.endswith("|bank")}
         assert len(bank) == BANK_MAPPINGS
         codes = {code for code, _ in _taxonomy_codes()}
-        groups = ("INCOME", "TRANSFER_IN", "TRANSFER_OUT")
-        expected = {c for c in codes if c.split("_")[0] in ("INCOME", "TRANSFER")}
-        assert {c for c in bank if c != "INCOME_WAGES"} - {"LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"} == {
-            c for c in expected if c.startswith(groups)
+        groups = ("INCOME", "TRANSFER_IN", "TRANSFER_OUT", "LOAN_DISBURSEMENTS", "LOAN_PAYMENTS")
+        assert {c for c in bank if c != "INCOME_WAGES"} == {
+            c for c in codes if c.startswith(groups)
         }
         assert bank["INCOME_SALARY"] == bank["INCOME_WAGES"] == "Paycheck"
         assert bank["INCOME_INTEREST_EARNED"] == bank["INCOME_DIVIDENDS"] == "Interest"
@@ -491,10 +564,26 @@ class TestSeedData:
         assert outs.pop("TRANSFER_OUT_WITHDRAWAL") == "Cash & ATM"
         assert set(outs.values()) == {"Transfers"}
         assert bank["LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"] == "Card Payments"
+        # Review finding (major): the cards' loan mappings are card-sided (Card Payments), so a
+        # loan payment from checking is spending and money a lender deposits is a transfer.
+        assert {bank[c] for c in bank if c.startswith("LOAN_DISBURSEMENTS")} == {"Transfers"}
+        loans = {c: bank[c] for c in bank if c.startswith("LOAN_PAYMENTS")}
+        assert loans.pop("LOAN_PAYMENTS_CREDIT_CARD_PAYMENT") == "Card Payments"
+        for code in ("CAR_PAYMENT", "MORTGAGE_PAYMENT", "STUDENT_LOAN_PAYMENT", "BNPL"):
+            assert loans[f"LOAN_PAYMENTS_{code}"] == mapped[f"LOAN_PAYMENTS_{code}"]  # as cards
+        assert loans["LOAN_PAYMENTS_PERSONAL_LOAN_PAYMENT"] == "Utilities & Bills"
+        for code in ("LOAN_PAYMENTS", "LOAN_PAYMENTS_OTHER_PAYMENT", "LOAN_PAYMENTS_EWA"):
+            assert loans[code] == "Other"
+        assert loans["LOAN_PAYMENTS_CASH_ADVANCES"] == "Other"
+        kinds = dict(db.execute(select(Category.name, Category.kind)).all())
+        assert {kinds[v] for v in loans.values()} == {"expense"}
         # the cards' own mappings of those codes
         assert mapped["INCOME_SALARY"] == mapped["INCOME_INTEREST_EARNED"] == "Credits & Rewards"
         assert mapped["TRANSFER_IN_SAVINGS"] == "Card Payments"
         assert mapped["TRANSFER_OUT_WITHDRAWAL"] == mapped["TRANSFER_OUT_SAVINGS"] == "Other"
+        assert (
+            mapped["LOAN_PAYMENTS_OTHER_PAYMENT"] == mapped["LOAN_DISBURSEMENTS"] == "Card Payments"
+        )
 
     def test_seed_matches_plaids_csv_when_available(self):
         """Set ``BUDGETAPP_PFC_CSV`` to Plaid's PFC taxonomy CSV (all versions) to check the seed

@@ -1130,6 +1130,60 @@ class TestLinkedAccounts:
         assert counted_total(db, account) == Decimal("104.10")
 
 
+class TestBankAccountsOfAnAmexItem:
+    """MON-3 / W3-MONEY review: Link lets a login bring checking or savings accounts too (W3-PLAN
+    BANK-2), and an Amex CSV file holds card charges: a CSV row never pairs with a bank row of the
+    same Item (it would be deleted into a transfer, or a transfer would take its category)."""
+
+    @pytest.fixture
+    def amex(self, db):
+        item = make_item(db)
+        card = make_account(db, item, name="Gold Card", mask="1001")
+        savings = make_bank_account(db, item, subtype="savings", mask="7702")
+        return item, card, savings
+
+    def test_a_csv_charge_never_merges_into_a_bank_row(self, db, amex):
+        item, card, savings = amex
+        transfer = make_transaction(
+            db,
+            savings,
+            amount="500.00",
+            date="2025-10-05",
+            name="TRANSFER TO CHECKING",
+            pfc_primary="TRANSFER_OUT",
+            pfc_detailed="TRANSFER_OUT_ACCOUNT_TRANSFER",
+        )
+        data = amex_csv(amex_row("2025-10-04", "APPLE STORE", "500.00"))
+        preview, outcome = run_import(db, data, card)
+        assert (preview.new, preview.matched) == (1, 0)
+        assert (outcome.inserted_count, outcome.matched_plaid_count) == (1, 0)
+        assert reconcile.reconcile_item(db, item.id).pairs == ()
+        assert [(t.name, t.account_id) for t in csv_rows(db)] == [("APPLE STORE", card.id)]
+        db.refresh(transfer)
+        assert transfer.csv_reference is None
+        # the card's own Plaid row of the same charge still pairs
+        charge = make_transaction(
+            db, card, amount="500.00", date="2025-10-05", authorized_date="2025-10-04"
+        )
+        (pair,) = reconcile.reconcile_item(db, item.id).pairs
+        assert pair[1] == charge.id and csv_rows(db) == []
+        db.refresh(transfer)
+        assert transfer.csv_reference is None
+
+    def test_a_pending_bank_row_is_never_a_held_rows_twin(self, db, amex):
+        item, card, savings = amex
+        item.history_complete_at = clock.now()
+        make_transaction(db, card, amount="40.00", date="2025-10-01", authorized_date="2025-09-30")
+        make_transaction(
+            db, savings, amount="64.10", date="2025-10-20", pending=True, name="TRANSFER OUT"
+        )
+        data = amex_csv(amex_row("2025-10-19", "SAFEWAY #1490", "64.10"))
+        preview, _ = run_import(db, data, card)
+        assert (preview.suspects, preview.suspects_pending, preview.matched) == (1, 0, 0)
+        (held,) = csv_import.list_suspects(db)
+        assert held.name == "SAFEWAY #1490" and not held.pending
+
+
 # --------------------------------------------------------------------------- review, history
 
 

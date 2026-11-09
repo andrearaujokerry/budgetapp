@@ -67,7 +67,7 @@ class TestSummary:
             ({"amount_max": Decimal("-5")}, "Amount ≤ −$5"),
             (
                 {"merchant_pattern": "A", "description_pattern": "B", "account_id": 7},
-                "Merchant contains A · description contains B · card Gold ··7",
+                "Merchant contains A · description contains B · account Gold ··7",
             ),
             ({}, "No conditions"),
         ],
@@ -106,7 +106,7 @@ class TestListRules:
     def test_account_labels_in_the_summary(self, db):
         account = make_account(db, name="Gold Card", mask="1001")
         rule = make_rule(db, get_category(db, "Travel"), account_id=account.id)
-        assert rules.get_row(db, rule.id).summary == "Card Gold Card ··1001"
+        assert rules.get_row(db, rule.id).summary == "Account Gold Card ··1001"
 
 
 # --------------------------------------------------------------------------- validation
@@ -145,7 +145,7 @@ class TestCleanRule:
         with pytest.raises(RuleValidationError) as err:
             rules.clean_rule(db, draft(get_category(db, "Travel"), merchant_pattern="   "))
         assert err.value.errors == {
-            "conditions": "Add at least one condition (merchant, description, amount or card)."
+            "conditions": "Add at least one condition (merchant, description, amount or account)."
         }
 
     def test_every_problem_at_once(self, db):
@@ -169,6 +169,8 @@ class TestCleanRule:
             "match_type",
             "name",
         }
+        # the picker lists cards and bank accounts (W3-MONEY review)
+        assert err.value.errors["account_id"] == "Choose an account."
 
     @pytest.mark.parametrize("value", ["12.345", "abc", "1e9999"])
     def test_bad_amounts(self, db, value):
@@ -182,7 +184,7 @@ class TestCleanRule:
                 db, RuleDraft(category_id="999999999", account_id="999999999", merchant_pattern="A")
             )
         assert err.value.errors["category_id"] == "Choose a category."
-        assert err.value.errors["account_id"] == "That card does not exist."
+        assert err.value.errors["account_id"] == "That account does not exist."
 
     def test_draft_round_trips_from_a_rule_and_a_form(self, db):
         rule = make_rule(

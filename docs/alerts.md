@@ -79,7 +79,7 @@ Settings → **Alerts**:
 | Budget alerts | on | budget alerts at all |
 | Alert at these percentages | 80, 100 | whole percentages from 1 to 200, up to five, separated by commas |
 | Sync problem alerts | on | sync failures, stale data and reconnect alerts (the consent reminder comes either way) |
-| Large-charge alert (optional) | blank (off) | the amount above which a charge is announced, once per charge |
+| Large-charge alert (optional) | blank (off) | the amount above which spending (a charge, rent, an ATM withdrawal) is announced, once per charge; card payments, transfers and income never are |
 | Consent renewal reminder | 30 days | how long before the yearly consent runs out to start reminding you (1–120) |
 
 Turning budget alerts off keeps your percentages for when you turn them back on. The consent

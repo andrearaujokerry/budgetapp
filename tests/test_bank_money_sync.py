@@ -21,7 +21,7 @@ from budgetapp.services import sync
 from budgetapp.services.events import SyncOutcome
 from budgetapp.services.spending import period_spending
 from tests.bank_factories import BANK_INSTITUTION_ID, BANK_NAME
-from tests.factories import get_category, make_item, plaid_account, set_app_settings
+from tests.factories import get_category, make_item, make_rule, plaid_account, set_app_settings
 
 NOW = dt.datetime(2026, 10, 20, 15, 0, tzinfo=dt.UTC)
 CHECKING, SAVINGS = "harbor-chk", "harbor-sav"
@@ -250,3 +250,121 @@ def test_large_charge_alerts_announce_spending_only(bank, db, notifier):
     )
     assert bank.sync().status == "success"
     assert notifier.titles == ["$2,450.00 at Bayview Property Management"]
+
+
+def test_loan_payments_are_spending_and_loan_money_is_a_transfer(bank, db):
+    """W3-MONEY review (major): on checking, the cards' loan mappings (Card Payments for a loan
+    payment, Other for a cash advance) made a loan payment vanish from spending and a cash
+    advance paid in lower it."""
+    day = today() - dt.timedelta(days=2)
+    payments, deposits = "LOAN_PAYMENTS", "LOAN_DISBURSEMENTS"
+    rows = {
+        "loan": ("450.00", "LOAN CO PMT", payments, "LOAN_PAYMENTS_OTHER_PAYMENT"),
+        "car": ("480.00", "AUTO FINANCE PMT", payments, "LOAN_PAYMENTS_CAR_PAYMENT"),
+        "advance": ("-500.00", "PAYDAY ADVANCE", deposits, "LOAN_DISBURSEMENTS_CASH_ADVANCES"),
+        "funding": ("-5000.00", "LOAN CO FUNDING", deposits, "LOAN_DISBURSEMENTS_PERSONAL"),
+    }
+    for key, (amount, name, primary, detailed) in rows.items():
+        bank.add(
+            transaction_id=key,
+            amount=amount,
+            date=day,
+            name=name,
+            pfc_primary=primary,
+            pfc_detailed=detailed,
+        )
+    assert bank.sync().status == "success"
+    assert {key: bank.category(key) for key in rows} == {
+        "loan": ("Other", "plaid"),
+        "car": ("Transportation", "plaid"),
+        "advance": ("Transfers", "plaid"),
+        "funding": ("Transfers", "plaid"),
+    }
+    assert period_spending(db, month_of(day)).total == Decimal("930.00")
+
+
+def test_a_card_rule_never_makes_the_payment_from_checking_spending(bank, db, notifier):
+    """W3-MONEY review: a rule written for card rows that matches the ACH text leaves the card's
+    payment from checking in Card Payments (no large-charge alert, never counted twice) and still
+    categorizes the other rows it matches."""
+    set_app_settings(db, large_charge_threshold=Decimal("1000.00"))
+    make_rule(db, get_category(db, "Travel"), description_pattern="AMERICAN EXPRESS")
+    db.commit()
+    assert bank.sync().initial_history_load
+    day = today() - dt.timedelta(days=1)
+    bank.add(
+        transaction_id="amex",
+        amount="2512.37",
+        date=day,
+        name="AMERICAN EXPRESS ACH PMT",
+        pfc_primary="LOAN_PAYMENTS",
+        pfc_detailed="LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+    )
+    bank.add(
+        transaction_id="trip",
+        amount="1100.00",
+        date=day,
+        name="AMERICAN EXPRESS TRAVEL",
+        pfc_primary="TRAVEL",
+        pfc_detailed="TRAVEL_FLIGHTS",
+    )
+    assert bank.sync().status == "success"
+    assert bank.category("amex") == ("Card Payments", "plaid")
+    assert bank.category("trip") == ("Travel", "rule")
+    assert notifier.titles == ["$1,100.00 at AMERICAN EXPRESS TRAVEL"]
+    assert period_spending(db, month_of(day)).total == Decimal("1100.00")
+
+
+def test_large_charges_follow_rules_and_raises(bank, db, notifier):
+    """C5 (from the W3-MONEY review's checks): spending a rule makes alerts, a transfer never
+    does, also when a pending one posts higher; a pending charge that posts above the amount
+    alerts once."""
+    set_app_settings(db, large_charge_threshold=Decimal("400.00"))
+    make_rule(db, get_category(db, "Gifts & Donations"), description_pattern="ZELLE TO MOM")
+    db.commit()
+    assert bank.sync().initial_history_load
+    day = today() - dt.timedelta(days=1)
+    for key, amount, name, detailed in (
+        ("atm", "500.00", "ATM WITHDRAWAL", "TRANSFER_OUT_WITHDRAWAL"),
+        ("zelle", "600.00", "ZELLE TO MOM", "TRANSFER_OUT_ACCOUNT_TRANSFER"),
+        ("venmo", "700.00", "VENMO PAYMENT", "TRANSFER_OUT_TRANSFER_OUT_FROM_APPS"),
+    ):
+        bank.add(
+            transaction_id=key,
+            amount=amount,
+            date=day,
+            name=name,
+            pfc_primary="TRANSFER_OUT",
+            pfc_detailed=detailed,
+        )
+    bank.add(
+        SAVINGS,
+        transaction_id="interest",
+        amount="-900.00",
+        date=day,
+        name="INTEREST",
+        pfc_primary="INCOME",
+        pfc_detailed="INCOME_INTEREST_EARNED",
+    )
+    for key, amount, name, merchant, primary, detailed in (
+        ("hotel", "350.00", "HOTEL", "Hotel", "TRAVEL", "TRAVEL_LODGING"),
+        ("to-sav", "380.00", "TRANSFER TO SAV", None, "TRANSFER_OUT", "TRANSFER_OUT_SAVINGS"),
+    ):
+        bank.fake.add_pending(
+            bank.fake_item,
+            account_id=CHECKING,
+            transaction_id=key,
+            amount=amount,
+            date=day,
+            name=name,
+            merchant_name=merchant,
+            pfc_primary=primary,
+            pfc_detailed=detailed,
+        )
+    assert bank.sync().status == "success"
+    first = sorted(notifier.titles)
+    assert first == ["$500.00 at ATM WITHDRAWAL", "$600.00 at ZELLE TO MOM"]
+    bank.fake.post_pending(bank.fake_item, "hotel", amount="455.00", new_id="hotel-posted")
+    bank.fake.post_pending(bank.fake_item, "to-sav", amount="1380.00", new_id="to-sav-posted")
+    assert bank.sync().status == "success"
+    assert sorted(notifier.titles) == sorted([*first, "$455.00 at Hotel"])
