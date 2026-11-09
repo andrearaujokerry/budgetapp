@@ -81,7 +81,7 @@
 {%- endfor %}
 {%- if filt.account_id is not none and filt.account_id not in options.accounts|map(attribute='id')|list %}{% set accounts.options = accounts.options + [(filt.account_id, 'An account that is no longer here')] %}{% endif %}
 {%- if options.accounts|length > 1 or filt.account_id is not none %}
-{{ form.select_field("account", "Account", accounts.options, value=filt.account_id, placeholder="All accounts", compact=true, id="f-account") }}
+{{ form.select_field("account", "Account", accounts.options, value=filt.account_id, placeholder="All accounts", compact=true, id="f-account", wrapper_class="txn-more__account") }}
 {%- endif %}
 {%- set members = options.members|list + ([filt.member] if filt.member and filt.member not in options.members else []) %}
 {%- if members|length > 1 or filt.member %}
