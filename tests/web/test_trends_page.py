@@ -592,7 +592,9 @@ class TestIncome:
         fragment = response.text
         assert "trends-income-card" not in fragment and 'id="grid-income' not in fragment
         assert "Income is hidden on the Dashboard and Trends." in fragment
-        assert 'data-status="Trends for' in fragment  # announced like a filter change
+        # Announced like a filter change: what the results now show (from the history's start).
+        status = re.search(r' data-status="([^"]*)"', fragment).group(1)
+        assert html.unescape(status) == "Trends for Nov 2025 – Sep 2026, all categories."
         assert csp_problems(fragment, rendered=True) == []
         from budgetapp.models import get_app_settings
 
@@ -602,6 +604,7 @@ class TestIncome:
         )
         assert "trends-income-card" in response.text
         assert "Income is shown on the Dashboard and Trends." in response.text
+        assert ", all categories, with income and net." in html.unescape(response.text)
 
     @pytest.mark.parametrize(
         ("next_url", "location"),

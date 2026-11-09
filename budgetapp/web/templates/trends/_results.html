@@ -13,7 +13,7 @@
 {%- set range_label = (first.period.start|month_label) ~ ' – ' ~ (last.period.start|month_label) -%}
 {%- set in_range = ('In ' ~ (first.period.start|month_label)) if t.months|length == 1 else ('In these ' ~ t.months|length ~ ' months') -%}
 {#- What screen readers hear after a filter change (#trends-results-status, WCAG 4.1.3). -#}
-<div hidden data-status="Trends for {{ range_label }}, {{ ref.name if ref else 'all categories' }}."></div>
+<div hidden data-status="Trends for {{ range_label }}, {{ ref.name if ref else 'all categories' }}{{ ', with income and net' if show_income }}."></div>
 {%- if bad_category %}
 {{ ui.banner('warn', 'It isn’t a spending category, or it was merged into another one. Showing all categories.', title='That category can’t be shown.', id='trends-category-notice') }}
 {%- endif %}
