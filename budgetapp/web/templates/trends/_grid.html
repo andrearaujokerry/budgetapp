@@ -67,7 +67,7 @@
 {{- income_cells(line, [line.category.id], 'from ' ~ line.category.name) }}
 </tr>
 {%- endfor %}
-<tr class="trends-grid__subtotal" id="grid-income-total">
+<tr id="grid-income-total" class="trends-grid__subtotal">
 <th scope="row" class="trends-grid__name">All income</th>
 <td class="num strong">{{ ui.money(inc.totals.total, cents=false) }}</td>
 <td class="num trends-grid__sum">{{ ui.money(inc.totals.average, cents=false) }}</td>
