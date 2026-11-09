@@ -3,27 +3,34 @@
 Everything secret is read and written through this module only, under the Keychain service
 ``budgetapp``:
 
-=====================================  =============================================================
-Keychain account                       Value
-=====================================  =============================================================
-``plaid.client_id``                    Plaid client ID (the same for every Plaid environment)
-``plaid.secret.sandbox``               Plaid Sandbox secret
-``plaid.secret.production``            Plaid Production secret
-``plaid.access_token.production``      THE production access token (v1 allows one production Item)
-``plaid.link_in_progress.production``  marker written when a production new-link token is issued
-``plaid.access_token.sandbox.<item>``  Sandbox access tokens, one per Item
-``plaid.item_ids.sandbox``             JSON list of Sandbox item ids (keyring cannot list items)
-``db.password.<role>``                 generated passwords of budgetapp_dev / budgetapp_live
-=====================================  =============================================================
+========================================  ==========================================================
+Keychain account                          Value
+========================================  ==========================================================
+``plaid.client_id``                       Plaid client ID (the same for every Plaid environment)
+``plaid.secret.sandbox``                  Plaid Sandbox secret
+``plaid.secret.production``               Plaid Production secret
+``plaid.access_token.production.<item>``  production access tokens, one per Item (wave 3, C6)
+``plaid.item_ids.production``             JSON list of production item ids (keyring cannot list)
+``plaid.link_in_progress.production``     marker written when a production new-link token is issued
+``plaid.access_token.sandbox.<item>``     Sandbox access tokens, one per Item
+``plaid.item_ids.sandbox``                JSON list of Sandbox item ids
+``db.password.<role>``                    generated passwords of budgetapp_dev / budgetapp_live
+========================================  ==========================================================
+
+``plaid.access_token.production`` (:data:`LEGACY_PRODUCTION_TOKEN`) is the v1 name of the one
+production token. :func:`move_legacy_production_token` moves it once to its Item's own key (write,
+read back and compare, then delete the old key); on any doubt the old key stays and keeps working.
 
 Rules: values are never written to the database, files (except the 0600 recovery file below), logs,
 exceptions, process arguments or templates; every value read is registered with the log redactor;
 tests use :class:`MemoryStore` (``use_store``), never the real Keychain (the live Sandbox tests may
 read only the Sandbox items).
 
-Production link guard (ARCHITECTURE §7, Principle 4): :func:`production_link_blockers` lists every
-reason outside the database not to issue a new production link — a saved production token, an
-unexpired link-in-progress marker, or a production token waiting in a recovery file.
+Production link guard (ARCHITECTURE §7, Principle 4 "One Plaid link per bank login, ever"):
+:func:`production_link_blockers` lists every reason outside the database not to issue a new
+production link — an unexpired link-in-progress marker (one link at a time), a production token
+waiting in a recovery file, or a v1 token that could not be moved to its Item's key yet.
+``services.linking`` adds the reasons that need the database (orphaned tokens, the 10 Items).
 """
 
 from __future__ import annotations
@@ -53,9 +60,13 @@ if TYPE_CHECKING:
 SERVICE = "budgetapp"
 
 PLAID_CLIENT_ID = "plaid.client_id"
-PRODUCTION_ACCESS_TOKEN = "plaid.access_token.production"
+#: The v1 name of THE production access token (one production Item). Never written any more:
+#: :func:`move_legacy_production_token` moves it to ``plaid.access_token.production.<item>``.
+LEGACY_PRODUCTION_TOKEN = "plaid.access_token.production"
 SANDBOX_ITEM_INDEX = "plaid.item_ids.sandbox"
+PRODUCTION_ITEM_INDEX = "plaid.item_ids.production"
 LINK_TOKEN_LIFETIME = timedelta(hours=4)
+_ITEM_ID = re.compile(r"[A-Za-z0-9_-]+")
 
 #: Keychain status codes that mean "the Keychain wants the user to approve access":
 #: -25293 errSecAuthFailed (python binary changed, e.g. after `brew upgrade`), -25308
@@ -73,21 +84,28 @@ def plaid_secret_key(plaid_env: str) -> str:
     return f"plaid.secret.{plaid_env}"
 
 
+def access_token_key(plaid_env: str, item_id: str) -> str:
+    """Keychain account of one Item's access token, in either environment (C6)."""
+    _check_plaid_env(plaid_env)
+    if not item_id or not isinstance(item_id, str) or not _ITEM_ID.fullmatch(item_id):
+        raise ValueError("invalid Plaid item id")
+    return f"plaid.access_token.{plaid_env}.{item_id}"
+
+
 def sandbox_access_token_key(item_id: str) -> str:
     """Keychain account of one Sandbox Item's access token."""
-    if not item_id or not re.fullmatch(r"[A-Za-z0-9_-]+", item_id):
-        raise ValueError("invalid Plaid item id")
-    return f"plaid.access_token.sandbox.{item_id}"
+    return access_token_key("sandbox", item_id)
 
 
-def access_token_key(plaid_env: str, item_id: str | None = None) -> str:
-    """Keychain account of an access token: fixed in production, per Item in Sandbox."""
+def production_access_token_key(item_id: str) -> str:
+    """Keychain account of one production Item's access token."""
+    return access_token_key("production", item_id)
+
+
+def item_index_key(plaid_env: str) -> str:
+    """Keychain account of the JSON list of an environment's item ids."""
     _check_plaid_env(plaid_env)
-    if plaid_env == "production":
-        return PRODUCTION_ACCESS_TOKEN
-    if item_id is None:
-        raise ValueError("Sandbox access tokens are stored per Item; pass item_id")
-    return sandbox_access_token_key(item_id)
+    return PRODUCTION_ITEM_INDEX if plaid_env == "production" else SANDBOX_ITEM_INDEX
 
 
 def link_in_progress_key(plaid_env: str = "production") -> str:
@@ -432,23 +450,37 @@ def plaid_credentials(plaid_env: str, *, store: SecretStore | None = None) -> tu
 # --------------------------------------------------------------------------- access tokens
 
 
-def sandbox_item_ids(*, store: SecretStore | None = None) -> list[str]:
-    """Item ids of every Sandbox access token stored (the Keychain cannot list accounts)."""
-    raw = get_secret(SANDBOX_ITEM_INDEX, store=store)
+def item_ids(plaid_env: str, *, store: SecretStore | None = None) -> list[str]:
+    """Item ids of every access token stored for an environment, in the order they were added
+    (the Keychain cannot list accounts, so an index is kept beside the tokens)."""
+    raw = get_secret(item_index_key(plaid_env), store=store)
     if not raw:
         return []
     try:
         ids = json.loads(raw)
     except ValueError:
         return []
-    return [str(i) for i in ids if isinstance(i, str)]
+    if not isinstance(ids, list):
+        return []
+    return [i for i in ids if isinstance(i, str) and _ITEM_ID.fullmatch(i)]
 
 
-def _add_sandbox_item_id(item_id: str, store: SecretStore) -> None:
-    ids = sandbox_item_ids(store=store)
+def sandbox_item_ids(*, store: SecretStore | None = None) -> list[str]:
+    """Item ids of every Sandbox access token stored."""
+    return item_ids("sandbox", store=store)
+
+
+def production_item_ids(*, store: SecretStore | None = None) -> list[str]:
+    """Item ids of every production access token stored under its own key (C6). Never shrinks:
+    each id is a production Item the app created or re-attached, so it counts toward the 10."""
+    return item_ids("production", store=store)
+
+
+def _add_item_id(plaid_env: str, item_id: str, store: SecretStore) -> None:
+    ids = item_ids(plaid_env, store=store)
     if item_id not in ids:
         ids.append(item_id)
-        store.set(SANDBOX_ITEM_INDEX, json.dumps(ids))
+        store.set(item_index_key(plaid_env), json.dumps(ids))
 
 
 def remove_sandbox_item(item_id: str, *, store: SecretStore | None = None) -> None:
@@ -460,10 +492,76 @@ def remove_sandbox_item(item_id: str, *, store: SecretStore | None = None) -> No
 
 
 def get_access_token(
-    plaid_env: str, item_id: str | None = None, *, store: SecretStore | None = None
+    plaid_env: str, item_id: str, *, store: SecretStore | None = None
 ) -> str | None:
-    """The stored access token for an Item (production: THE token), or ``None``."""
+    """The access token stored for one Item, or ``None``. Production never falls back to the v1
+    key here: ``services.sync.access_token_for`` decides when that one may be used."""
     return get_secret(access_token_key(plaid_env, item_id), store=store)
+
+
+def legacy_production_token(*, store: SecretStore | None = None) -> str | None:
+    """The v1 production token (``plaid.access_token.production``) while it hasn't been moved."""
+    return get_secret(LEGACY_PRODUCTION_TOKEN, store=store)
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyTokenMove:
+    """What :func:`move_legacy_production_token` did.
+
+    ``status``: ``none`` (there is no v1 token), ``moved`` (it is under its Item's key now; the
+    old key is gone, or ``reason`` says it couldn't be deleted yet) or ``kept`` (the old key stays
+    and keeps working; ``reason`` says why). Never holds a token.
+    """
+
+    status: str
+    item_id: str | None = None
+    reason: str | None = None
+
+
+def move_legacy_production_token(
+    item_id: str, *, store: SecretStore | None = None
+) -> LegacyTokenMove:
+    """Move the v1 production token to ``item_id``'s own key (C6), once.
+
+    The caller vouches that the v1 token belongs to ``item_id`` (exactly one production Item
+    exists, or Plaid's ``/item/get`` named it). Steps: index entry, write the new key, read it back
+    and compare, then delete the old key. On any doubt the old key stays: a failed or mismatched
+    write (a bad copy is removed again so it can't shadow the good one), or a DIFFERENT token
+    already saved under the new key. Keychain approval errors on the first read propagate."""
+    store = store or get_store()
+    legacy = store.get(LEGACY_PRODUCTION_TOKEN)
+    if not legacy:
+        return LegacyTokenMove("none")
+    register_secret(legacy)
+    key = production_access_token_key(item_id)
+    try:
+        current = store.get(key)
+        if current is None:
+            _add_item_id("production", item_id, store)
+            store.set(key, legacy)
+            if store.get(key) != legacy:
+                with contextlib.suppress(Exception):
+                    store.delete(key)
+                return LegacyTokenMove(
+                    "kept", item_id, "Keychain read back something else under the new name"
+                )
+        elif current != legacy:
+            return LegacyTokenMove(
+                "kept", item_id, "a different token is already saved under the new name"
+            )
+        else:
+            _add_item_id("production", item_id, store)
+    except Exception as exc:  # never lose the working token over a failed copy
+        return LegacyTokenMove(
+            "kept", item_id, f"Keychain couldn't save it under the new name ({type(exc).__name__})"
+        )
+    try:
+        store.delete(LEGACY_PRODUCTION_TOKEN)
+    except Exception as exc:
+        return LegacyTokenMove(
+            "moved", item_id, f"the old copy couldn't be deleted yet ({type(exc).__name__})"
+        )
+    return LegacyTokenMove("moved", item_id)
 
 
 def store_access_token(
@@ -473,19 +571,21 @@ def store_access_token(
     *,
     store: SecretStore | None = None,
 ) -> None:
-    """Save an access token exactly once and read it back (ARCHITECTURE §3, §7).
+    """Save an Item's access token exactly once and read it back (ARCHITECTURE §3, §7; C6).
 
-    * The token is never rewritten: if a different token is already stored under the same
-      account, nothing is overwritten and :class:`AccessTokenConflict` is raised (after saving the
-      new token to a recovery file, because every production token used a Trial connection).
+    * Every token has its own key, ``plaid.access_token.<env>.<item id>``, so no token can reach
+      another Item. The token is never rewritten: if a different token is already stored under
+      the same account, nothing is overwritten and :class:`AccessTokenConflict` is raised (after
+      saving the new token to a recovery file, because every production token used a Trial
+      connection).
     * If the write or the read-back fails — for ANY reason, including Ctrl-C (re-raised after
       the file is written) — the token goes to a 0600 recovery file under ``settings.state_dir``
       (or, if that fails too, under :func:`fallback_recovery_dir`) and
       :class:`TokenNotSavedError` is raised; callers stop and show the path and
       ``./run setup --env production --access-token``. An unsaved production recovery file keeps
       blocking new links (:func:`production_link_blockers`).
-    * Sandbox tokens are added to the ``plaid.item_ids.sandbox`` index BEFORE the token is written
-      (an index entry without a token is harmless; a token nobody can find is an orphan).
+    * The Item is added to its environment's index (``plaid.item_ids.<env>``) BEFORE the token is
+      written (an index entry without a token is harmless; a token nobody can find is an orphan).
     * Callers clear the link-in-progress marker only after this returns normally.
     """
     if not access_token or not item_id:
@@ -517,16 +617,14 @@ def store_access_token(
         raise error from exc
     if existing is not None:
         if existing == access_token:
-            if plaid_env == "sandbox":
-                _add_sandbox_item_id(item_id, store)
+            _add_item_id(plaid_env, item_id, store)
             return
         raise _recover(
             f"A different access token is already stored as {account!r}; it was not replaced.",
             AccessTokenConflict,
         )
     try:
-        if plaid_env == "sandbox":
-            _add_sandbox_item_id(item_id, store)
+        _add_item_id(plaid_env, item_id, store)
         store.set(account, access_token)
         readback = store.get(account)
     except BaseException as exc:
@@ -581,6 +679,21 @@ def unsaved_production_tokens(settings: Settings) -> list[Path]:
     return found
 
 
+def recovery_item_ids(settings: Settings) -> set[str]:
+    """The production item ids named by unsaved recovery files (each is an Item that exists at
+    Plaid, so it counts toward the 10). Unreadable files are skipped."""
+    found: set[str] = set()
+    for path in unsaved_production_tokens(settings):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        match = re.search(r"^item_id: ([A-Za-z0-9_-]+)$", text, flags=re.M)
+        if match:
+            found.add(match.group(1))
+    return found
+
+
 def mark_recovery_saved(settings: Settings, access_token: str) -> list[Path]:
     """Rename the unsaved recovery files that hold ``access_token`` to ``*.saved`` (call only
     after the token is in Keychain and read back); returns the new paths."""
@@ -600,16 +713,17 @@ def mark_recovery_saved(settings: Settings, access_token: str) -> list[Path]:
 def production_link_blockers(settings: Settings, *, store: SecretStore | None = None) -> list[str]:
     """Every reason, outside the database, not to issue a production new-link token (§7).
 
-    The guard (under ``db.link_lock``) issues a token only when this is empty AND no
-    ``plaid_items`` row exists. Reasons: a production access token in Keychain (offer
-    "Re-attach", never a new link), an unexpired link-in-progress marker, or an unsaved
-    production token in a recovery file. Keychain errors propagate (fail safe).
+    The guard (``services.linking``, under ``db.link_lock``) adds the reasons that need the
+    database. Reasons here: an unexpired link-in-progress marker (one link at a time), an unsaved
+    production token in a recovery file (a connection that exists: store it, then re-attach), or
+    the v1 token still under its old name (it is moved before a link when exactly one Item
+    exists; otherwise it must be re-attached first). Keychain errors propagate (fail safe).
     """
     reasons: list[str] = []
-    if get_access_token("production", store=store):
+    if legacy_production_token(store=store):
         reasons.append(
-            "A production access token is saved in Keychain: re-attach the existing connection "
-            "instead of linking again."
+            "Keychain still holds a production access token under its v1 name: re-attach the "
+            "existing connection (or let the next sync move it) before linking another."
         )
     expires = get_link_in_progress(plaid_env="production", store=store)
     if expires is not None:
