@@ -60,7 +60,8 @@
 {%- set earned = t.income.totals.amounts[ii] %}
 {%- set top = t.income.largest_in(ii) %}
 {%- if im == t.ended and t.compare and t.income.change %}{% set income_sub = tm.change_text(t.income.change, short_month(t.previous), 'income')|trim %}
-{%- elif top %}{% set income_sub = ('all from ' if top.amounts[ii] == earned else 'largest: ') ~ top.category.name %}
+{%- elif top and top.amounts[ii] == earned %}{% set income_sub = 'all from ' ~ top.category.name %}
+{%- elif top %}{% set income_sub = 'largest: ' ~ top.category.name ~ ', ' ~ ui.money_text(top.amounts[ii], cents=false) %}
 {%- else %}{% set income_sub = 'nothing came in' %}{% endif %}
 {{ ui.stat('Income in ' ~ im_label, ui.money(earned, cents=false), sub=income_sub, icon='download', href=income_href(t.income.category_ids, im.period) if earned else none, id='trend-income') }}
 {%- set kept = t.income.net[ii] %}

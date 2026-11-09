@@ -161,6 +161,7 @@ a.dash-row__name:hover .cat__name {
   align-content: start;
   gap: var(--sp-3);
   min-width: 0;
+  max-width: 40rem; /* a lone group (cards only) keeps its figures near their names */
 }
 
 .dash-accounts__head {

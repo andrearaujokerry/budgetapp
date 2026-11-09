@@ -623,6 +623,34 @@ class TestIncome:
         )
         assert response.status_code == 303 and response.headers["location"] == location
 
+    def test_the_largest_source_when_there_is_no_month_to_compare(self, client, db, checking):
+        paycheck = income_category(db, "Paycheck")
+        make_transaction(db, checking, amount="-1000.00", category=paycheck, date="2026-10-15")
+        make_transaction(db, checking, amount="-3.00", category=income_category(db, "Interest"),
+                         date="2026-10-31")  # fmt: skip
+        text = tiles(client.get("/trends").text)
+        assert "Income in Oct 2026 $1,003 largest: Paycheck, $1,000" in text
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {"months": "abc", "through": "never", "category": ""},
+            {"months": "36", "through": "2999-01"},
+            {"category": "-3"},
+            {},
+        ],
+    )
+    def test_odd_filters_fall_back_like_the_page(self, client, earnings, data):
+        response = client.post(
+            "/trends/show-income", data={"show_income": "1", **data}, headers=HTMX
+        )
+        assert response.status_code == 200
+        t = response.context["t"]
+        assert t.through.start == day("2026-11-01") and t.span in (12, 36)
+        bad_category = data.get("category", "") != ""
+        assert ('id="trends-category-notice"' in response.text) == bad_category
+        assert csp_problems(response.text, rendered=True) == []
+
     def test_income_without_spending(self, client, db, checking):
         paycheck = income_category(db, "Paycheck")
         make_transaction(db, checking, amount="-1000.00", category=paycheck, date="2026-10-15")
