@@ -153,7 +153,8 @@ def test_cards_only_in_the_pickers_once_a_bank_is_linked(
     assert [a.id for a in statements.context["accounts"]] == [card.id]
     assert "Everyday Checking" not in statements.text
     for account in banks:
-        assert client.get(f"/statements/{account.id}").status_code == 404
+        assert client.get(f"/statements?account={account.id}").status_code == 404
+        assert client.get(f"/statements/{account.id}/2026-09-27").status_code == 404
     settings_page = client.get("/settings")
     assert [c.id for c in settings_page.context["view"].cards] == [card.id]
 
