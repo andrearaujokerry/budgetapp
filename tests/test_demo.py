@@ -8,11 +8,13 @@ and dropped at the end.
 from __future__ import annotations
 
 import datetime as dt
+import html
 import inspect
 import itertools
 import os
 import re
 import statistics
+import warnings
 from collections import Counter, defaultdict
 from collections.abc import Iterator
 from decimal import Decimal
@@ -50,10 +52,18 @@ from budgetapp.plaid_gateway import (
     RealPlaidGateway,
     gateway_methods,
 )
+from budgetapp.secrets import MemoryStore
 from budgetapp.services import status
 from budgetapp.services.categorize import Categorizer, is_payment
+from budgetapp.services.notify import NullNotifier
 from budgetapp.services.spending import period_spending
+from budgetapp.web.app import create_app
 from tests.fake_plaid import FakePlaidGateway
+from tests.web.csp import csp_problems
+
+with warnings.catch_warnings():  # as tests/web/conftest.py: httpx works the same as httpx2
+    warnings.filterwarnings("ignore", message="Using `httpx` with `starlette.testclient`")
+    from starlette.testclient import TestClient
 
 SEED = 7
 TODAY = dt.date(2026, 10, 15)
@@ -822,6 +832,65 @@ def test_the_summary_prints_income_spending_and_net(created, s):
     printed = "\n".join(created.lines())
     assert f"  Net       {demo._money(created.month_net):>10}  (income − spending)" in printed
     assert "Paycheck $" in printed
+
+
+# --------------------------------------------------------------------------- the merged demo (W3)
+
+
+@pytest.fixture(scope="module")
+def pages(created: demo.DemoSummary) -> Iterator[TestClient]:
+    """The demo served as ``serve --demo`` serves it (demo gateway, no Keychain), in-process."""
+    app = create_app(
+        demo.demo_settings(NAME, port=8824),
+        gateway_factory=lambda _settings: DemoPlaidGateway(),
+        secret_store=MemoryStore(),
+        notifier=NullNotifier(),
+    )
+    app.state.demo_name = NAME
+    with TestClient(app, base_url="http://127.0.0.1:8824") as client:
+        yield client
+
+
+def test_harbor_bank_is_healthy_with_no_consent_date(s):
+    """W3 integration (2f, BANK-6 × MON-5): the 12-month estimate is American Express's only,
+    so Harbor Bank (Plaid sends no consent date) has none and no warning."""
+    clock.set_override(now=local_time(TODAY, 23, 59))
+    conn = status.connection_status(s)
+    by_name = {i.institution_name: i for i in conn.items}
+    harbor, amex = by_name["Harbor Bank"], by_name["American Express"]
+    assert (harbor.state, harbor.consent_due_at, harbor.consent_days_left) == (
+        "healthy",
+        None,
+        None,
+    )
+    assert not harbor.consent_warning and not harbor.has_cards
+    assert amex.consent_days_left == 25 and amex.has_cards
+    assert conn.state == "healthy" and conn.syncable
+
+
+def test_the_merged_demo_pages_show_both_connections_income_and_accounts(pages, s):
+    """W3 integration (2f): the Connection page lists both connections, Harbor Bank with no end
+    date; the pill's tooltip names both; the Dashboard shows Income (Paycheck), Net and the
+    Accounts card (Cash = checking + savings, Owed = the card); no card-only hint anywhere."""
+    clock.set_override(now=local_time(TODAY, 23, 59))
+    connection = pages.get("/connection")
+    assert connection.status_code == 200 and csp_problems(connection.text, rendered=True) == []
+    text = html.unescape(re.sub(r"<[^>]+>", " ", connection.text))
+    assert "No end date (Plaid reports none for Harbor Bank)" in " ".join(text.split())
+    for name in ("American Express: connected", "Harbor Bank: connected"):
+        assert name in html.unescape(connection.text)
+    dashboard = pages.get("/")
+    assert dashboard.status_code == 200 and csp_problems(dashboard.text, rendered=True) == []
+    d = dashboard.context["d"]
+    assert d.income is not None and not d.income.cards_only
+    assert d.income.largest.name == "Paycheck" and d.income.total > 0
+    assert d.income.net == d.income.total - d.income.spent
+    checking, savings = _bank_account(s, "checking"), _bank_account(s, "savings")
+    assert d.accounts.cash == checking.current_balance + savings.current_balance
+    assert d.accounts.owed == _card(s).current_balance
+    assert [a.name for a in d.accounts.banks] == ["Everyday Checking", "High Yield Savings"]
+    for page in (dashboard, pages.get("/trends")):
+        assert "Only card credits count as income" not in page.text
 
 
 def test_no_bank_row_is_stored_before_it_reached_plaid():
