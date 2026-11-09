@@ -217,8 +217,17 @@ TIMESTAMPTZ NOT NULL DEFAULT now()`; money `NUMERIC(14,2)`; enumerations are `TE
 `CHECK` constraint (no PostgreSQL enum types); constraint names follow a fixed SQLAlchemy
 naming convention. Every foreign key states its `ON DELETE` behaviour.
 
-**Sign convention (everywhere):** Plaid's, which Amex CSV files share. A positive amount is a
-charge, fee or interest; a negative amount is a credit (refund, statement credit, payment).
+**Sign convention (everywhere):** Plaid's, which Amex CSV files share, on cards and bank accounts
+alike: a positive amount is money leaving the account (a charge, fee or interest; on a bank
+account also rent, an ATM withdrawal, a transfer out or a card payment from checking); a negative
+amount is money coming in (a refund, statement credit or the card's payment; on a bank account a
+paycheck, interest or a transfer in).
+
+**Accounts: cards and bank accounts** (`services/accounts.py`, W3-PLAN C1). `accounts.type` is
+Plaid's: `credit` for a credit card (linked, or the manual "American Express (CSV)" account) or
+`depository` for a checking, savings or money market account; the app links nothing else.
+Spending is the same on both (§6). Statements, the statement-cycle card in Settings and CSV
+imports are for cards only (CSV imports for American Express cards, §6).
 
 ### plaid_items
 | column | type | notes |
@@ -245,7 +254,7 @@ charge, fee or interest; a negative amount is a credit (refund, statement credit
 | --- | --- | --- |
 | item_id | FK plaid_items ON DELETE RESTRICT, null | null = manual account (CSV-only, before linking) |
 | plaid_account_id | text unique, null | updated in place when Plaid re-issues an account id (churn) |
-| name, official_name, mask, type, subtype | text | |
+| name, official_name, mask, type, subtype | text | `type`: `credit` (card) or `depository` (bank account) |
 | iso_currency_code | text default 'USD' | |
 | current_balance, available_balance, credit_limit | numeric | SYNC-7 (limit is null on charge cards) |
 | balances_as_of | timestamptz | |
@@ -267,7 +276,7 @@ nulling `item_id`.
 | column | type | notes |
 | --- | --- | --- |
 | name | text not null | unique on `lower(name)` |
-| kind | text not null default 'expense' | `expense` (spending) \| `income` (credits/rewards, not spending) \| `transfer` (card payments, not spending) |
+| kind | text not null default 'expense' | `expense` (spending) \| `income` (paychecks, interest, other income, credits/rewards: not spending) \| `transfer` (card payments, transfers between your own accounts: not spending) |
 | system_key | text unique, null | `uncategorized` (always `expense`), `card_payments` (always `transfer`) — cannot be merged away, hidden or change kind (CHECK) |
 | is_hidden | bool not null default false | hidden from pickers and budget lists; transactions still count |
 | color | text | palette slot `cat-1` … `cat-16` (theme-aware; the seeded categories use these), `other` (neutral grey), or a custom `#rrggbb` |
@@ -288,7 +297,11 @@ Lookup order: detailed/full key, then primary/group key, then Uncategorized. For
 amount the keys with a `|credit` suffix are tried first (unless the row reads like a fee
 reversal): Amex files cash back and billing-inquiry credits under "Fees & Adjustments", so
 `Fees & Adjustments|credit` and `Fees & Adjustments-Fees & Adjustments|credit` map to Credits &
-Rewards while positive fees stay in Fees & Interest.
+Rewards while positive fees stay in Fees & Interest. For a Plaid row on a bank account the keys
+with a `|bank` suffix come before all of those (detailed, then primary): migration
+`0005_bank_categories` seeds them for every `INCOME`, `TRANSFER_IN` and `TRANSFER_OUT` code and
+for `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` (§6), and the "Plaid & Amex categories" editor lists
+them with a "Bank accounts" badge next to the card mapping of the same code.
 
 ### rules (CAT-3)
 | column | type | notes |
@@ -465,8 +478,10 @@ period". It reads `app_settings`: the date basis (posting date in statement mode
 `spend_date = COALESCE(authorized_date, date)` in calendar mode) and
 `include_pending_in_budgets`, and sums `v_allocations.amount` over allocations whose category
 `kind = 'expense'`, per category. Charges add; refunds (negative amounts in an expense
-category) subtract from it (TXN-3). Card payments (`kind = 'transfer'`) and credits/rewards
-(`kind = 'income'`) never count. The Budgets page, every "this period" widget on the dashboard,
+category) subtract from it (TXN-3). Card payments and transfers between your own accounts
+(`kind = 'transfer'`) and income (`kind = 'income'`) never count. Every account counts the same:
+rent, debit purchases and ATM withdrawals from checking are spending like card charges. The
+Budgets page, every "this period" widget on the dashboard,
 and the budget alerts all call it. `spending.periods_spending(session, periods)` is the same
 function for several periods read in one query (a rollover chain's earlier periods);
 `period_spending` is it for one period. Trends always use calendar months by `spend_date`, with
@@ -479,7 +494,8 @@ charge counts only those parts (its row still shows the whole charge and its spl
 
 ### Categorization precedence (CAT-2, TXN-3)
 For a new transaction:
-0. **Payments (fixed, not overridable by rules).** Card Payments when `amount < 0` and any of:
+0. **Payments (fixed, not overridable by rules), on a card only.** Card Payments when
+   `amount < 0` and any of:
    `transaction_code = 'payment'`; `pfc_detailed` is `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` or
    `LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT`; `pfc_primary = 'TRANSFER_IN'`; the name or original
    description matches `PAYMENT.*(THANK YOU|RECEIVED)|AUTOPAY`; or a CSV row with a blank Amex
@@ -490,11 +506,28 @@ For a new transaction:
    `needs_review` when one was dropped.
 2. The first matching active rule by `(priority, id)`.
 3. Plaid PFC v2 mapping (detailed, then primary) or, for CSV rows, the Amex category mapping —
-   sign-aware: negative amounts try the `|credit` mappings first (section 5), and a positive
-   amount never reaches a `transfer` category through a mapping (it is a charge; real payment
-   reversals were caught by step 0, and a row Plaid codes as a card payment stays one): it goes
-   to Uncategorized, which counts as spending.
+   sign-aware: negative amounts try the `|credit` mappings first (section 5), and on a card a
+   positive amount never reaches a `transfer` category through a mapping (it is a charge; real
+   payment reversals were caught by step 0, and a row Plaid codes as a card payment stays one):
+   it goes to Uncategorized, which counts as spending.
 4. Uncategorized.
+
+**Bank accounts** (`accounts.type = 'depository'`, W3-PLAN C3). Step 0 doesn't apply: a transfer
+in from savings or a deposit that reads like a payment is not forced into Card Payments. Step 3
+tries the `|bank` mappings first (section 5): `INCOME_SALARY` (and PFC v1's `INCOME_WAGES`) →
+Paycheck; `INCOME_INTEREST_EARNED` and `INCOME_DIVIDENDS` → Interest; every other `INCOME` code
+→ Other Income; `TRANSFER_IN` and `TRANSFER_OUT` codes → Transfers, except
+`TRANSFER_OUT_WITHDRAWAL` (ATM and cash) → Cash & ATM (spending); and
+`LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, positive on the bank side, → Card Payments, so paying the
+card from checking is never spending and never counted twice. Every other code maps as for
+cards, and the positive-row guard is for cards only (money leaving for savings is a transfer, not
+a charge). Rules still come first, so a rule can turn a regular transfer into income; the refund
+rule applies as on cards. Plaid's `transaction_code` is mostly empty for US banks, so bank rows
+are classified by the PFC and the text. Anything not on a bank account (a card, the manual CSV
+account, an account Plaid hasn't typed yet) is a card. Re-applying rules (CAT-4) follows the
+same rules for bank rows. The categories (Paycheck, Interest, Other Income, Transfers, Cash & ATM)
+and the mappings come from migration `0005_bank_categories`, which only adds: a category whose
+name is taken keeps its kind, and a bank mapping goes only to a category of the intended kind.
 
 Every path that gives a row the user state of the row it replaces calls
 `categorize.apply_carried_state(categorizer, row, state)`, so this order never depends on call
@@ -574,8 +607,11 @@ rows or completed Plaid's history, after every CSV import and after attaching a 
   manual account (its ON DELETE SET NULL would otherwise silently turn statement-cycle budgets
   into calendar months), copies `statement_closing_day` and `notice` when the Plaid account has
   none, deletes the manual account, then runs the full pass. Linking calls it when exactly one
-  manual account and one credit account exist; otherwise the Connection page asks. Once a
-  production Item exists, CSV import may only target linked accounts.
+  manual account and one credit account exist; otherwise the Connection page asks. An Amex CSV
+  file only goes to an American Express card: a linked credit account of an Amex Item
+  (`ins_10`) or the manual account, never a bank account or another bank's card. Once a
+  production Amex Item exists, CSV import may only target its linked cards (an Item at another
+  bank doesn't block the manual account).
 
 ### Locks (REL-1)
 - **Sync lock** (per Item): `pg_try_advisory_lock` on a dedicated connection held for the whole
@@ -876,11 +912,13 @@ that called it.
 - **Consent (SYNC-6):** renewal due within `consent_reminder_days`, once per due date; not while
   the Item needs reconnecting (update mode renews the consent too).
 - **Large charges (ALR-3):** only Plaid rows inserted by a sync for more than
-  `large_charge_threshold`, dated at most 7 days before the previous successful sync (so a
-  catch-up sync after a break of over a week still announces the break's charges), after the
-  initial history load; once per charge and not again when it posts. The sync outcome lists only
-  new charges: a row that replaces one the app already had (a posting, linked or matched, or a
-  re-delivery after account churn) is left out. A charge that first goes over the amount when it
+  `large_charge_threshold` whose category is spending (`kind = 'expense'`) after categorization,
+  on any account (paying the card from checking, a transfer or a paycheck never alerts), dated
+  at most 7 days before the previous successful sync (so a catch-up sync after a break of over a
+  week still announces the break's charges), after the initial history load; once per charge
+  and not again when it posts. The sync outcome lists only new charges: a row that replaces one
+  the app already had (a posting, linked or matched, or a re-delivery after account churn) is
+  left out. A charge that first goes over the amount when it
   posts (a pending charge at or under it, posted higher with a tip or hotel incidentals, or
   raised in place by Plaid; the sync outcome's `pending_raises`) alerts once, under the pending
   row's key. More than 3 new ones in a run send one summary notification.

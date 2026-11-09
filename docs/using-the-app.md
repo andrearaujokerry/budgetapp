@@ -30,6 +30,11 @@ The same rules apply on every page and in every alert:
 - **Charges count as spending, in their category.** A refund in a spending category reduces that
   category's spending. Card payments ("Card Payments") and credits such as cash back ("Credits &
   Rewards") never count as spending.
+- **Bank accounts count the same way.** Rent, debit-card purchases and ATM withdrawals ("Cash &
+  ATM") from checking are spending; paying your card from checking is a card payment, so the money
+  counts once, as the card's charges; moving money between your own accounts ("Transfers") is
+  neither spending nor income; paychecks, interest and other money coming in go to "Paycheck",
+  "Interest" and "Other Income".
 - **A budget period** is a calendar month, or your Amex statement cycle if you choose that in
   [Settings](#settings).
 - **Which date counts:** in calendar-month mode, the day you made the charge; in statement-cycle
@@ -73,7 +78,7 @@ are on their way" until the first ones arrive.
 
 ## Transactions
 
-Every charge, refund, credit and payment, newest first.
+Every charge, refund, credit, payment and transfer on your cards and bank accounts, newest first.
 
 **Finding things**
 
@@ -82,14 +87,18 @@ Every charge, refund, credit and payment, newest first.
 - **Dates:** All dates, This month (or **This statement period** in statement-cycle mode, by
   posting date, matching the Budgets page), Last month, Last 90 days, This year, or a custom range.
 - **Categories:** one or several; **Status:** pending or posted; **More filters:** merchant, an
-  amount range, card member, tag, and **Credits only**.
+  amount range, **Account** (once you have more than one: each card and bank account, under its
+  bank), card member, tag, and **Credits only**.
 - The address bar follows your filters, so a reload or a bookmark keeps them.
 - Above the list: how many transactions match, their **Charges**, **Credits & payments** and
   **Net**, over every page of the list. Filtered by category, a split charge counts only its parts
   in the chosen categories (its row still shows the whole charge and its split, and the summary
   says how many split charges count only in part), so a list opened from a spent amount on the
   Dashboard, Budgets or Trends adds up to that amount. Without a category filter they add up whole
-  amounts, card payments and credits included, so they differ from spending figures.
+  amounts, card payments, transfers, paychecks and credits included, so they differ from spending
+  figures.
+- Rows that are never spending are greyed out: **Payment** marks a card payment (on the card, and
+  its other side on checking), **Transfer** money moved between your own accounts.
 - **Needs review** lists rows where something changed after you edited them (for example Plaid
   changed the amount of a split charge). **Possible duplicates** lists CSV rows held for review.
 
@@ -99,16 +108,17 @@ Every charge, refund, credit and payment, newest first.
   **Change category**). A category you set yourself is never changed again by rules or syncs
   (until you choose **Reset to automatic**).
 - The **⋯ menu** of a row (or the transaction's own page) has **Details**, **Notes and tags**,
-  **Split** and **Always categorize like this** (neither for card payments), **Reset to
-  automatic** once you have set the category yourself, and **Mark as reviewed** when the row needs
-  review.
+  **Split** (not for card payments and transfers), **Always categorize like this** (not for a
+  payment on the card itself), **Reset to automatic** once you have set the category yourself, and
+  **Mark as reviewed** when the row needs review.
 - **Split** spreads one charge over several categories. The parts must add up exactly to the
   amount; a pending charge can't be split until it posts.
 - **Always categorize like this** makes a rule from the transaction, with a preview of the past
   transactions it would change. For an older row imported from a CSV file, the preview warns
   when Plaid names the merchant differently, so the rule also catches new charges.
 - **Details** shows everything known about the charge (Plaid's and Amex's categories, posting
-  date, statement descriptor, where it came from) and **All from this merchant**.
+  date, statement descriptor, the account and bank it is on, where it came from) and **All from
+  this merchant**.
 
 **Export CSV** downloads the rows that match your filters. Cells that a spreadsheet would read as
 a formula are made safe. Possible duplicates are never exported unless you are viewing them.
@@ -182,7 +192,9 @@ years for yearly ones).
 
 ## Statements
 
-One row per statement period of your card, checked against Amex to the cent.
+One row per statement period of your card, checked against Amex to the cent. With more than one
+card, each has its own tab. Checking and savings accounts have no statements here, and the
+**Card whose statement cycle sets the periods** in [Settings](#settings) is always a card.
 
 - A period runs from the day after one closing date to the next closing date. A transaction
   belongs to the period it **posted** in; pending charges count once they post. Interest and fees
@@ -209,9 +221,13 @@ One row per statement period of your card, checked against Amex to the cent.
 
 | Kind | Counts as spending? | Examples |
 | --- | --- | --- |
-| Spending | yes; refunds in it reduce it | Groceries, Dining & Drinks, Travel |
-| Credits & income | no | Credits & Rewards (cash back, statement credits) |
-| Card payments & transfers | no | Card Payments |
+| Spending | yes; refunds in it reduce it | Groceries, Dining & Drinks, Travel, Cash & ATM |
+| Credits & income | no | Paycheck, Interest, Other Income, Credits & Rewards (cash back, statement credits) |
+| Card payments & transfers | no | Card Payments, Transfers (between your own accounts) |
+
+Paycheck, Interest, Other Income, Transfers and Cash & ATM are for money in and out of your bank
+accounts; they were added with bank accounts and work like any other category. A category you
+already had with one of those names was kept as it was.
 
 - **Add category**, or **Edit** one to rename it, recolour it, change its kind or give it an
   emoji icon.
@@ -227,7 +243,10 @@ One row per statement period of your card, checked against Amex to the cent.
 category (and each Amex CSV category) points to one of yours. Pick a category in **Goes to**; it
 saves at once. **Not mapped** removes a choice, so the charge falls back to its group's category,
 then to Uncategorized. Some rows say "for credits": they are tried first for negative amounts, so cash
-back goes to Credits & Rewards while fees stay in Fees & Interest. A change applies to new
+back goes to Credits & Rewards while fees stay in Fees & Interest. Rows marked **Bank accounts**
+are tried first for checking and savings accounts, so a paycheck goes to Paycheck there while the
+same Plaid category on a card stays in Credits & Rewards; the row without the mark is for cards
+(and for bank accounts when there is no bank row). A change applies to new
 transactions; past ones keep their category until you [re-apply rules](#rules), and the message
 after saving says how many would move.
 
@@ -244,8 +263,9 @@ Charges no rule matches go by Plaid's or Amex's category (above).
   inside a repeat, like `(a|aa)+`) is refused: simplify it.
 - **Move up** and **Move down** change the order; the switch turns a rule off (it is kept but
   categorizes nothing); **Edit** and **Delete** do what they say.
-- Rules never touch two things: card payments always go to Card Payments, and a category you set
-  yourself on a transaction never changes.
+- Rules never touch two things: payments on your card always go to Card Payments, and a category
+  you set yourself on a transaction never changes. On a bank account your rules come first, so a
+  rule can, for example, turn a regular transfer into income.
 
 **Re-apply rules to past transactions** runs card payments, your rules and the category mappings
 again on every past transaction, all of them, since a date, or only Uncategorized ones. **Preview
@@ -274,7 +294,9 @@ link.
 4. Import the file as downloaded. Opening and saving it in Excel or Numbers changes the Reference
    numbers and dates.
 
-**Import it.** Choose the file (up to 10 MB) and the account, and click **Preview import**.
+**Import it.** Choose the file (up to 10 MB) and the account, and click **Preview import**. The
+file goes to your American Express card, or to "American Express (CSV)" before you link it; bank
+accounts and other banks' cards are never offered.
 Nothing is imported until you confirm. The preview groups the rows: new ones, rows held for
 review, rows that match a transaction Plaid already has (merged, not added twice), rows already
 imported, rows imported before with a different date or amount (skipped) and unreadable rows. The
@@ -288,7 +310,8 @@ file itself is read in memory and never saved.
   their own once it posts. A row you delete is held again if you import its file again.
 - **Past imports** lists every file with what it added.
 - Before you link, imported rows go to an account named "American Express (CSV)". Linking moves
-  them onto your card ([Going live](going-live.md#5-import-older-history)).
+  them onto your card ([Going live](going-live.md#5-import-older-history)). Linking a bank account
+  first changes nothing here: only a linked Amex card takes over.
 
 From Terminal, the same preview and import:
 
@@ -298,7 +321,7 @@ From Terminal, the same preview and import:
 ./run import-csv ~/Downloads/activity.csv --env production
 ```
 
-Without `--account ID` the file goes to your linked card, or to the "American Express (CSV)"
+Without `--account ID` the file goes to your linked Amex card, or to the "American Express (CSV)"
 account when nothing is linked; when that is ambiguous, the command lists the accounts to choose
 from. Delete the downloaded file when you are done with it: it holds your real transactions.
 

@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from budgetapp import cli, clock
 from budgetapp.db import make_engine
-from budgetapp.devtools import demo
+from budgetapp.devtools import demo, demo_writer
 from budgetapp.devtools import demo_catalog as cat
 from budgetapp.devtools.demo_gateway import DEMO_MESSAGE, DemoPlaidGateway
 from budgetapp.devtools.demo_plan import build_plan, local_time
@@ -949,6 +949,10 @@ def test_the_plan_keeps_its_shape_on_any_day(today):
             assert Decimal("0.84") <= used <= Decimal("0.86")
         else:
             assert used <= Decimal("0.75")
+    # The overall target counts every category without an annual budget, rent from checking too.
+    not_counted = {*demo_writer.NOT_SPENDING, *cat.ANNUAL_BUDGETS}
+    overall = sum((v for k, v in spent.items() if k not in not_counted), ZERO)
+    assert overall < cat.OVERALL_TARGET * Decimal("0.8")
     assert len(plan.statements) == 12 and sum(r.suspect for r in plan.rows) == 2
     assert any(r.pending for r in plan.rows)
 
