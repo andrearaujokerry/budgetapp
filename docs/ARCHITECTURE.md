@@ -441,7 +441,8 @@ the override above.
   statement cycle defines budget periods), `include_pending_in_budgets` (true),
   `budget_alerts_enabled` (true), `alert_thresholds` (int[] `{80,100}`), `sync_alerts_enabled`
   (true), `large_charge_threshold` (numeric, null = off, ALR-3), `consent_reminder_days` (30),
-  `statement_settle_days` (3), `ai_enabled` (false; AI-1 is not built in v1).
+  `statement_settle_days` (3), `ai_enabled` (false; AI-1 is not built in v1), `show_income`
+  (true; the Dashboard's and Trends' "Show income" switch, migration `0006_income_preference`).
 - **sync_runs** (SYNC-5): `item_id` (FK ON DELETE CASCADE), `trigger` (`schedule` \| `manual`
   \| `link` \| `update` \| `cli`), `status` (`running` \| `success` \| `error` \| `skipped` \|
   `interrupted`), `started_at`, `finished_at`, `added_count`, `modified_count`,
@@ -476,6 +477,36 @@ The Transactions list's sums (Charges, Credits & payments, Net) add whole amount
 category filter: then each row adds what `v_allocations` puts in the chosen categories, so a split
 charge counts only those parts (its row still shows the whole charge and its split). Every
 "spent" link (Budgets, Dashboard, Trends) therefore opens a list whose Net is the figure.
+
+### Income and net (wave 3, INC-1..INC-5)
+**Income** is money in, booked to categories of kind `income` (Paycheck, Interest, Other Income,
+Credits & Rewards; the code relies on the kind, never the names), from any account, as a
+positive number: `−sum(v_allocations.amount)` over income-kind allocations. A reversal booked to
+an income category (a clawed-back statement credit) reduces it, so a month's income can be
+negative. Each income function in `spending.py` is its spending counterpart run with
+`kinds=("income",)`, so it has the same date basis, pending setting and suspect handling:
+`period_income`/`periods_income` (the budget period's basis and `include_pending_in_budgets`,
+read from `app_settings` like `period_spending`), `monthly_income` (calendar months by
+`spend_date`, like `monthly_spending`) and `income_by_category`. The spending functions return
+exactly what they did before.
+
+**Net = income − spending**, where spending is `period_spending`'s total (every expense
+category, annual-budget ones included) or the month's `monthly_spending` total. Transfers (kind
+`transfer`: card payments from either side, moves between own accounts) are neither, so for any
+period `spending − income + transfers` is the plain sum of every counted row's amount
+(`tests/test_spending.py` checks this in both modes, pending on and off). Credits & Rewards is
+income kind, so Amex statement credits are income and stay their own line wherever income is
+broken down (Trends' Every month table).
+
+`insights.dashboard` adds `IncomeAndNet` (the period's `period_income`, all spending and the net)
+while the switch shows income, and `AccountBalances`: every visible card and bank account
+(`services.accounts`, C1) with Plaid's cached balances, cash (bank accounts' current balances)
+and owed (cards' current balances: positive is owed, negative a credit, RESEARCH T2.7).
+`insights.trends(..., income=True)` adds `TrendsIncome`: income per income category per month,
+all income, and the net per month, with the same months, statuses and complete-month averages as
+spending. An income figure's link lists every income category's rows for its dates
+(`routes.dashboard.categories_url`); the list signs money in as Plaid does (negative), so its Net
+is the figure with a minus sign.
 
 ### Categorization precedence (CAT-2, TXN-3)
 For a new transaction:
@@ -789,6 +820,19 @@ Pages: Dashboard `/`, Transactions `/transactions`, Budgets `/budgets`, Trends `
 Recurring `/recurring`, Statements `/statements`, Categories `/categories`, Rules `/rules`,
 Import `/import`, Connection `/connection`, Settings `/settings`. A banner marks the Sandbox
 environment on every page.
+
+**The "Show income" switch (INC-2).** One view preference shared by the Dashboard and Trends,
+stored in `app_settings.show_income` (on by default) and offered once any counted money is booked
+to an income category (`insights.income_switch`). Budgets, Statements and Recurring stay spending
+only. It is a form in each page's header (`templates/dashboard/_income_switch.html`): a checkbox
+with `role="switch"` and a visible label that posts on change (`hx-trigger="change"`) to
+`POST /dashboard/show-income` or `POST /trends/show-income`. The route saves the choice, commits,
+and answers an HTMX request with the region the choice changes (the Dashboard's headline tiles
+`#dash-kpis`; Trends' `#trends-results`, rendered for the filter bar's values, which the form
+sends with `hx-include="#trends-filters"`) plus a toast that screen readers hear; the switch
+stays outside that region, so focus never moves. Without JavaScript a Save button in
+`<noscript>` submits the same form and the route redirects (303) to the Dashboard or to `next`
+(only a `/trends` address). An unchecked switch sends nothing, which the route reads as off.
 
 ## 10. Commands and background jobs
 

@@ -536,6 +536,11 @@ still work: app.js lazy-loads Chart.js from `/static/vendor/chart.umd.min.js`).
 | `title` | accessible-name fallback |
 | `options` | raw Chart.js options deep-merged last (functions are impossible in JSON; formatting comes from `format`) |
 
+A line mixed into a bar chart (`type: "line"` on one dataset) is drawn over the bars only when
+it is listed **first**: Chart.js draws the first dataset last. Trends' "Income and spending"
+chart lists its dashed Net line first for that reason, so the legend and tooltips name it first
+too.
+
 Colour values: a category's stored colour as is (`"cat-1"`…`"cat-16"`, `"other"`, `"#rrggbb"`;
 3.3), or `"accent"`, `"ok"`, `"warn"`, `"over"`, `"info"`, `"muted"`, `"--any-token"` /
 `"var(--any-token)"`, or another literal CSS colour. A dataset without `color` takes

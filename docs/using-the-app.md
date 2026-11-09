@@ -51,6 +51,21 @@ it open those pages.
   **Days left**, and **Compared with** the previous period: all your spending so far (categories
   with an annual budget included, like the pace chart, so it can be more than **Spent**) against
   what you had spent by the same day then.
+- **Show income** (next to **Budgets** and **Trends**, once any money has come in to an income
+  category) adds two tiles after **Spent**: **Income** this period, with its largest source, and
+  **Net**: income minus all your spending so far (above zero is money you kept). Income is money
+  in to your income categories from any account: paychecks, interest, other income, and Amex
+  credits (Credits & Rewards, its own line wherever income is broken down). It uses the same dates
+  and pending setting as your budgets. Card payments and transfers between your own accounts are
+  neither income nor spending. The switch is on to begin with, and the app remembers your choice
+  for the Dashboard and Trends. The **Income** tile opens the period's income in Transactions,
+  where money in shows as negative amounts (as Plaid sends it), so the list's **Net** is the
+  figure with a minus sign.
+- **Accounts:** every account you haven't hidden, with the balance Plaid last sent: bank
+  accounts with their available balance, added up as **Cash**, and cards with what you owe,
+  added up as **Owed on cards** (a negative balance is a credit in your favour; an overdrawn bank
+  account shows in red). An account imported from a CSV file has no balance. Each name opens that
+  account's transactions.
 - **Budgets:** your six most-used monthly budgets with what is left; **All budgets** opens the
   Budgets page.
 - **Top categories:** where the money went this period, with each category's share (hidden
@@ -68,8 +83,8 @@ with the same dates (by posting date in statement-cycle mode) and pending settin
 **Net** is the amount shown, split charges included. Banners point out rows held for review after
 a CSV import (**Review** opens the Import page), an unusual statement cycle, and statement cycles
 chosen in Settings that can't be used yet. Before anything is linked or imported, the page offers
-**Link account** and **Import a CSV file**; once your card is linked, it says "Your transactions
-are on their way" until the first ones arrive.
+**Link a bank or card** and **Import a CSV file**; once an account is linked, it says "Your
+transactions are on their way" until the first ones arrive, with the **Accounts** card below.
 
 ## Transactions
 
@@ -163,6 +178,14 @@ note says so), with the same pending setting as budgets.
 - A category's name opens its own month-by-month view; there, each month's amount opens the
   matching [Transactions](#transactions), whose **Net** is that amount. In the change table, the
   amount of the last complete month does the same.
+- **Show income** (as on the [Dashboard](#dashboard), the same choice) turns the page into a
+  monthly income statement for all categories: tiles with the last complete month's income (and
+  how it changed) and **Net** (with its monthly average); an **Income and spending** chart with
+  income bars next to spending bars and the net as a dashed line; and, in **Every month**, after
+  **All spending**, one row per income category (Credits & Rewards on its own line), **All
+  income** and **Net** (income minus spending). Each income amount opens that month's income in
+  Transactions (money in shows as negative amounts there). A single category's view stays
+  spending only.
 
 ## Recurring
 
