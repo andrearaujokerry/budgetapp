@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from tests.bank_factories import make_bank_account, make_bank_item
 from tests.factories import (
     get_category,
     make_account,
@@ -441,10 +442,8 @@ def income_category(db, name: str):
 
 @pytest.fixture
 def checking(db):
-    from tests.factories import make_item
-
-    bank = make_item(db, institution_id="ins_109508", institution_name="First Platypus Bank")
-    return make_account(db, bank, name="Plaid Checking", type="depository", subtype="checking")
+    bank = make_bank_item(db, institution_id="ins_109508", institution_name="First Platypus Bank")
+    return make_bank_account(db, bank, name="Plaid Checking")
 
 
 @pytest.fixture

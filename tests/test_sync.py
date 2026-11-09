@@ -39,6 +39,7 @@ from budgetapp.services import (
     userstate,
 )
 from budgetapp.services.events import SyncOutcome
+from tests.bank_factories import make_bank_account
 from tests.factories import (
     card_payments,
     get_category,
@@ -1991,7 +1992,7 @@ def test_error_help_names_the_institution():
 
 
 def test_a_re_issued_bank_account_is_called_an_account(db):
-    account = make_account(db, type="depository", subtype="checking")
+    account = make_bank_account(db)
     sync.reissue_account(account, "acc-new", NOW)
     assert account.notice.startswith("Plaid re-issued this account on")
     assert "an account number change" in account.notice

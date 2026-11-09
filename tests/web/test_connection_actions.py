@@ -25,6 +25,7 @@ from budgetapp.services import linking, reconcile, userstate
 from budgetapp.services.background import BackgroundJobs
 from budgetapp.web import flash as flash_module
 from budgetapp.web.routes import connection as routes
+from tests.bank_factories import make_bank_account
 from tests.factories import (
     make_account,
     make_item,
@@ -937,7 +938,7 @@ def test_statement_details_are_refused_for_a_bank_without_cards(
     )
     app_secrets.store_access_token(settings, "td", fake_item.access_token, store=secrets)
     item = make_item(db, plaid_item_id="td", institution_id="ins_14", institution_name="TD Bank")
-    make_account(db, item, type="depository", subtype="checking")
+    make_bank_account(db, item)
     response = client.post(
         "/connection/link-token", json={"mode": "liabilities", "item_id": item.id}
     )

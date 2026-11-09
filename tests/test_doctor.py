@@ -28,6 +28,7 @@ from budgetapp.config import load_settings, scratch_dir_for_tests
 from budgetapp.db import code_head
 from budgetapp.services import agents, doctor
 from budgetapp.services.doctor import FAIL, INFO, PASS, WARN
+from tests.bank_factories import make_bank_account
 from tests.factories import make_account, make_item
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -1239,7 +1240,7 @@ class TestConnection:
             consented_products=["transactions"],
             last_consented_at=NOW - dt.timedelta(days=400),
         )
-        make_account(db, bank, type="depository", subtype="checking", name="Checking")
+        make_bank_account(db, bank, name="Checking")
         checks = {c.title: c.status for c in dr.run(doctor.check_connection)}
         assert checks == {
             "TD Bank consent has no end date (Plaid reports none)": INFO,

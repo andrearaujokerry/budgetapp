@@ -24,6 +24,7 @@ from budgetapp.services import linking, reconcile, userstate
 from budgetapp.services import status as status_service
 from budgetapp.services import sync as sync_service
 from budgetapp.services.linking import LinkFailed, LinkMetadata, LinkRefused
+from tests.bank_factories import make_bank_account
 from tests.factories import (
     get_category,
     make_account,
@@ -1251,7 +1252,7 @@ def td_bank(db, *, accounts=(("Checking", "0001"),), **values):
     values.setdefault("institution_name", "TD Bank")
     item = make_item(db, **values)
     for name, mask in accounts:
-        make_account(db, item, name=name, mask=mask, type="depository", subtype="checking")
+        make_bank_account(db, item, name=name, mask=mask)
     return item
 
 
@@ -1605,7 +1606,7 @@ def test_add_accounts_is_update_mode_with_account_selection(db, fake_plaid, secr
 def test_statement_details_are_offered_to_card_connections_only(db, fake_plaid, secrets, settings):
     """BANK-5: "Grant access to statement details" is for card connections only."""
     _fake, item = linked_item(db, fake_plaid, secrets, settings, institution_name="TD Bank")
-    make_account(db, item, type="depository", subtype="checking")
+    make_bank_account(db, item)
     with pytest.raises(LinkRefused, match="TD Bank has none"):
         linking.update_link_token(
             db, fake_plaid, item, add_liabilities=True, store=secrets, settings=settings

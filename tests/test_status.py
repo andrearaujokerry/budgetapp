@@ -1,6 +1,7 @@
 import datetime as dt
 
 from budgetapp.services.status import connection_status
+from tests.bank_factories import make_bank_account
 from tests.factories import make_item, make_sync_run, set_app_settings
 
 NOW = dt.datetime(2026, 10, 15, 16, 0, tzinfo=dt.UTC)
@@ -139,7 +140,7 @@ def test_liabilities_apply_only_to_connections_with_a_card(db):
     card_item = make_item(db)
     make_account(db, card_item)
     bank_item = make_item(db, institution_id="ins_14", institution_name="TD Bank")
-    make_account(db, bank_item, type="depository", subtype="checking", name="Checking")
+    make_bank_account(db, bank_item, name="Checking")
     by_id = {s.item_id: s for s in connection_status(db, now=NOW).items}
     assert by_id[card_item.id].has_cards and not by_id[bank_item.id].has_cards
 

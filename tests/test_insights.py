@@ -13,13 +13,13 @@ from budgetapp.money import to_money
 from budgetapp.periods import month_period
 from budgetapp.services import budgets, insights, spending
 from budgetapp.services.insights import Change, change, month_param
+from tests.bank_factories import make_bank_account, make_bank_item
 from tests.factories import (
     card_payments,
     get_category,
     make_account,
     make_budget,
     make_category,
-    make_item,
     make_split,
     make_statement,
     make_transaction,
@@ -597,13 +597,12 @@ def income_category(db, name: str):
 
 @pytest.fixture
 def bank(db):
-    return make_item(db, institution_id="ins_109508", institution_name="First Platypus Bank")
+    return make_bank_item(db, institution_id="ins_109508", institution_name="First Platypus Bank")
 
 
 @pytest.fixture
 def checking(db, bank):
-    return make_account(db, bank, name="Plaid Checking", mask="0000", type="depository",
-                        subtype="checking")  # fmt: skip
+    return make_bank_account(db, bank, name="Plaid Checking", mask="0000")
 
 
 @pytest.fixture
@@ -670,8 +669,7 @@ class TestDashboardIncome:
         inc = insights.dashboard(db, today=day("2026-10-20")).income
         assert inc.cards_only and (inc.total, inc.net) == (D("25.00"), D("-275.00"))
         assert insights.has_bank_account(db) is False
-        make_account(db, bank, name="Plaid Saving", type="depository", subtype="savings",
-                     is_hidden=hidden)  # fmt: skip
+        make_bank_account(db, bank, subtype="savings", name="Plaid Saving", is_hidden=hidden)
         assert insights.has_bank_account(db) is True
         assert not insights.dashboard(db, today=day("2026-10-20")).income.cards_only
 
@@ -715,20 +713,19 @@ class TestAccountBalances:
     def test_banks_then_cards_with_cash_and_owed(self, db, bank, freeze_today):
         now = dt.datetime(2026, 10, 20, 12, tzinfo=dt.UTC)
         freeze_today("2026-10-20", now=now)
-        checking = make_account(db, bank, name="Plaid Checking", mask="0000", type="depository",
-                                subtype="checking", current_balance=D("110.00"),
+        checking = make_bank_account(db, bank, name="Plaid Checking", mask="0000",
+                                     current_balance=D("110.00"),
                                 available_balance=D("100.00"),
                                 balances_as_of=now - dt.timedelta(hours=2))  # fmt: skip
-        savings = make_account(db, bank, name="Plaid Saving", mask="1111", type="depository",
-                               subtype="savings", current_balance=D("210.00"),
+        savings = make_bank_account(db, bank, name="Plaid Saving", mask="1111",
+                                    subtype="savings", current_balance=D("210.00"),
                                balances_as_of=now - dt.timedelta(hours=5))  # fmt: skip
         card = make_account(db, name="Blue Cash Preferred®", mask="3005",
                             current_balance=D("1234.56"), balances_as_of=now)  # fmt: skip
         credit = make_account(db, bank, name="Plaid Credit Card", mask="3333",
                               current_balance=D("-12.00"))  # a credit in your favour  # fmt: skip
         manual = make_account(db, manual=True)  # an Amex CSV account: no balance
-        make_account(db, bank, name="Hidden", type="depository", subtype="checking",
-                     current_balance=D("999.00"), is_hidden=True)  # fmt: skip
+        make_bank_account(db, bank, name="Hidden", current_balance=D("999.00"), is_hidden=True)
         # A loan is never linked by this app (filtered in Plaid Link) and never shown.
         make_account(db, bank, name="Plaid Student Loan", type="loan", subtype="student",
                      current_balance=D("65000.00"))  # fmt: skip
@@ -811,8 +808,7 @@ class TestTrendsIncome:
         spend(cat("Credits & Rewards"), "-25.00", "2026-10-12")
         t = insights.trends(db, today=day("2026-11-05"), income=True)
         assert t.income.cards_only and t.income.totals.amounts[-2] == D("25.00")
-        make_account(db, bank, name="Plaid Checking", type="depository", subtype="checking",
-                     is_hidden=True)  # fmt: skip
+        make_bank_account(db, bank, name="Plaid Checking", is_hidden=True)
         assert not insights.trends(db, today=day("2026-11-05"), income=True).income.cards_only
 
     def test_pending_income_follows_the_budget_setting(self, db, earnings):

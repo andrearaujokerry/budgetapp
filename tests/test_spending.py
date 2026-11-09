@@ -14,12 +14,12 @@ from budgetapp.services.spending import (
     spending_by_category,
     top_merchants,
 )
+from tests.bank_factories import make_bank_account, make_bank_item
 from tests.factories import (
     card_payments,
     get_category,
     make_account,
     make_category,
-    make_item,
     make_split,
     make_transaction,
     set_app_settings,
@@ -308,8 +308,8 @@ def transfers_category(db):
 @pytest.fixture
 def checking(db):
     """A checking account on a bank's own Item (C1: type ``depository``)."""
-    bank = make_item(db, institution_id="ins_109508", institution_name="First Platypus Bank")
-    return make_account(db, bank, name="Plaid Checking", type="depository", subtype="checking")
+    bank = make_bank_item(db, institution_id="ins_109508", institution_name="First Platypus Bank")
+    return make_bank_account(db, bank, name="Plaid Checking")
 
 
 @pytest.fixture

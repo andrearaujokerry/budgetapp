@@ -14,6 +14,7 @@ import pytest
 
 from budgetapp.models import get_app_settings
 from budgetapp.services import budgets
+from tests.bank_factories import make_bank_account, make_bank_item
 from tests.factories import (
     card_payments,
     get_category,
@@ -491,9 +492,9 @@ def income_category(db, name: str):
 
 @pytest.fixture
 def checking(db):
-    bank = make_item(db, institution_id="ins_109508", institution_name="First Platypus Bank")
-    return make_account(db, bank, name="Plaid Checking", mask="0000", type="depository",
-                        subtype="checking", current_balance=D("3210.55"),
+    bank = make_bank_item(db, institution_id="ins_109508", institution_name="First Platypus Bank")
+    return make_bank_account(db, bank, name="Plaid Checking", mask="0000",
+                             current_balance=D("3210.55"),
                         available_balance=D("3180.55"))  # fmt: skip
 
 
@@ -674,14 +675,12 @@ class TestAccountsCard:
         account.current_balance = D("1234.56")
         account.balances_as_of = now - dt.timedelta(hours=3)
         checking.balances_as_of = now - dt.timedelta(minutes=5)
-        savings = make_account(db, checking.item, name="Plaid Saving", mask="1111",
-                               type="depository", subtype="savings",
-                               current_balance=D("12509.62"))  # fmt: skip
-        overdrawn = make_account(db, checking.item, name="Joint Checking", mask="2222",
-                                 type="depository", subtype="checking",
-                                 current_balance=D("-45.10"))  # fmt: skip
-        make_account(db, checking.item, name="Old Savings", type="depository",
-                     subtype="savings", current_balance=D("1.00"), is_hidden=True)  # fmt: skip
+        savings = make_bank_account(db, checking.item, name="Plaid Saving", mask="1111",
+                                    subtype="savings", current_balance=D("12509.62"))  # fmt: skip
+        overdrawn = make_bank_account(db, checking.item, name="Joint Checking", mask="2222",
+                                      current_balance=D("-45.10"))  # fmt: skip
+        make_bank_account(db, checking.item, name="Old Savings", subtype="savings",
+                          current_balance=D("1.00"), is_hidden=True)  # fmt: skip
         manual = make_account(db, manual=True)
         page = client.get("/").text
         card_html = card(page, "dash-accounts")
