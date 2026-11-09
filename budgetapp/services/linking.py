@@ -72,14 +72,13 @@ from budgetapp.plaid_gateway import (
 from budgetapp.services import reconcile, userstate
 from budgetapp.services import status as status_service
 from budgetapp.services import sync as sync_service
+from budgetapp.services.accounts import CARD
 from budgetapp.services.status import ConnectionStatus, ItemStatus
 
 log = logging.getLogger(__name__)
 
 #: The public token lives 30 minutes; retries stop a little before that.
 EXCHANGE_WINDOW = 25 * 60.0
-#: Plaid's id for American Express (RESEARCH T3.1). Link's own metadata is trusted first.
-AMEX_INSTITUTION_ID = status_service.AMEX_INSTITUTION_ID
 #: "You can create 10 Production Items on a Trial plan", and removing one never gives it back
 #: (plaid.com/docs/account/billing/, W3-PLAN §1).
 TRIAL_ITEM_LIMIT = 10
@@ -1201,7 +1200,7 @@ def update_link_token(
     if add_liabilities and not session.scalar(
         select(func.count())
         .select_from(Account)
-        .where(Account.item_id == row.id, Account.type == status_service.CARD_TYPE)
+        .where(Account.item_id == row.id, Account.type == CARD)
     ):
         raise LinkRefused(
             f"Statement details are for credit cards, and {row.institution_name or 'this bank'} "
@@ -1436,14 +1435,13 @@ class AttachChoice:
 
 
 def amex_cards(session: Session) -> list[Account]:
-    """Linked American Express credit cards (``ins_10``), oldest first."""
-    rows = session.execute(
-        select(Account, PlaidItem)
-        .join(PlaidItem, PlaidItem.id == Account.item_id)
-        .where(Account.type == status_service.CARD_TYPE)
+    """Linked American Express credit cards (``status.is_amex_card``), oldest first."""
+    accounts = session.scalars(
+        select(Account)
+        .where(Account.item_id.is_not(None), Account.type == CARD)
         .order_by(Account.id)
-    ).all()
-    return [account for account, item in rows if status_service.is_amex(item)]
+    )
+    return [account for account in accounts if status_service.is_amex_card(account)]
 
 
 def attach_choice(session: Session) -> AttachChoice | None:
@@ -1634,7 +1632,7 @@ class AccountView:
     @property
     def is_card(self) -> bool:
         """A credit card: its tiles are balance, statement, minimum payment and limit."""
-        return self.type == status_service.CARD_TYPE
+        return self.type == CARD
 
     @property
     def kind(self) -> str:

@@ -67,11 +67,12 @@ from budgetapp.db import ledger_lock
 from budgetapp.models import Account, CsvImport, PlaidItem, Transaction
 from budgetapp.money import CENT, to_money
 from budgetapp.services import alerts, reconcile
-from budgetapp.services.accounts import is_card
+from budgetapp.services.accounts import CARD
 from budgetapp.services.categorize import Categorizer
 from budgetapp.services.events import ImportOutcome
 from budgetapp.services.notify import Notifier, NullNotifier
 from budgetapp.services.reconcile import CsvSide, ReconcileResult, reference_posting_date
+from budgetapp.services.status import is_amex, is_amex_card
 from budgetapp.textutil import has_control_chars, strip_control_chars
 
 log = logging.getLogger(__name__)
@@ -84,8 +85,6 @@ HEADER_SCAN_ROWS = 20
 FUTURE_TOLERANCE = dt.timedelta(days=7)
 MANUAL_ACCOUNT_NAME = "American Express (CSV)"
 NEW_ACCOUNT = "new"
-#: Plaid's institution id for American Express (RESEARCH T3.1): Amex CSV files go to its cards.
-AMEX_INSTITUTION_ID = "ins_10"
 #: Row ids are BIGINT; a larger number never names a row.
 MAX_ROW_ID = 2**63 - 1
 #: Longest Description / "Appears On Your Statement As" (real ones are far shorter): the payment
@@ -457,18 +456,7 @@ def linked_only(session: Session, *, production: bool) -> bool:
     an Item at another bank (checking, another card) doesn't block the manual account."""
     if not production:
         return False
-    amex = select(func.count()).select_from(PlaidItem)
-    return session.scalar(amex.where(PlaidItem.institution_id == AMEX_INSTITUTION_ID)) > 0
-
-
-def is_amex_card(account: Account) -> bool:
-    """A credit account of an American Express Item, where a linked Amex CSV file belongs."""
-    return (
-        not account.is_manual
-        and is_card(account)
-        and account.item is not None
-        and account.item.institution_id == AMEX_INSTITUTION_ID
-    )
+    return any(is_amex(item) for item in session.scalars(select(PlaidItem)))
 
 
 def account_label(account: Account) -> str:
@@ -1017,7 +1005,7 @@ def _manual_account(session: Session) -> Account:
         return existing
     account = Account(
         name=MANUAL_ACCOUNT_NAME,
-        type="credit",
+        type=CARD,
         subtype="credit card",
         iso_currency_code="USD",
     )

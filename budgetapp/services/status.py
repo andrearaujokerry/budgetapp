@@ -23,14 +23,13 @@ from sqlalchemy.orm import Session
 
 from budgetapp import clock
 from budgetapp.models import Account, PlaidItem, SyncRun, get_app_settings
+from budgetapp.services.accounts import CARD, is_card
 
 STALE_AFTER = dt.timedelta(hours=36)
 #: American Express only: a year after the last link or renewal when Plaid sends no date.
 CONSENT_FALLBACK = dt.timedelta(days=365)
 #: Plaid's institution id for American Express (RESEARCH T3.1).
 AMEX_INSTITUTION_ID = "ins_10"
-#: ``accounts.type`` of a credit card (``services.accounts.CARD``).
-CARD_TYPE = "credit"
 #: A ``running`` sync row older than this is shown as not running (it was probably interrupted).
 RUNNING_WINDOW = dt.timedelta(minutes=30)
 
@@ -190,6 +189,14 @@ def is_amex(item: PlaidItem | ItemStatus) -> bool:
     return "american express" in (item.institution_name or "").casefold()
 
 
+def is_amex_card(account: Account) -> bool:
+    """A linked American Express card: a credit account (``services.accounts.is_card``) of an
+    American Express Item (:func:`is_amex`). Amex CSV history goes only there, wherever the app
+    decides it: the CSV import targets and attach offers (MON-3), attaching a CSV-only account
+    (``reconcile.attach_manual_account``) and attaching after linking (BANK-8)."""
+    return account.item is not None and is_card(account) and is_amex(account.item)
+
+
 def consent_due_at(item: PlaidItem) -> dt.datetime | None:
     """When consent must be renewed: Plaid's expiry; for American Express without one,
     ``last_consented_at`` + 365 days; otherwise ``None`` (BANK-6)."""
@@ -307,7 +314,7 @@ def connection_status(session: Session, *, now: dt.datetime | None = None) -> Co
     )
     with_cards = set(
         session.scalars(
-            select(Account.item_id).where(Account.type == CARD_TYPE, Account.item_id.is_not(None))
+            select(Account.item_id).where(Account.type == CARD, Account.item_id.is_not(None))
         )
     )
     labels = connection_labels(session, items)

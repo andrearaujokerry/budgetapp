@@ -80,7 +80,7 @@ from budgetapp.models import (
 )
 from budgetapp.money import to_money
 from budgetapp.services import userstate
-from budgetapp.services.accounts import BANK
+from budgetapp.services.accounts import BANK, is_bank
 from budgetapp.services.userstate import UserState
 from budgetapp.textutil import strip_control_chars
 
@@ -284,7 +284,7 @@ def on_bank_account(txn: TransactionLike) -> bool:
         if session is not None:
             with session.no_autoflush:
                 account = session.get(Account, txn.account_id)
-    return account is not None and account.type == BANK
+    return account is not None and is_bank(account)
 
 
 def is_payment(txn: TransactionLike, *, bank: bool | None = None) -> bool:

@@ -66,6 +66,7 @@ from budgetapp.plaid_gateway import (
     item_status_for,
 )
 from budgetapp.services import alerts, reconcile, statements, userstate
+from budgetapp.services.accounts import CARD, is_card
 from budgetapp.services.background import run_steps
 from budgetapp.services.categorize import Categorizer, apply_carried_state, apply_decision
 from budgetapp.services.events import PendingRaise, SyncOutcome
@@ -106,7 +107,6 @@ _RATE_LIMIT_TYPE = "RATE_LIMIT_EXCEEDED"
 #: ``refresh_liabilities``'s answer for a connection without credit cards (BANK-7): nothing to
 #: ask Plaid, nothing to warn about. Not stored: ``liabilities_status`` stays null.
 NOT_APPLICABLE = "not_applicable"
-CARD_TYPE = "credit"
 _LIABILITIES_STATUS = {
     "ADDITIONAL_CONSENT_REQUIRED": "not_consented",
     "ACCESS_NOT_GRANTED": "not_consented",
@@ -1011,7 +1011,7 @@ def churned_account(
 def reissue_account(account: Account, new_id: str, now: dt.datetime) -> None:
     """Point ``account`` at the id Plaid re-issued it under, and tell the user (``notice``)."""
     account.plaid_account_id = new_id
-    if account.type == CARD_TYPE:
+    if is_card(account):
         what, why, noun = "this card's account", "a card replacement", "card"
     else:
         what, why, noun = "this account", "an account number change", "account"
@@ -1376,7 +1376,7 @@ def refresh_liabilities(
         cards = s.scalar(
             select(func.count())
             .select_from(Account)
-            .where(Account.item_id == item_id, Account.type == CARD_TYPE)
+            .where(Account.item_id == item_id, Account.type == CARD)
         )
     if consented is None:
         return None

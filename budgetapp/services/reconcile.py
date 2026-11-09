@@ -38,7 +38,8 @@ one, so every charge is stored once, and attaches a manual (CSV-only) account to
     it yet); unpaired CSV rows dated on or after it become ``duplicate_status = 'suspect'``
     (excluded from every total by ``v_allocations``), never rows the user marked ``kept``.
 * :func:`attach_manual_account` moves a manual account's history (transactions, imports, rules,
-  statements) onto a linked account, then runs the full pass.
+  statements) onto a linked American Express card (``status.is_amex_card``), then runs the full
+  pass.
 
 For the sync (ARCHITECTURE §8), inside the one apply transaction: call
 ``reconcile_item(session, item_id)`` after the inserts and before the cursor compare-and-set, and
@@ -78,8 +79,9 @@ from budgetapp.models import (
     TransactionTombstone,
 )
 from budgetapp.services import userstate
-from budgetapp.services.accounts import BANK, is_card
+from budgetapp.services.accounts import BANK
 from budgetapp.services.categorize import Categorizer, apply_carried_state
+from budgetapp.services.status import is_amex_card
 
 #: The CSV date may be this many days before Plaid's authorized date (or posting date).
 WINDOW_BEFORE_AUTHORIZED = dt.timedelta(days=3)
@@ -624,8 +626,8 @@ def attach_manual_account(session: Session, manual_id: int, plaid_account_id: in
     target = session.get(Account, plaid_account_id)
     if manual is None or not manual.is_manual:
         raise AttachError("That CSV account no longer exists. Reload the page.")
-    if target is None or target.is_manual or target.item_id is None or not is_card(target):
-        raise AttachError("Choose a card linked through Plaid to attach the CSV history to.")
+    if target is None or not is_amex_card(target):  # Amex CSV history: Amex cards only
+        raise AttachError("Choose a linked American Express card to attach the CSV history to.")
 
     others = select(Transaction.csv_reference).where(
         Transaction.account_id != manual.id, Transaction.csv_reference.is_not(None)
