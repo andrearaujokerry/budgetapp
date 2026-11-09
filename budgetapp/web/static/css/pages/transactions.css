@@ -130,6 +130,11 @@
   flex: 0 1 170px;
 }
 
+/* The Account filter shows an account's name and last digits ("Everyday Checking ··4417"). */
+.txn-more__fields > .txn-more__account {
+  flex-basis: 230px;
+}
+
 .txn-more__check {
   align-self: center;
   margin-top: 18px;

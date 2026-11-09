@@ -23,7 +23,9 @@ from budgetapp.models import AlertEvent, PlaidItem
 from budgetapp.services import alerts, sync
 from budgetapp.services.events import PendingRaise, SyncOutcome
 from budgetapp.services.notify import NotifyResult, RecordingNotifier
+from tests.bank_factories import make_bank_account, make_bank_item
 from tests.factories import (
+    card_payments,
     get_category,
     make_account,
     make_budget,
@@ -443,6 +445,52 @@ def test_only_charges_over_the_amount(db, notifier, item, card, threshold):
     ]
     evaluate(db, notifier, new_charges(item, *rows))
     assert notifier.titles == ["$500.01 at JUST OVER"]
+
+
+def test_only_spending_raises_a_large_charge(db, notifier, threshold):
+    """MON-2 / W3-PLAN C5: on a bank account (and on a card), a row alerts only when its category
+    is spending after categorization: paying the card from checking, moving money to savings and
+    a paycheck never do; rent and an ATM withdrawal do."""
+    bank = make_bank_item(db, last_sync_success_at=NOW - 2 * HOUR, linked_at=NOW - 30 * DAY)
+    checking = make_bank_account(db, bank)
+    rows = [
+        charge(db, checking, "2512.37", category=card_payments(db), name="AMEX EPAYMENT"),
+        charge(db, checking, "800.00", category=get_category(db, "Transfers"), name="TO SAVINGS"),
+        charge(db, checking, "-3412.18", category=get_category(db, "Paycheck"), name="PAYROLL"),
+        charge(
+            db, checking, "2450.00", category=get_category(db, "Home"), merchant_name="Landlord"
+        ),
+        charge(db, checking, "600.00", category=get_category(db, "Cash & ATM"), name="ATM 24TH ST"),
+    ]
+    evaluate(db, notifier, new_charges(bank, *rows))
+    assert notifier.titles == ["$2,450.00 at Landlord", "$600.00 at ATM 24TH ST"]
+    assert {e.item_id for e in db.scalars(select(AlertEvent))} == {bank.id}
+
+
+def test_a_large_charge_in_a_category_that_isnt_spending_never_alerts(
+    db, notifier, item, card, threshold
+):
+    credits = get_category(db, "Credits & Rewards")
+    moved = charge(db, card, "900.00", category=card_payments(db), name="PAYMENT RETURNED")
+    income = charge(db, card, "700.00", category=credits, name="CREDIT REVERSED")
+    spent = charge(db, card, "650.00", merchant_name="Delta")
+    evaluate(db, notifier, new_charges(item, moved, income, spent))
+    assert notifier.titles == ["$650.00 at Delta"]
+    hold = charge(db, card, "640.00", pending=True, category=card_payments(db), name="PAYMENT")
+    evaluate(db, notifier, raised(item, hold, hold.plaid_transaction_id, "300.00"))
+    assert notifier.titles == ["$650.00 at Delta"]
+
+
+def test_the_summary_counts_only_spending(db, notifier, threshold):
+    bank = make_bank_item(db, last_sync_success_at=NOW - 2 * HOUR, linked_at=NOW - 30 * DAY)
+    checking = make_bank_account(db, bank)
+    spent = [charge(db, checking, f"{600 + i}.00", merchant_name=f"Shop {i}") for i in range(3)]
+    moved = [
+        charge(db, checking, "1500.00", category=get_category(db, "Transfers"), name=f"XFER {i}")
+        for i in range(3)
+    ]
+    evaluate(db, notifier, new_charges(bank, *moved, *spent))
+    assert notifier.titles == ["$600.00 at Shop 0", "$601.00 at Shop 1", "$602.00 at Shop 2"]
 
 
 def test_a_pending_charge_says_so(db, notifier, item, card, threshold):

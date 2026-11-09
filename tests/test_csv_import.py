@@ -21,6 +21,7 @@ from budgetapp.db import LEDGER_KEY, LOCK_NS_GLOBAL
 from budgetapp.models import Account, CsvImport, Transaction, v_allocations
 from budgetapp.services import alerts, csv_import, reconcile
 from budgetapp.services.csv_import import ImportRefused
+from tests.bank_factories import make_bank_account, make_bank_item
 from tests.bounded import run_bounded
 from tests.factories import (
     card_payments,
@@ -585,6 +586,50 @@ class TestTargets:
         # Sandbox (or production before linking) still allows CSV-only accounts.
         assert csv_import.preview(db, fixture("activity_2025-08.csv"), "a.csv", manual.id).new == 15
 
+    def test_only_amex_cards_are_targets(self, db):
+        """MON-3: checking, savings and other banks' cards are never offered or accepted."""
+        amex = make_account(db, name="Gold Card", mask="1001")
+        checking = make_bank_account(db)
+        other_bank = make_bank_item(db, institution_id="ins_demo_other", institution_name="Other")
+        other_card = make_account(db, other_bank, name="Cash Rewards", mask="2002")
+        targets = csv_import.import_targets(db)
+        assert [o.value for o in targets.options] == [str(amex.id), "new"]
+        assert targets.default == str(amex.id)
+        for account in (checking, other_card):
+            with pytest.raises(ImportRefused) as info:
+                csv_import.preview(db, fixture("activity_2025-08.csv"), "a.csv", account.id)
+            assert info.value.kind == "account"
+            assert "American Express card" in info.value.message
+
+    def test_without_an_amex_card_the_manual_account_is_the_default(self, db):
+        checking = make_bank_account(db)
+        targets = csv_import.import_targets(db, production=True)
+        assert not targets.linked_only  # a bank Item doesn't block the CSV-only account
+        assert [(o.value, o.linked) for o in targets.options] == [("new", False)]
+        assert targets.default == "new"
+        manual = make_account(db, manual=True)
+        targets = csv_import.import_targets(db, production=True)
+        assert targets.default == str(manual.id)
+        assert str(checking.id) not in [o.value for o in targets.options]
+        preview = csv_import.preview(
+            db, fixture("activity_2025-08.csv"), "a.csv", manual.id, production=True
+        )
+        assert preview.new == 15
+
+    def test_only_an_amex_item_blocks_the_manual_account_in_production(self, db):
+        make_bank_account(db)
+        manual = make_account(db, manual=True)
+        assert not csv_import.linked_only(db, production=True)
+        linked = make_account(db, make_item(db))  # the Amex Item
+        assert csv_import.linked_only(db, production=True)
+        assert not csv_import.linked_only(db, production=False)
+        targets = csv_import.import_targets(db, production=True)
+        assert [o.value for o in targets.options] == [str(linked.id)]
+        with pytest.raises(ImportRefused):
+            csv_import.preview(
+                db, fixture("activity_2025-08.csv"), "a.csv", manual.id, production=True
+            )
+
     @pytest.mark.parametrize("account_id", [999_999, 0, 2**63])  # 2**63 is past BIGINT
     def test_an_unknown_account_is_refused(self, db, account_id):
         with pytest.raises(ImportRefused) as info:
@@ -1085,6 +1130,60 @@ class TestLinkedAccounts:
         assert counted_total(db, account) == Decimal("104.10")
 
 
+class TestBankAccountsOfAnAmexItem:
+    """MON-3 / W3-MONEY review: Link lets a login bring checking or savings accounts too (W3-PLAN
+    BANK-2), and an Amex CSV file holds card charges: a CSV row never pairs with a bank row of the
+    same Item (it would be deleted into a transfer, or a transfer would take its category)."""
+
+    @pytest.fixture
+    def amex(self, db):
+        item = make_item(db)
+        card = make_account(db, item, name="Gold Card", mask="1001")
+        savings = make_bank_account(db, item, subtype="savings", mask="7702")
+        return item, card, savings
+
+    def test_a_csv_charge_never_merges_into_a_bank_row(self, db, amex):
+        item, card, savings = amex
+        transfer = make_transaction(
+            db,
+            savings,
+            amount="500.00",
+            date="2025-10-05",
+            name="TRANSFER TO CHECKING",
+            pfc_primary="TRANSFER_OUT",
+            pfc_detailed="TRANSFER_OUT_ACCOUNT_TRANSFER",
+        )
+        data = amex_csv(amex_row("2025-10-04", "APPLE STORE", "500.00"))
+        preview, outcome = run_import(db, data, card)
+        assert (preview.new, preview.matched) == (1, 0)
+        assert (outcome.inserted_count, outcome.matched_plaid_count) == (1, 0)
+        assert reconcile.reconcile_item(db, item.id).pairs == ()
+        assert [(t.name, t.account_id) for t in csv_rows(db)] == [("APPLE STORE", card.id)]
+        db.refresh(transfer)
+        assert transfer.csv_reference is None
+        # the card's own Plaid row of the same charge still pairs
+        charge = make_transaction(
+            db, card, amount="500.00", date="2025-10-05", authorized_date="2025-10-04"
+        )
+        (pair,) = reconcile.reconcile_item(db, item.id).pairs
+        assert pair[1] == charge.id and csv_rows(db) == []
+        db.refresh(transfer)
+        assert transfer.csv_reference is None
+
+    def test_a_pending_bank_row_is_never_a_held_rows_twin(self, db, amex):
+        item, card, savings = amex
+        item.history_complete_at = clock.now()
+        make_transaction(db, card, amount="40.00", date="2025-10-01", authorized_date="2025-09-30")
+        make_transaction(
+            db, savings, amount="64.10", date="2025-10-20", pending=True, name="TRANSFER OUT"
+        )
+        data = amex_csv(amex_row("2025-10-19", "SAFEWAY #1490", "64.10"))
+        preview, _ = run_import(db, data, card)
+        assert (preview.suspects, preview.suspects_pending, preview.matched) == (1, 0, 0)
+        (held,) = csv_import.list_suspects(db)
+        assert held.name == "SAFEWAY #1490" and not held.pending
+
+
 # --------------------------------------------------------------------------- review, history
 
 
@@ -1158,6 +1257,24 @@ class TestReview:
         assert (offer.manual_id, offer.transaction_count) == (manual.id, 1)
         assert offer.targets == ((linked.id, "Gold Card ··1001"),)
         assert offer.default_target == linked.id
+
+    def test_attach_offers_only_amex_cards(self, db):
+        manual = make_account(db, manual=True)
+        make_transaction(db, manual, source="csv")
+        make_bank_account(db)
+        assert csv_import.attach_offers(db) == []  # a checking account is no target
+        amex = make_account(db, name="Gold Card", mask="1001")
+        (offer,) = csv_import.attach_offers(db)
+        assert offer.targets == ((amex.id, "Gold Card ··1001"),)
+        assert offer.default_target == amex.id
+
+    def test_csv_history_never_moves_onto_a_bank_account(self, db):
+        manual = make_account(db, manual=True)
+        row = make_transaction(db, manual, source="csv")
+        checking = make_bank_account(db)
+        with pytest.raises(reconcile.AttachError):
+            reconcile.attach_manual_account(db, manual.id, checking.id)
+        assert row.account_id == manual.id
 
     def test_reference_dates_compare_paired_rows(self, db):
         account = make_account(db)

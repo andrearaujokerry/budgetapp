@@ -24,7 +24,9 @@ without a duplicate. :func:`clear_alert` deletes an event so it can fire again.
   - ALR-1: :func:`evaluate_budgets` after every successful run (so budget and setting edits are
     picked up by the next sync too).
   - ALR-3, when ``large_charge_threshold`` is set: Plaid rows in
-    ``outcome.inserted_transaction_ids`` (new charges only) for more than the threshold, dated at
+    ``outcome.inserted_transaction_ids`` (new charges only) for more than the threshold in a
+    spending (``expense``) category after categorization, on any account (a card payment from
+    checking, a transfer or a paycheck never alerts; W3-PLAN C5), dated at
     most 7 days before the previous successful sync, never on an initial history load; once per
     charge (``large-charge:<pending id the row names, else its own Plaid id>``), so a posting never
     alerts again. A pending charge at or under the threshold that this sync stored above it
@@ -534,13 +536,15 @@ def _large_charges(
     outcome: SyncOutcome,
     today: dt.date,
 ) -> list[AlertResult]:
-    """ALR-3: charges over ``large_charge_threshold``, once per charge.
+    """ALR-3: charges over ``large_charge_threshold``, once per charge; spending only.
 
     New charges (``outcome.inserted_transaction_ids``), plus pending charges the app had at or
     under the threshold that this sync stored above it (``outcome.pending_raises``: a tip or
     hotel incidentals added at posting), dated at most :data:`LARGE_CHARGE_DAYS` days before the
     previous successful sync. Both are keyed by the pending row's Plaid id when there is one, so
-    a charge that already alerted while pending stays silent when it posts.
+    a charge that already alerted while pending stays silent when it posts. Only spending counts
+    (W3-PLAN C5): a row whose category is of kind ``expense`` after categorization, on any
+    account; paying the card from checking, moving money to savings and income never alert.
     """
     threshold = settings.large_charge_threshold
     if threshold is None or outcome.initial_history_load:
@@ -561,6 +565,7 @@ def _large_charges(
                 Transaction.source == "plaid",
                 Transaction.amount > threshold,
                 Transaction.date >= since,
+                Transaction.category.has(kind="expense"),  # spending only (C5)
             )
             .order_by(Transaction.date, Transaction.id)
         )

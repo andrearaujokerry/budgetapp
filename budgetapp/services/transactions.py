@@ -16,6 +16,10 @@
   per field; a missing row raises :class:`TransactionNotFound`.
 * :func:`export_csv` streams the filtered rows as CSV (TXN-5) with spreadsheet formulas
   neutralised.
+* Accounts (W3-PLAN MON-4): the filter lists every account, cards and bank accounts, named by
+  :func:`account_label` (institution, name and last digits), and so do the details and the
+  export. A row in a ``transfer`` category is a card payment (Card Payments) or a transfer
+  between your own accounts: muted, never spending, never split.
 """
 
 from __future__ import annotations
@@ -58,6 +62,7 @@ from budgetapp.models import (
 )
 from budgetapp.money import ZERO, format_money, is_cents, parse_money_input, to_money
 from budgetapp.services import budgets, categorize, spending, userstate
+from budgetapp.services.accounts import is_bank
 from budgetapp.services.rules import next_priority
 from budgetapp.textutil import strip_control_chars as clean_text
 
@@ -437,9 +442,49 @@ def load_categories(session: Session) -> dict[int, CategoryRef]:
 
 @dataclass(frozen=True, slots=True)
 class AccountRef:
+    """An account as the Account filter lists it (MON-4)."""
+
     id: int
+    #: The account's name and last digits (``Account.display_name``): ``Everyday Checking ··4417``.
     name: str
     is_manual: bool
+    is_bank: bool = False
+    #: The institution of a linked account (``None`` for a manual, CSV-only account).
+    institution: str | None = None
+
+    @property
+    def label(self) -> str:
+        """:func:`account_label`: ``Harbor Bank · Everyday Checking ··4417``."""
+        return f"{self.institution} · {self.name}" if self.institution else self.name
+
+    @property
+    def group(self) -> str:
+        """The filter's option group: the institution, or the CSV-only accounts."""
+        if self.is_manual:
+            return CSV_ACCOUNTS_GROUP
+        return self.institution or OTHER_ACCOUNTS_GROUP
+
+
+@dataclass(frozen=True, slots=True)
+class AccountGroup:
+    """The accounts of one institution in the Account filter (an ``<optgroup>``)."""
+
+    label: str
+    accounts: tuple[AccountRef, ...]
+
+
+CSV_ACCOUNTS_GROUP = "From CSV files"
+OTHER_ACCOUNTS_GROUP = "Other accounts"
+
+
+def account_label(account: Account) -> str:
+    """How pages name an account: ``Harbor Bank · Everyday Checking ··4417``,
+    ``American Express · Blue Cash Preferred® ··3005``; a manual (CSV-only) account, or one whose
+    institution is unknown, by its own name."""
+    institution = account.item.institution_name if account.item is not None else None
+    if account.is_manual or not institution:
+        return account.display_name
+    return f"{institution} · {account.display_name}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -452,6 +497,14 @@ class FilterOptions:
     tags: tuple[str, ...]
     merchants: tuple[str, ...]
     period_label: str
+
+    @property
+    def account_groups(self) -> tuple[AccountGroup, ...]:
+        """The accounts by institution, in their order (MON-4: institution, name and mask)."""
+        groups: dict[str, list[AccountRef]] = {}
+        for account in self.accounts:
+            groups.setdefault(account.group, []).append(account)
+        return tuple(AccountGroup(label, tuple(refs)) for label, refs in groups.items())
 
 
 def all_tags(session: Session) -> list[str]:
@@ -467,11 +520,21 @@ def all_tags(session: Session) -> list[str]:
 
 
 def filter_options(session: Session, *, today: dt.date | None = None) -> FilterOptions:
-    """Categories, accounts, card members, tags and merchants for the filter bar."""
+    """Categories, accounts, card members, tags and merchants for the filter bar.
+
+    Accounts: linked ones by connection (in the order they were linked), then manual ones."""
     categories = tuple(load_categories(session).values())
     accounts = tuple(
-        AccountRef(a.id, a.display_name, a.is_manual)
-        for a in session.scalars(select(Account).order_by(Account.id))
+        AccountRef(
+            a.id,
+            a.display_name,
+            a.is_manual,
+            is_bank(a),
+            None if a.is_manual or a.item is None else a.item.institution_name,
+        )
+        for a in session.scalars(
+            select(Account).order_by(Account.item_id.is_(None), Account.item_id, Account.id)
+        )
     )
     members = tuple(
         session.scalars(
@@ -825,8 +888,15 @@ class TransactionRow:
 
     @property
     def is_payment(self) -> bool:
-        """In a card-payment (transfer) category: muted, never spending (TXN-3)."""
+        """In a card-payment or transfer category (kind ``transfer``): muted, never spending
+        (TXN-3), never split."""
         return self.category.kind == "transfer"
+
+    @property
+    def transfer_label(self) -> str:
+        """The badge of a row in a ``transfer`` category: a card payment, else a transfer
+        between your own accounts (MON-1)."""
+        return "Payment" if self.category.is_card_payments else "Transfer"
 
     @property
     def is_credit(self) -> bool:
@@ -1326,12 +1396,17 @@ def validate_splits(
         raise TransactionEditError({"parts": "A $0.00 transaction can't be split."})
     own_category = session.get(Category, txn.category_id)
     if own_category is not None and own_category.kind == "transfer":
-        raise TransactionEditError(
-            {
-                "parts": "A card payment can't be split. If this isn't a card payment, "
+        if own_category.system_key == "card_payments":
+            message = (
+                "A card payment can't be split. If this isn't a card payment, change its "
+                "category first."
+            )
+        else:
+            message = (
+                "A transfer between your accounts can't be split. If this isn't a transfer, "
                 "change its category first."
-            }
-        )
+            )
+        raise TransactionEditError({"parts": message})
     if len(parts) < 2:
         raise TransactionEditError({"parts": "Split it into at least two parts."})
     if len(parts) > MAX_SPLIT_PARTS:
@@ -1465,7 +1540,8 @@ class RuleDraft:
     priority: int
     #: The rule the new one is placed before (it matched this transaction first), if any.
     runs_before: str | None
-    #: Card payments are fixed (step 0); a rule never changes them.
+    #: Card payments are fixed (step 0 on a card; rules skip one from a bank account): a rule
+    #: never changes them.
     is_payment: bool
 
 
@@ -1502,7 +1578,9 @@ def one_click_draft(session: Session, transaction_id: int) -> RuleDraft:
         category_id=None if txn.category_id == uncategorized else txn.category_id,
         priority=priority,
         runs_before=runs_before,
-        is_payment=txn.category_source == "system" or categorize.is_payment(txn),
+        is_payment=txn.category_source == "system"
+        or categorize.is_payment(txn)
+        or categorize.is_bank_card_payment(txn),
     )
 
 
@@ -1591,7 +1669,7 @@ def preview_one_click_rule(
             user_edited += 1
             continue
         decision = categorizer.decide(row)
-        if decision.source == "system":
+        if decision.source == "system" or categorizer.card_payment_from_bank(row):
             payments += 1
         if decision.category_id != row.category_id:
             will_change += 1
@@ -1705,6 +1783,7 @@ class TransactionDetail:
     """Every stored field of a transaction, plus where its category and edits came from."""
 
     row: TransactionRow
+    #: :func:`account_label` (MON-4).
     account_name: str
     account_is_manual: bool
     plaid_transaction_id: str | None
@@ -1795,7 +1874,7 @@ def detail(session: Session, transaction_id: int) -> TransactionDetail:
     )
     return TransactionDetail(
         row=row,
-        account_name=account.display_name if account else "Unknown account",
+        account_name=account_label(account) if account else "Unknown account",
         account_is_manual=bool(account and account.is_manual),
         plaid_transaction_id=txn.plaid_transaction_id,
         pending_transaction_id=txn.pending_transaction_id,
@@ -1874,7 +1953,7 @@ def export_csv(
     today = today or clock.today()
     conditions = filter_conditions(session, filt, today=today)
     categories = load_categories(session)
-    accounts = {a.id: a.display_name for a in session.scalars(select(Account))}
+    accounts = {a.id: account_label(a) for a in session.scalars(select(Account))}
     splits: dict[int, list[tuple[int, Decimal]]] = {}
     for r in session.execute(
         select(

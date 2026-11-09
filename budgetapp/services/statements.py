@@ -16,6 +16,9 @@ anything else that shows a statement total call :func:`summary` or :func:`overvi
   date of the Amex (Liabilities) statement next to it, within 10 days, combines the two (the
   values typed win). A statement the user added can be removed. The open period's estimated
   date is never saved: its statement doesn't exist yet.
+* **Cards only.** Statements belong to credit-card accounts (Plaid ``type = "credit"``, linked or
+  the manual CSV account; ``services/accounts.py``). Checking and savings accounts have none: they
+  are never listed, and asking for their cycles is an unknown account (W3-PLAN MON-3).
 * **Status.** ``open`` until the closing date has passed, ``settling`` for
   ``app_settings.statement_settle_days`` after it, then ``final``.
 * **Buckets, by sign first.** Negative: ``payments`` (Card Payments category or
@@ -50,6 +53,7 @@ from sqlalchemy.orm import Session
 from budgetapp import clock, periods
 from budgetapp.models import Account, Category, Statement, Transaction, get_app_settings
 from budgetapp.money import ZERO, parse_money_input, to_money
+from budgetapp.services.accounts import card_accounts, is_card
 
 # --------------------------------------------------------------------------- constants
 
@@ -438,9 +442,11 @@ class StatementDetail:
 
 
 def accounts(session: Session) -> list[AccountOption]:
-    """Every card, linked first, then manual (CSV) ones; hidden cards last."""
+    """Every card, linked first, then manual (CSV) ones; hidden cards last. Bank accounts have
+    no statements, so they are never listed."""
     rows = sorted(
-        session.scalars(select(Account)), key=lambda a: (a.is_hidden, a.item_id is None, a.id)
+        card_accounts(session, include_hidden=True),
+        key=lambda a: (a.is_hidden, a.item_id is None, a.id),
     )
     return [_option(a) for a in rows]
 
@@ -468,9 +474,10 @@ def default_account(session: Session, options: Sequence[AccountOption]) -> Accou
 
 
 def _account(session: Session, account_id: int) -> Account:
+    """The card ``account_id``; ``LookupError`` for an unknown account or a bank account."""
     account = session.get(Account, account_id)
-    if account is None:
-        raise LookupError(f"no account {account_id}")
+    if account is None or not is_card(account):
+        raise LookupError(f"no card account {account_id}")
     return account
 
 
@@ -972,7 +979,7 @@ def detail(
     """The cycle page's data, or ``None`` when no cycle of the account closes that day."""
     today = today or clock.today()
     account = session.get(Account, account_id)
-    if account is None:
+    if account is None or not is_card(account):
         return None
     every = cycles(session, account_id, today=today)
     index = next((i for i, c in enumerate(every) if c.closing_date == closing_date), None)

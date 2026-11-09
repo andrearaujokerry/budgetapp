@@ -16,6 +16,7 @@ from sqlalchemy import select, text
 from budgetapp.models import Rule, Transaction
 from budgetapp.services import alerts, userstate
 from budgetapp.services import transactions as txns
+from tests.bank_factories import make_bank_account
 from tests.factories import (
     card_payments,
     get_category,
@@ -278,7 +279,7 @@ class TestListPage:
         html = client.get("/transactions?member=SAM+RIVERA&tag=Work&account=987654").text
         assert re.search(r'<option value="SAM RIVERA" selected>', html)
         assert re.search(r'<option value="Work" selected>', html)
-        assert re.search(r'<option value="987654" selected>A card that is no longer here', html)
+        assert re.search(r'<option value="987654" selected>An account that is no longer here', html)
         assert "No matches" in html
 
     def test_a_tag_filter_selects_the_stored_spelling(self, client, db, card):
@@ -1037,6 +1038,76 @@ class TestDetails:
         assert response.url.path == f"/transactions/{txn.id}" and "Marked as reviewed." in toasts(
             response.text
         )
+
+
+class TestAccounts:
+    """W3-PLAN MON-4: the "Account" filter and the account in the details."""
+
+    @pytest.fixture
+    def checking(self, db):
+        return make_bank_account(db, mask="4417")
+
+    def test_the_account_filter_lists_cards_and_bank_accounts(self, client, db, card, checking):
+        make_transaction(db, card, name="CARD CHARGE")
+        rent = make_transaction(db, checking, amount="2450.00", name="BAYVIEW RENT")
+        html = client.get("/transactions").text
+        select = html[
+            html.index('id="f-account"') : html.index("</select>", html.index('id="f-account"'))
+        ]
+        assert '<option value="">All accounts</option>' in select
+        assert (
+            f'<optgroup label="American Express"><option value="{card.id}">Platinum Card '
+            f"··{card.mask}</option></optgroup>"
+        ) in select
+        assert (
+            f'<optgroup label="Harbor Bank"><option value="{checking.id}">Everyday Checking ··4417'
+            "</option></optgroup>"
+        ) in select
+        assert re.search(r'<label class="field__label" for="f-account">Account</label>', html)
+        assert "All cards" not in html
+        filtered = client.get(f"/transactions?account={checking.id}", headers=HTMX | FILTERS)
+        assert row_ids(filtered.text) == [rent.id]
+        assert re.search(
+            rf'<option value="{checking.id}" selected>',
+            client.get(f"/transactions?account={checking.id}").text,
+        )
+        clean(filtered)
+
+    def test_the_details_name_the_account(self, client, db, checking):
+        txn = make_transaction(
+            db,
+            checking,
+            amount="-3412.18",
+            name="ACME ROBOTICS PAYROLL",
+            category=get_category(db, "Paycheck"),
+            category_source="plaid",
+            pfc_primary="INCOME",
+            pfc_detailed="INCOME_SALARY",
+        )
+        html = client.get(f"/transactions/{txn.id}").text
+        assert re.search(
+            r"<dt>Account</dt>\s*<dd>Harbor Bank · Everyday Checking ··4417</dd>", html
+        ), html[html.index("Account") - 200 : html.index("Account") + 200]
+        assert "Income or a credit, not spending" in html
+        assert "<dt>Card</dt>" not in html
+
+    def test_a_transfer_says_transfer_and_a_card_payment_says_payment(self, client, db, checking):
+        transfer = make_transaction(
+            db, checking, amount="500.00", name="TO SAVINGS", category=get_category(db, "Transfers")
+        )
+        payment = make_transaction(
+            db, checking, amount="900.00", name="AMEX EPAYMENT", category=card_payments(db)
+        )
+        html = client.get("/transactions").text
+
+        def row(t) -> str:
+            start = html.index(f'id="txn-{t.id}"')
+            return html[start : html.index("</tr>", start)]
+
+        assert "is-muted" in row(transfer) and ">Transfer<" in row(transfer)
+        assert ">Payment<" in row(payment)
+        detail = client.get(f"/transactions/{transfer.id}").text
+        assert "A transfer between your accounts, not spending or income" in detail
 
 
 # --------------------------------------------------------------------------- export

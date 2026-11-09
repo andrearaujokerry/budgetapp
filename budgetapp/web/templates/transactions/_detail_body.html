@@ -10,7 +10,7 @@
 {%- if t.subtitle %}<p class="txn-detail__sub">{{ t.subtitle }}</p>{% endif %}
 <p class="txn-detail__badges">
 {%- if t.pending %}{{ ui.badge('Pending', icon='clock') }}{% endif %}
-{%- if t.is_payment %}{{ ui.badge('Payment', tone='muted') }}{% elif t.is_refund %}{{ ui.badge('Refund', tone='ok') }}{% endif %}
+{%- if t.is_payment %}{{ ui.badge(t.transfer_label, tone='muted') }}{% elif t.is_refund %}{{ ui.badge('Refund', tone='ok') }}{% endif %}
 {%- if t.is_split %}{{ ui.badge('Split', tone='info', icon='split') }}{% elif t.splits_mismatch %}{{ ui.badge("Split doesn't add up", tone='warn', icon='alert') }}{% endif %}
 {%- if t.needs_review %}{{ ui.badge('Needs review', tone='warn', icon='alert') }}{% endif %}
 {%- if t.is_duplicate %}{{ ui.badge('Possible duplicate', tone='warn') }}{% endif %}
@@ -50,7 +50,7 @@ Card payment (always Card Payments; rules don't change it)
 Automatic: no rule or category mapping matched
 {%- endif -%}
 {%- endset -%}
-{%- set counts_as = {'expense': 'Spending' ~ (' (a credit here lowers ' ~ t.category.name ~ ' spending)' if t.amount < 0 and not t.is_split else ''), 'income': 'A credit, not spending', 'transfer': 'A card payment, not spending'}.get(t.category.kind, t.category.kind) -%}
+{%- set counts_as = {'expense': 'Spending' ~ (' (a credit here lowers ' ~ t.category.name ~ ' spending)' if t.amount < 0 and not t.is_split else ''), 'income': 'Income or a credit, not spending', 'transfer': 'A card payment, not spending' if t.category.is_card_payments else 'A transfer between your accounts, not spending or income'}.get(t.category.kind, t.category.kind) -%}
 {%- set made_here -%}{% for r in d.rules_made_here %}<a href="/rules">“{{ r.label }}”</a>{{ ', ' if not loop.last }}{% endfor %}{%- endset -%}
 <section class="txn-detail__section">
 <{{ h }} class="txn-detail__heading">Category</{{ h }}>
@@ -107,7 +107,7 @@ A pending charge Plaid sent earlier
   ('On the statement as', t.original_description),
   ('Amount', amount_value),
   ('Currency', d.iso_currency_code),
-  ('Card', d.account_name ~ (' (from CSV files only)' if d.account_is_manual else '')),
+  ('Account', d.account_name ~ (' (from CSV files only)' if d.account_is_manual else '')),
   ('Card member', t.account_owner),
   ('Plaid category', pfc_value),
   ('Amex category', d.external_category),

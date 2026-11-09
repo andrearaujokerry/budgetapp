@@ -21,7 +21,8 @@ test-environment settings. It never touches the Sandbox or production databases,
   Plaid after the last sync: made at 10 am, a demo has none of today's coffee or lunch yet (they
   arrive with the 12:15 sync). With `--today` the day is complete up to its 18:15 sync.
 * The summary `create` prints shows this month's spending per category against the money
-  available, rollover included ("of $307.53 (incl. $187.53 rolled over)").
+  available, rollover included ("of $307.53 (incl. $187.53 rolled over)"), then the month's
+  income (per income category), spending and net (income − spending).
 * `--env production` is refused. Feature agents: use your package's port (PLAN.md §0) and drop
   your demo when you are done.
 * `serve --demo` uses `DemoPlaidGateway`. Every Plaid call raises `PlaidError` with the message
@@ -42,8 +43,9 @@ test-environment settings. It never touches the Sandbox or production databases,
 | `demo_gateway.DemoPlaidGateway()` | the no-network `PlaidGateway` |
 
 `demo_plan.build_plan(seed, today, now)` builds everything in memory, with no database. It is
-deterministic. `demo_writer.write_plan(session, plan)` stores a plan through the models and the
-real `Categorizer`. `demo_catalog` holds the persona's merchants, budgets and rules.
+deterministic. `demo_bank.BankPlanner` plans Harbor Bank next to the card, with its own random
+stream. `demo_writer.write_plan(session, plan)` stores a plan through the models and the
+real `Categorizer`. `demo_catalog` holds the persona's merchants, bank, budgets and rules.
 
 ## What is in a demo
 
@@ -60,8 +62,32 @@ card).
   - `consent_expires_at` is 25 days out, inside the 30-day reminder, so the consent banner shows.
   - History is complete; there is a saved cursor and an `item_snapshot`.
 
-**About 2,500 transactions over 24 months.**
-- Spending spreads across every default category plus one custom category, **Pets** (`#9f1239`).
+**Harbor Bank** (W3-PLAN MON-5; made up, no real institution). A second Plaid Item,
+`ins_demo_harbor`, linked at T−45 days with 730 days of history, so its rows cover the whole demo:
+**Everyday Checking** ··4417 and **High Yield Savings** ··7702 (`type = 'depository'`). Healthy,
+`consented_products` `transactions` only, no Liabilities, no consent expiry; it syncs right after
+the card in every slot and never fails.
+- A paycheck every other Friday from ACME ROBOTICS (`INCOME_SALARY`, negative: money in), with a
+  raise 5 months ago → Paycheck.
+- Rent on the 1st (Bayview Property Management, $2,395 → $2,450 at the lease renewal 7 months
+  ago; the persona's "Rent" rule puts it in the custom **Rent** category) and the SFPUC water
+  bill around the 20th (Utilities & Bills) from checking; ACH rows land on business days.
+- Debit-card groceries (the Saturday farmers market, Rainbow Grocery now and then; never on a trip
+  day), the last one still pending, and one or two ATM withdrawals a month
+  (`TRANSFER_OUT_WITHDRAWAL` → Cash & ATM).
+- $1,500 to savings on the 2nd: a positive `TRANSFER_OUT_SAVINGS` row on checking and a negative
+  `TRANSFER_IN_SAVINGS` row on savings, both Transfers.
+- Savings interest on the last day of each month (`INCOME_INTEREST_EARNED` → Interest) and a tax
+  refund every April 18 (`INCOME_TAX_REFUND` → Other Income).
+- Every Amex payment (AUTOPAY and the one mobile payment) is mirrored on checking the same day by
+  a positive `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` row → Card Payments through the bank mapping.
+- `transaction_code` is empty on bank rows (most US banks send none); ACH rows have no merchant.
+  Checking never drops below $1,500 (the opening balance is chosen so); the balances are the
+  opening balance minus every posted row, and available leaves out the pending purchase.
+
+**About 2,800 transactions over 24 months** (about 300 of them on Harbor Bank).
+- Spending spreads across every default category plus two custom categories, **Pets**
+  (`#9f1239`) and **Rent** (`cat-15`, from checking).
 - Daily habits: coffee, lunch, dinners, delivery, groceries, rides, bike share, parking and
   Amazon.
 - Monthly bills, charged overnight: gym on the 1st, Spotify, Comcast, Chewy, ChatGPT, KQED,
@@ -110,12 +136,13 @@ card).
 - Uncategorized rows include a few recent pop-up stalls that have no PFC.
 - Refunds are categorized last, so the refund rule sees their merchant's purchases. One REI
   return that Plaid labels `TRANSFER_IN` lands in Shopping as `default`.
-- Rules (7):
+- Rules (8):
   - small Apple charges and streaming/news → Subscriptions;
   - Costco → Groceries (a one-click rule with `source_transaction_id`);
   - pet stores and the vet → Pets;
   - gym → Health & Fitness;
   - PG&E → Utilities;
+  - the landlord (checking) → Rent: rules come first on bank accounts too;
   - one inactive rule.
 
 **User edits.**
@@ -177,21 +204,25 @@ card).
   still settling.
 
 **Budgets** (calendar mode; `budget_cycle_account_id` is the card, so statement mode works too).
-- Monthly budgets for 11 categories and an overall target of $3,800. Rows are versioned from
-  the link month, for example Groceries $650 → $700 and Dining & Drinks $700 → $650.
+- Monthly budgets for 11 categories and an overall target of $7,000 ($6,600 until four months
+  ago) that counts checking's spending too, rent included. Rows are versioned from the link
+  month, for example Groceries $650 → $700 and Dining & Drinks $700 → $650. Utilities & Bills
+  ($450) includes the water bill from checking.
 - Personal Care has rollover from 5 months ago.
 - Travel ($6,000) and Gifts & Donations ($800) are annual budgets from Jan 1. Each has an
   amount-NULL monthly row from the same date, as ARCHITECTURE §5 requires; Travel had a monthly
   budget before that.
-- On any day of the month:
+- On any day of the month, counting the card and checking (the card's ordinary purchases are
+  thinned out around checking's, which stay):
   - **Health & Fitness is at 85%** (the $255 gym bill on the 1st against $300);
   - **Entertainment is over budget** (concert tickets);
-  - every other budgeted category is at or under 75%.
+  - every other budgeted category is at or under 75%, and the overall target under 80%.
 
 **Sync runs, alerts and other rows.**
-- `sync_runs`: every 6 hours at 00:15/06:15/12:15/18:15 for the last 4 days, plus one manual run.
-  All succeeded except one transient `INSTITUTION_NOT_RESPONDING` failure 2 days ago. The counts
-  are computed from when rows arrived.
+- `sync_runs`: every 6 hours at 00:15/06:15/12:15/18:15 for the last 4 days, plus one manual run,
+  for each Item. The card's all succeeded except one transient `INSTITUTION_NOT_RESPONDING`
+  failure 2 days ago; Harbor Bank's all succeeded. The counts are computed from when rows
+  arrived.
 - `alert_events` holds:
   - the consent reminder;
   - that sync failure;
@@ -207,6 +238,9 @@ card).
 `tests/test_demo.py` builds a scratch demo database (`budgetapp_test_demo_t<pid>`) for a fixed
 seed and date and drops it afterwards. Its checks:
 - determinism and recreation;
+- Harbor Bank: the Item and accounts, every bank row in its bank category (C3), paychecks every
+  other Friday, transfers that balance, checking's spending in the budgets, the summary's income,
+  spending and net (C4), nothing stored before it reached Plaid, checking never running dry;
 - realism: no in-person charge at home on a trip day, varied trip meals, holiday and seasonal
   patterns, nothing stored before the sync that brought it, the rollover in the summary;
 - the Plaid conventions;

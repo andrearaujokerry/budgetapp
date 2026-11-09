@@ -12,7 +12,7 @@
 <span class="txn-desc__line">
 <a class="txn-desc__title" href="/transactions/{{ t.id }}" hx-get="/transactions/{{ t.id }}" hx-target="#txn-dialog" title="{{ t.title }}">{{ t.title }}</a>
 {%- if t.pending %}{{ ui.badge('Pending', icon='clock') }}{% endif %}
-{%- if t.is_payment %}{{ ui.badge('Payment', tone='muted') }}{% elif t.is_refund %}{{ ui.badge('Refund', tone='ok') }}{% endif %}
+{%- if t.is_payment %}{{ ui.badge(t.transfer_label, tone='muted') }}{% elif t.is_refund %}{{ ui.badge('Refund', tone='ok') }}{% endif %}
 {%- if t.is_split %}{{ ui.badge('Split', tone='info', icon='split') }}{% elif t.splits_mismatch %}{{ ui.badge("Split doesn't add up", tone='warn', icon='alert') }}{% endif %}
 {%- if t.needs_review %}{{ ui.badge('Needs review', tone='warn', icon='alert') }}{% endif %}
 {%- if t.is_duplicate %}{{ ui.badge('Possible duplicate', tone='warn') }}{% endif %}
