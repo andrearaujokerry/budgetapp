@@ -77,6 +77,7 @@ from budgetapp.models import (
     TransactionTombstone,
 )
 from budgetapp.services import userstate
+from budgetapp.services.accounts import is_card
 from budgetapp.services.categorize import Categorizer, apply_carried_state
 
 #: The CSV date may be this many days before Plaid's authorized date (or posting date).
@@ -612,7 +613,7 @@ def attach_manual_account(session: Session, manual_id: int, plaid_account_id: in
     target = session.get(Account, plaid_account_id)
     if manual is None or not manual.is_manual:
         raise AttachError("That CSV account no longer exists. Reload the page.")
-    if target is None or target.is_manual or target.item_id is None:
+    if target is None or target.is_manual or target.item_id is None or not is_card(target):
         raise AttachError("Choose a card linked through Plaid to attach the CSV history to.")
 
     others = select(Transaction.csv_reference).where(

@@ -14,6 +14,7 @@ from budgetapp import secrets as app_secrets
 from budgetapp.config import load_settings
 from budgetapp.models import Account, get_app_settings
 from budgetapp.services import agents, app_settings
+from tests.bank_factories import make_bank_account
 from tests.factories import make_account, make_item, make_statement, set_app_settings
 from tests.web.conftest import HTMX
 from tests.web.csp import csp_problems
@@ -132,6 +133,31 @@ class TestPage:
         set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=hidden.id)
         labels = [c.label for c in client.get("/settings").context["view"].cards]
         assert labels == ["Blue Cash Preferred ··3005", "Old card ··0001"]
+
+    def test_bank_accounts_never_set_the_periods(self, client, db, card):
+        """MON-3: only credit accounts are listed for the cycle and the closing days."""
+        checking = make_bank_account(db, name="Everyday Checking", mask="4417")
+        savings = make_bank_account(db, checking.item, subtype="savings", mask="7702")
+        response = client.get("/settings")
+        assert [c.id for c in response.context["view"].cards] == [card.id]
+        html = settings_form(response.text)
+        for account in (checking, savings):
+            assert f'value="{account.id}"' not in html and f"closing_day_{account.id}" not in html
+        assert "Everyday Checking" not in html
+        data = form(budget_period_mode="statement", budget_cycle_account_id=str(checking.id))
+        data[f"closing_day_{checking.id}"] = "12"
+        refused = client.post("/settings", data=data)
+        assert refused.status_code == 422
+        assert refused.context["errors"]["budget_cycle_account_id"] == (
+            "Choose a card from the list."
+        )
+        assert stored(db).budget_cycle_account_id is None
+        assert db.get(Account, checking.id).statement_closing_day is None
+
+    def test_with_only_a_bank_linked_there_are_no_cards_yet(self, client, db):
+        make_bank_account(db)
+        response = client.get("/settings")
+        assert response.context["view"].cards == () and "No cards yet." in response.text
 
 
 class TestAbout:

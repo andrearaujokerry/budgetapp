@@ -10,6 +10,7 @@ from sqlalchemy import select, text
 
 from budgetapp.models import Statement
 from budgetapp.services import statements as st
+from tests.bank_factories import make_bank_account
 from tests.factories import (
     card_payments,
     get_category,
@@ -1088,6 +1089,31 @@ class TestAccounts:
         set_app_settings(db, budget_cycle_account_id=manual.id)
         assert st.default_account(db, options).id == manual.id
         assert st.default_account(db, []) is None
+
+    def test_bank_accounts_have_no_statements(self, db, today, card):
+        """MON-3: checking and savings are never listed, and their cycles are unknown."""
+        checking = make_bank_account(db, statement_closing_day=27)
+        savings = make_bank_account(db, checking.item, subtype="savings")
+        make_transaction(db, checking, amount="40.00", date=D(2026, 10, 3))
+        assert [o.id for o in st.accounts(db)] == [card.id]
+        set_app_settings(db, budget_cycle_account_id=checking.id)
+        assert st.default_account(db, st.accounts(db)).id == card.id
+        for account in (checking, savings):
+            for call in (
+                lambda a=account: st.cycles(db, a.id),
+                lambda a=account: st.cycle_inputs(db, a.id),
+                lambda a=account: st.add_statement(db, a.id, "2026-09-27"),
+                lambda a=account: st.save_statement(db, a.id, D(2026, 9, 27), {}),
+                lambda a=account: st.find_cycle(db, a.id, D(2026, 9, 27)),
+            ):
+                with pytest.raises(LookupError):
+                    call()
+            assert st.detail(db, account.id, D(2026, 9, 27)) is None
+        assert db.scalar(select(Statement.id).where(Statement.account_id == checking.id)) is None
+
+    def test_only_bank_accounts_means_no_statements(self, db):
+        make_bank_account(db)
+        assert st.accounts(db) == [] and st.default_account(db, []) is None
 
     def test_detail_bundles_the_page(self, db, today, card):
         make_statement(db, card, "2026-08-27")

@@ -26,6 +26,7 @@ from budgetapp import __version__, secrets
 from budgetapp.config import Settings
 from budgetapp.models import Account, Statement, get_app_settings
 from budgetapp.money import parse_money_input
+from budgetapp.services.accounts import CARD
 
 PERIOD_MODES = (("calendar", "Calendar month"), ("statement", "Statement cycle"))
 THRESHOLD_MIN, THRESHOLD_MAX, THRESHOLDS_MAX_COUNT = 1, 200, 5
@@ -44,7 +45,7 @@ class SettingsInvalid(Exception):
 
 @dataclass(frozen=True, slots=True)
 class CardOption:
-    """An account whose statement cycle can set the budget periods."""
+    """A card whose statement cycle can set the budget periods (bank accounts have none)."""
 
     id: int
     label: str
@@ -94,7 +95,9 @@ def _cards(session: Session, keep_id: int | None) -> tuple[CardOption, ...]:
         ).all()
     )
     accounts = session.scalars(
-        select(Account).order_by(Account.item_id.is_(None), Account.name, Account.id)
+        select(Account)
+        .where(Account.type == CARD)  # credit cards, linked or manual: bank accounts have no cycle
+        .order_by(Account.item_id.is_(None), Account.name, Account.id)
     ).all()
     cards = []
     for account in accounts:
