@@ -6,9 +6,9 @@
 <form class="form" method="post" action="/import/preview" enctype="multipart/form-data">
 {{ form.field("file", "CSV file", type="file", accept=".csv,text/csv", required=true, error=errors.get("file"), help="Read in memory to build a preview; the file itself is never saved.", class="input--file") }}
 {% if target_options %}
-{{ form.select_field("account", "Import into", target_options, value=account, placeholder=none if account else "Choose an account", required=true, error=errors.get("account"), help="Linked cards are matched with the transactions Plaid already has." if targets.options|selectattr("linked")|list else "A CSV-only account; attach it to your card once it is linked.") }}
+{{ form.select_field("account", "Import into", target_options, value=account, placeholder=none if account else "Choose an account", required=true, error=errors.get("account"), help="Linked American Express cards are matched with the transactions Plaid already has." if targets.options|selectattr("linked")|list else "A CSV-only account; attach it to your American Express card once it is linked.") }}
 {% else %}
-<p class="field__error">{{ ui.icon("alert") }}<span>There is no account to import into yet. Link your card on the Connection page first.</span></p>
+<p class="field__error">{{ ui.icon("alert") }}<span>There is no account to import into yet. Link your American Express card on the Connection page first.</span></p>
 {% endif %}
 <div class="form-actions">
 {{ ui.button("Preview import", variant="primary", type="submit", icon="upload") }}

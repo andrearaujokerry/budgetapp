@@ -45,8 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
     """The full argument parser with every command registered."""
     parser = argparse.ArgumentParser(
         prog="budgetapp",
-        description="Amex Budget Tracker — runs only on this Mac. Run ./run with no arguments to "
-        "start the Sandbox app.",
+        description="Budget Tracker — your cards and bank accounts, on this Mac only. Run ./run "
+        "with no arguments to start the Sandbox app.",
         epilog="Real data is used only with --env production (or ./run live).",
     )
     parser.add_argument(

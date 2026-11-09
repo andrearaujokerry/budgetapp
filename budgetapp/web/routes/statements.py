@@ -190,7 +190,8 @@ def save_statement(
     combined = before is not None and before.statement_id not in (None, row.id)
     session.commit()
     message = (
-        f"Statement saved and combined with the one Amex reported for {_long(new_closing)}"
+        f"Statement saved and combined with the one the card company reported for "
+        f"{_long(new_closing)}"
         if combined
         else "Statement saved"
     )

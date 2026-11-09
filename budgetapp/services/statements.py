@@ -1132,10 +1132,10 @@ def _move_check(
     )
     if near and near[0].closing_date != new and _can_combine(row, near[0], current, stored):
         gap = abs((near[0].closing_date - new).days)
-        amex = _long(near[0].closing_date)
+        reported = _long(near[0].closing_date)
         return (
-            f"That is {_days(gap)} from the statement Amex reported for {amex}. To combine the "
-            f"two, set this closing date to {amex}."
+            f"That is {_days(gap)} from the statement the card company reported for {reported}. "
+            f"To combine the two, set this closing date to {reported}."
         ), None
     problem = _too_close(others, new)
     if problem:
@@ -1190,7 +1190,8 @@ def _not_yet_closed(cycle: StatementCycle) -> StatementError:
     return StatementError(
         {
             "period": (
-                f"This period hasn't closed yet. Type its numbers once Amex issues the statement "
+                f"This period hasn't closed yet. Type its numbers once the card company issues the "
+                f"statement "
                 f"(it should close on {_long(cycle.closing_date)})."
             )
         }
@@ -1234,7 +1235,10 @@ def remove_statement(
         raise LookupError(f"no stored statement of account {account_id} closes on {closing_date}")
     if not _removable(row):
         raise StatementError(
-            {"remove": "This statement came from Amex, so it can't be removed. Correct its date."}
+            {
+                "remove": "This statement came from the card company through Plaid, so it "
+                "can't be removed. Correct its date."
+            }
         )
     removed = row.closing_date
     session.delete(row)

@@ -92,7 +92,7 @@ class TestPage:
             "statement_settle_days": "3",
         }
         assert 'name="budget_period_mode" value="calendar" checked' in html
-        assert "No cards yet. Link your Amex" in html
+        assert "No cards yet. Link a card" in html
         assert "AI assistant" in html and "Not available in this version" in html
         # ALR-3 alerts a charge once, and also when a pending charge posts above the amount;
         # only spending alerts (W3-PLAN C5).
@@ -388,7 +388,7 @@ class TestValidation:
     def test_statement_mode_without_any_card(self, client):
         response = client.post("/settings", data=form(budget_period_mode="statement"))
         assert response.context["errors"]["budget_cycle_account_id"].startswith(
-            "Statement cycles need a card: link your Amex or import a CSV first."
+            "Statement cycles need a card: link a card or import an Amex CSV file first."
         )
 
     def test_statement_mode_needs_the_cards_closing_day(self, client, db, card):

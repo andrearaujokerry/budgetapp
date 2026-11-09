@@ -110,7 +110,7 @@ class TestList:
         db.flush()
         page = client.get("/statements").text
         text = text_of(page)
-        assert "1 statement doesn't match your Amex statement." in text
+        assert "1 statement doesn't match the printed statement." in text
         assert "The period that closed Sep 27, 2026 is off by $0.01." in text
         assert "Off by $0.01" in text
         assert f'href="{url(card, "2026-09-27")}"' in page
@@ -431,8 +431,8 @@ class TestOpenEstimate:
         assert response.status_code == 303
         page = client.get(response.headers["location"]).text
         assert toasts(page) == [
-            "This period hasn't closed yet. Type its numbers once Amex issues the statement "
-            "(it should close on Nov 27, 2026)."
+            "This period hasn't closed yet. Type its numbers once the card company issues the "
+            "statement (it should close on Nov 27, 2026)."
         ]
         closings = db.scalars(select(Statement.closing_date).order_by("closing_date")).all()
         assert closings == [D(2026, 8, 27), D(2026, 9, 27)]
@@ -463,7 +463,7 @@ class TestRemoveAndCombine:
         response = client.post(f"{url(card, '2026-09-27')}/remove", follow_redirects=False)
         assert response.status_code == 303
         assert response.headers["location"] == url(card, "2026-09-27")
-        assert "came from Amex" in toasts(client.get(url(card, "2026-09-27")).text)[0]
+        assert "came from the card company" in toasts(client.get(url(card, "2026-09-27")).text)[0]
         assert db.get(Statement, periods.id) is not None
         assert client.post(f"{url(card, '2026-10-27')}/remove").status_code == 404  # estimated
 
@@ -488,7 +488,7 @@ class TestRemoveAndCombine:
         assert response.headers["location"] == url(card, "2026-10-27")
         page = client.get(url(card, "2026-10-27")).text
         assert toasts(page) == [
-            "Statement saved and combined with the one Amex reported for Oct 27, 2026"
+            "Statement saved and combined with the one the card company reported for Oct 27, 2026"
         ]
         assert "Sep 29 – Oct 27, 2026" in text_of(page)
         assert client.get(url(card, "2026-10-17")).status_code == 404

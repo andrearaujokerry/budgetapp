@@ -31,7 +31,7 @@
 {%- if page.total_count == 0 %}
 <div class="card">
 {%- if not any_transactions %}
-{% call ui.empty_state("No transactions yet", "Link your Amex card to sync charges automatically, or import a CSV download from americanexpress.com for older history.", icon="credit-card") %}
+{% call ui.empty_state("No transactions yet", "Link a bank or card to sync transactions automatically, or import an Amex CSV download from americanexpress.com for older history.", icon="credit-card") %}
 <a class="btn btn--primary" href="/connection">{{ ui.icon('link') }}<span>Link account</span></a>
 <a class="btn" href="/import">{{ ui.icon('upload') }}<span>Import CSV</span></a>
 {% endcall %}

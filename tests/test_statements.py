@@ -905,8 +905,8 @@ class TestCombineAndRemove:
         with pytest.raises(st.StatementError) as err:
             st.set_closing_date(db, card.id, D(2026, 10, 17), "2026-10-25")
         assert err.value.errors["closing_date"] == (
-            "That is 2 days from the statement Amex reported for Oct 27, 2026. To combine the "
-            "two, set this closing date to Oct 27, 2026."
+            "That is 2 days from the statement the card company reported for Oct 27, 2026. "
+            "To combine the two, set this closing date to Oct 27, 2026."
         )
 
     def test_only_onto_the_amex_statement_next_to_it(self, db, today, card):
@@ -966,7 +966,7 @@ class TestCombineAndRemove:
         for closing in (D(2026, 9, 27), D(2026, 10, 26)):
             with pytest.raises(st.StatementError) as err:
                 st.remove_statement(db, card.id, closing)
-            assert "came from Amex" in err.value.errors["remove"]
+            assert "came from the card company" in err.value.errors["remove"]
         assert moved in statement_rows(db, card)
 
     def test_removing_needs_a_stored_statement(self, db, today, card):

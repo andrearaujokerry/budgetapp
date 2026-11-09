@@ -246,7 +246,7 @@ def save(session: Session, form: Mapping[str, Any]) -> SettingsView:
     if mode == "statement" and "budget_cycle_account_id" not in errors:
         if not cards:
             errors["budget_cycle_account_id"] = (
-                "Statement cycles need a card: link your Amex or import a CSV first."
+                "Statement cycles need a card: link a card or import an Amex CSV file first."
             )
         elif cycle_id is None:
             errors["budget_cycle_account_id"] = (
