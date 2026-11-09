@@ -34,7 +34,7 @@ CUSTOM_CATEGORY = ("Pets", "#9f1239", "🐾")
 #: (a rule sends the landlord's ACH debit there); it has no budget, only the overall target.
 CUSTOM_CATEGORIES: tuple[tuple[str, str, str, int], ...] = (
     (*CUSTOM_CATEGORY, 145),
-    ("Rent", "cat-14", "🔑", 105),
+    ("Rent", "cat-15", "🔑", 105),
 )
 
 # --------------------------------------------------------------------------- Harbor Bank (MON-5)

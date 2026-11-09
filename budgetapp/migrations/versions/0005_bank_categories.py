@@ -46,14 +46,15 @@ depends_on: str | Sequence[str] | None = None
 BANK_SUFFIX = "|bank"
 CARD_PAYMENTS = "card_payments"
 
-# (name, kind, icon); the colour is chosen in _colour(). Not spending: the neutral grey, like
-# Credits & Rewards and the system categories (migration 0003).
+# (name, kind, icon) in list order after the owner's categories: spending first, then income,
+# then transfers. The colour is chosen in _colour(). Not spending: the neutral grey, like Credits &
+# Rewards and the system categories (migration 0003).
 CATEGORIES: list[tuple[str, str, str]] = [
+    ("Cash & ATM", "expense", "🏧"),
     ("Paycheck", "income", "💵"),
     ("Interest", "income", "🏦"),
     ("Other Income", "income", "💰"),
     ("Transfers", "transfer", "🔁"),
-    ("Cash & ATM", "expense", "🏧"),
 ]
 NEUTRAL = "other"
 #: Cash & ATM is spending, so it takes a palette slot: the one fewest visible categories use,

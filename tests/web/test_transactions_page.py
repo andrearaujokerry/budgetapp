@@ -1055,8 +1055,14 @@ class TestAccounts:
             html.index('id="f-account"') : html.index("</select>", html.index('id="f-account"'))
         ]
         assert '<option value="">All accounts</option>' in select
-        assert f'<option value="{card.id}">American Express · Platinum Card ··{card.mask}' in select
-        assert f'<option value="{checking.id}">Harbor Bank · Everyday Checking ··4417' in select
+        assert (
+            f'<optgroup label="American Express"><option value="{card.id}">Platinum Card '
+            f"··{card.mask}</option></optgroup>"
+        ) in select
+        assert (
+            f'<optgroup label="Harbor Bank"><option value="{checking.id}">Everyday Checking ··4417'
+            "</option></optgroup>"
+        ) in select
         assert re.search(r'<label class="field__label" for="f-account">Account</label>', html)
         assert "All cards" not in html
         filtered = client.get(f"/transactions?account={checking.id}", headers=HTMX | FILTERS)

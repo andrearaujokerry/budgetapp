@@ -924,13 +924,21 @@ class TestAccounts:
 
     def test_the_filter_lists_every_account_with_its_institution(self, db, accounts):
         amex, checking, savings, manual = accounts
-        options = txns.filter_options(db, today=TODAY).accounts
-        assert [(a.id, a.name, a.is_bank) for a in options] == [
+        options = txns.filter_options(db, today=TODAY)
+        assert [(a.id, a.label, a.is_bank) for a in options.accounts] == [
             (amex.id, "American Express · Blue Cash Preferred® ··3005", False),
             (checking.id, "Harbor Bank · Everyday Checking ··4417", True),
             (savings.id, "Harbor Bank · High Yield Savings ··7702", True),
             (manual.id, "American Express (CSV)", False),
         ]
+        assert [(g.label, [a.name for a in g.accounts]) for g in options.account_groups] == [
+            ("American Express", ["Blue Cash Preferred® ··3005"]),
+            ("Harbor Bank", ["Everyday Checking ··4417", "High Yield Savings ··7702"]),
+            ("From CSV files", ["American Express (CSV)"]),
+        ]
+        assert all(
+            a.label == txns.account_label(db.get(type(amex), a.id)) for a in options.accounts
+        )
 
     def test_an_unknown_institution_shows_the_account_alone(self, db):
         item = make_bank_item(db, institution_name=None)

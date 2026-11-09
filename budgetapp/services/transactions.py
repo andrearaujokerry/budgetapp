@@ -445,10 +445,36 @@ class AccountRef:
     """An account as the Account filter lists it (MON-4)."""
 
     id: int
-    #: :func:`account_label`: the institution, the account's name and its last digits.
+    #: The account's name and last digits (``Account.display_name``): ``Everyday Checking ··4417``.
     name: str
     is_manual: bool
     is_bank: bool = False
+    #: The institution of a linked account (``None`` for a manual, CSV-only account).
+    institution: str | None = None
+
+    @property
+    def label(self) -> str:
+        """:func:`account_label`: ``Harbor Bank · Everyday Checking ··4417``."""
+        return f"{self.institution} · {self.name}" if self.institution else self.name
+
+    @property
+    def group(self) -> str:
+        """The filter's option group: the institution, or the CSV-only accounts."""
+        if self.is_manual:
+            return CSV_ACCOUNTS_GROUP
+        return self.institution or OTHER_ACCOUNTS_GROUP
+
+
+@dataclass(frozen=True, slots=True)
+class AccountGroup:
+    """The accounts of one institution in the Account filter (an ``<optgroup>``)."""
+
+    label: str
+    accounts: tuple[AccountRef, ...]
+
+
+CSV_ACCOUNTS_GROUP = "From CSV files"
+OTHER_ACCOUNTS_GROUP = "Other accounts"
 
 
 def account_label(account: Account) -> str:
@@ -472,6 +498,14 @@ class FilterOptions:
     merchants: tuple[str, ...]
     period_label: str
 
+    @property
+    def account_groups(self) -> tuple[AccountGroup, ...]:
+        """The accounts by institution, in their order (MON-4: institution, name and mask)."""
+        groups: dict[str, list[AccountRef]] = {}
+        for account in self.accounts:
+            groups.setdefault(account.group, []).append(account)
+        return tuple(AccountGroup(label, tuple(refs)) for label, refs in groups.items())
+
 
 def all_tags(session: Session) -> list[str]:
     """Every tag in use, de-duplicated case-insensitively, most used first (autocomplete)."""
@@ -491,7 +525,13 @@ def filter_options(session: Session, *, today: dt.date | None = None) -> FilterO
     Accounts: linked ones by connection (in the order they were linked), then manual ones."""
     categories = tuple(load_categories(session).values())
     accounts = tuple(
-        AccountRef(a.id, account_label(a), a.is_manual, is_bank(a))
+        AccountRef(
+            a.id,
+            a.display_name,
+            a.is_manual,
+            is_bank(a),
+            None if a.is_manual or a.item is None else a.item.institution_name,
+        )
         for a in session.scalars(
             select(Account).order_by(Account.item_id.is_(None), Account.item_id, Account.id)
         )
