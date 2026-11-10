@@ -761,6 +761,7 @@ class TestKeychainItems:
             app_secrets.PRODUCTION_ITEM_INDEX,
             app_secrets.SANDBOX_ITEM_INDEX,
             "plaid.access_token.production.item-a",  # BANK-4: each Item's own token
+            app_secrets.link_in_progress_key(),  # final review 3 ops-1
         }
         assert [c.status for c in report.checks] == [PASS]
         assert "value-of" not in doctor.format_report(report)
@@ -907,6 +908,30 @@ class TestProductionTokens:
         make_item(db, plaid_item_id="item-amex")
         store = RecordingStore(self.store(app_secrets.LEGACY_PRODUCTION_TOKEN))
         doctor.run_checks(prod.context(store=store), doctor.CHECKS)
+
+    def test_the_link_marker_is_read_so_always_allow_covers_it(self, prod, db):
+        """Final review 3 ops-1 (major): every production Connection page reads the
+        link-in-progress marker, which can outlive its link (a tab closed while Plaid's window was
+        open). After a brew upgrade of Python it needs one Always Allow like every other item, and
+        doctor is how the owner gives it. It exists only while a link is open, so absent or
+        present there is nothing to report; unreadable, it is a failure like any other item."""
+        marker = app_secrets.link_in_progress_key()
+        make_item(db, plaid_item_id="item-amex")
+        store = self.store(self.AMEX, index=("item-amex",))
+        recording = RecordingStore(store)
+        checks = prod.run(doctor.check_keychain_items, store=recording)
+        assert marker in recording.reads
+        assert [c.status for c in checks] == [PASS]
+        store.values[marker] = json.dumps(
+            {"created_at": "2026-10-01T10:00:00+00:00", "expires_at": "2026-10-01T14:00:00+00:00"}
+        )
+        assert [c.status for c in prod.run(doctor.check_keychain_items, store=store)] == [PASS]
+        store.fail_on[("get", marker)] = app_secrets.KeychainApprovalNeeded(marker, -25308)
+        checks = prod.run(doctor.check_keychain_items, store=store)
+        (problem,) = [c for c in checks if c.status != PASS]
+        assert problem.status == FAIL
+        assert problem.title == "macOS didn't allow reading the Plaid link-in-progress marker"
+        assert "Always Allow" in problem.fix
 
 
 class TestKeychainLock:

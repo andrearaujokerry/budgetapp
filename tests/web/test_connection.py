@@ -565,6 +565,102 @@ def test_the_paused_banner_explains_itself_in_plain_words_and_local_time(
     assert "UTC" not in banner and "marker" not in banner
 
 
+def amex_with_its_token(db, prod_plaid, store):
+    """A production Amex connection whose token and index are in ``store``."""
+    fake = prod_plaid.add_item(item_id="item-amex")
+    item, _ = linked_item(db, plaid_item_id="item-amex")
+    store.values[app_secrets.production_access_token_key("item-amex")] = fake.access_token
+    store.values[app_secrets.PRODUCTION_ITEM_INDEX] = '["item-amex"]'
+    return item
+
+
+def test_an_unreadable_link_marker_pauses_linking_but_keeps_the_page(
+    db, prod_client, prod_plaid, secrets
+):
+    """Final review 3 ops-1 (major): after a brew upgrade of Python every Keychain item needs
+    one Always Allow, which the web agent can't ask for. A link-in-progress marker it can't read
+    (left by a link whose tab was closed) turned the whole page into "needs Keychain approval",
+    and with it Reconnect, Renew consent and Add accounts. Only a new link waits now (fail safe),
+    and the banner says how to give the approval."""
+    item = amex_with_its_token(db, prod_plaid, secrets)
+    marker = app_secrets.link_in_progress_key()
+    app_secrets.set_link_in_progress(store=secrets)
+    secrets.fail_on[("get", marker)] = app_secrets.KeychainApprovalNeeded(marker, -25308)
+    html = main(page(prod_client))
+    banner = text(html)
+    assert "Linking is paused." in banner
+    assert "macOS Keychain needs your approval" in banner
+    assert "Run ./run doctor --env production in Terminal and click Always Allow." in banner
+    assert re.search(r'data-dialog-open="confirm-link" id="link-open" disabled', html)
+    for control in ("reconnect", "renew", "accounts"):
+        (button,) = re.findall(rf'<button[^>]*id="{control}-{item.id}"[^>]*>', html)
+        assert "disabled" not in button, button
+    refused = prod_client.post("/connection/link-token", json={"mode": "new"})
+    assert refused.status_code == 409 and "Always Allow" in refused.json()["error"]
+    renew = prod_client.post("/connection/link-token", json={"mode": "update", "item_id": item.id})
+    assert renew.status_code == 200 and renew.json()["link_token"]
+
+
+class AfterPythonUpgrade:
+    """Keychain after a ``brew upgrade`` of Python (setup.md, ARCHITECTURE §3): every item
+    needs one Always Allow. The web agent, which can't ask, gets KeychainApprovalNeeded; doctor
+    run in Terminal makes macOS ask, and the owner clicks Always Allow for each item it reads."""
+
+    def __init__(self, store: app_secrets.MemoryStore) -> None:
+        self.store = store
+        self.approved: set[str] = set()
+        self.in_terminal = False
+
+    def get(self, account: str) -> str | None:
+        if account in self.store.values and account not in self.approved:
+            if not self.in_terminal:
+                raise app_secrets.KeychainApprovalNeeded(account, -25308)
+            self.approved.add(account)
+        return self.store.get(account)
+
+    def set(self, account: str, value: str) -> None:
+        self.store.set(account, value)
+        self.approved.add(account)  # the new Python wrote it, so it trusts it
+
+    def delete(self, account: str) -> None:
+        self.store.delete(account)
+
+
+def test_doctor_after_a_python_upgrade_unlocks_a_page_with_a_leftover_link_marker(
+    db, session_factory, make_app, make_client, production, prod_plaid, secrets, tmp_path
+):
+    """Final review 3 ops-1 (major): the documented fix for "needs Keychain approval" is
+    ./run doctor --env production in Terminal, which reads every item so macOS asks about each.
+    It never read the link-in-progress marker, so a marker left by an unfinished link kept the
+    Connection page locked after the owner had clicked Always Allow for everything doctor
+    asked."""
+    from tests.test_doctor import ALL_ITEMS, Doctor, short_socket_dir
+
+    amex_with_its_token(db, prod_plaid, secrets)
+    for account in ALL_ITEMS:
+        secrets.values[account] = f"value-of-{account}"
+    linking.new_link_token(db, prod_plaid, production, store=secrets)  # then its tab is closed
+    db.commit()
+    keychain = AfterPythonUpgrade(secrets)
+    app = make_app(production, gateway_factory=lambda _settings: prod_plaid, secret_store=keychain)
+    client = make_client(app)
+    locked = client.get("/connection")
+    assert locked.status_code == 503 and "./run doctor --env production" in locked.text
+    doctor_settings = load_settings(
+        "production",
+        data_dir=tmp_path / "App Support" / "budgetapp",
+        logs_dir=tmp_path / "Logs" / "budgetapp",
+        pg_socket_dir=short_socket_dir(),
+    )
+    keychain.in_terminal = True
+    Doctor(doctor_settings, tmp_path, session_factory).run(store=keychain)
+    keychain.in_terminal = False
+    assert app_secrets.link_in_progress_key() in keychain.approved
+    banner = text(main(page(client)))
+    assert "may still be in progress" in banner  # the marker is readable again
+    assert "needs your approval" not in banner
+
+
 @pytest.mark.parametrize(
     ("values", "ids"),
     [

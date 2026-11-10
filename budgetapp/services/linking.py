@@ -412,7 +412,18 @@ def link_blocks(
             "yet, so linking another waits. Run ./run doctor --env production in Terminal: it "
             "says what to do."
         )
-    expires = secrets.get_link_in_progress(store=store)
+    try:
+        expires = secrets.get_link_in_progress(store=store)
+    except secrets.KeychainApprovalNeeded:
+        # After a brew upgrade of Python every item needs one Always Allow, which the web agent
+        # can't ask for. A marker it can't read still blocks a new link (fail safe), but the page
+        # stays up: Reconnect, Renew consent and Add accounts don't need it (final review 3 ops-1).
+        expires = None
+        reasons.append(
+            "macOS Keychain needs your approval before the app can check for a Plaid link in "
+            f"progress, so linking another bank waits. Run {secrets.KEYCHAIN_FIX_COMMAND} in "
+            "Terminal and click Always Allow."
+        )
     if expires is not None:
         started = sync_service.parse_timestamp((_read_marker(store) or {}).get("created_at"))
         since = f" started at {_clock_text(started, today)}" if started else ""

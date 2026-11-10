@@ -127,9 +127,9 @@ FAILs.
 | Code | no Plaid tokens in files git tracks; CSV downloads are kept out of git |
 | Plaid connection | for each connection, by name: it works; its consent isn't about to run out; a card's statement details are shared; its last sync isn't too old |
 
-Run in Terminal, doctor also reads every Keychain item of both environments, so after a
-`brew upgrade` of Python macOS asks about each one; click **Always Allow**. Values are never
-shown. A report looks like this (shortened):
+Run in Terminal, doctor also reads every Keychain item of both environments (the marker an
+unfinished Plaid link can leave behind too), so after a `brew upgrade` of Python macOS asks about
+each one; click **Always Allow**. Values are never shown. A report looks like this (shortened):
 
 ```text
 Budget Tracker doctor · production · database budgetapp
@@ -200,7 +200,7 @@ their fix.
 | **"Upgrade needed"** | Sandbox: `./run migrate` (or restart `./run`). Production: `./run live`, which backs up first. Demo: `./run demo create NAME` |
 | **"The Sandbox database was upgraded by a newer version of the app"**, or "which this code doesn't know: newer code upgraded it" from a command | Another branch or checkout with newer code migrated it, so `./run migrate` can't help: check out that code again, or restore an older Sandbox backup with `./run restore FILE` ([Restore a backup](#restore-a-backup)) |
 | **"Setup isn't finished"** | `./run setup --keys-only` for the Plaid keys, or `./run setup` for the database passwords |
-| **"Keychain approval needed"** | `./run doctor --env production` in Terminal, then **Always Allow** for each item |
+| **"Keychain approval needed"**, or **"Linking is paused."** saying macOS Keychain needs your approval | `./run doctor --env production` in Terminal, then **Always Allow** for each item |
 | **"127.0.0.1:8766 is already in use"** | The app already runs in another Terminal window: open the address, or stop that one with Ctrl-C |
 | **"PostgreSQL 18 not found"** | `brew install postgresql@18` |
 | **"Python 3.14 is required"** | `brew install python@3.14` |

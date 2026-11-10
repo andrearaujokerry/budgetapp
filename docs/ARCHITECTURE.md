@@ -142,9 +142,12 @@ Rules:
   raises `KeychainApprovalNeeded`: sync and backup notify once a day (de-duplicated with a
   marker file, since the database password may be the item that failed) with the exact fix —
   `./run doctor --env production` in Terminal — and exit 75; the web app stays up and shows
-  a page with the same instruction. Run interactively, `doctor` reads every item of both
-  environments so the user can click *Always Allow* (needed after each `brew upgrade` of
-  Python).
+  a page with the same instruction. The Connection page is the exception for the
+  link-in-progress marker, which every production view reads and which can outlive its link:
+  when only the marker can't be read, linking another bank is paused with that instruction
+  (`linking.link_blocks`) and Reconnect, Renew consent and Add accounts keep working. Run
+  interactively, `doctor` reads every item of both environments, the marker too, so the user
+  can click *Always Allow* (needed after each `brew upgrade` of Python).
 - A missing item (`MissingSecretError`) names the command that saves it
   (`secrets.missing_secret_fix`): `./run setup --keys-only` for the Plaid keys, `./run setup` for
   a database password (it creates the roles and their passwords), `./run doctor` otherwise. The

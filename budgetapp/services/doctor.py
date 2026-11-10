@@ -845,6 +845,9 @@ def _keychain_items(ctx: DoctorContext) -> list[_Item]:
         _Item(
             secrets.db_password_key("budgetapp_live"), "production", "production database password"
         ),
+        # Every production Connection page reads it, and it can outlive its link: Always Allow
+        # must cover it too (final review 3 ops-1). Absent unless a link is open.
+        _Item(secrets.link_in_progress_key(), "production", "Plaid link-in-progress marker"),
     ]
     return items
 
@@ -1031,6 +1034,8 @@ def check_keychain_items(ctx: DoctorContext) -> Iterable[Check]:
             problems.append(
                 Check(section, WARN, f"The {item.label} is missing", fix="./run sandbox-link")
             )
+        elif item.account == secrets.link_in_progress_key():
+            continue  # there only while a production link is open
         else:
             needed = env == "production" and linked and mine
             problems.append(

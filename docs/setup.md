@@ -104,7 +104,7 @@ database, files, logs or git.
 | `plaid.secret.sandbox`, `plaid.secret.production` | your Plaid secrets |
 | `plaid.access_token.production.<id>` | the token of one linked bank login (one item per connection, written once, at its link; `<id>` is Plaid's id for it) |
 | `plaid.item_ids.production` | the list of those connections (Keychain can't list items by itself) |
-| `plaid.link_in_progress.production` | a short-lived marker while a production link is open |
+| `plaid.link_in_progress.production` | a marker while a production link is open (one at a time); it lapses after 4 hours but can stay in Keychain |
 | `plaid.access_token.sandbox.<id>`, `plaid.item_ids.sandbox` | Sandbox test connections |
 | `db.password.budgetapp_dev`, `db.password.budgetapp_live` | the generated database passwords |
 
@@ -120,8 +120,9 @@ them with Keychain Access or the `security` command: macOS trusts the program th
 item, and the background agents rely on that.
 
 After a `brew upgrade` that updates Python, macOS may ask once per item whether the app may read
-it. Run `./run doctor --env production` in Terminal and click **Always Allow** for each item, so
-the background agents can read them again without asking.
+it. Run `./run doctor --env production` in Terminal and click **Always Allow** for each item (doctor
+reads every one, the link marker too), so the background agents can read them again without
+asking.
 
 ## Allow notifications (one time)
 
