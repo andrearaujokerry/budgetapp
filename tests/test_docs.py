@@ -692,7 +692,8 @@ def doc_section(path: Path, heading: str) -> str:
 #: What going-live's checklist after the first bank sync must tell the owner, per final-review
 #: finding: what changes for budgets and alerts (reqs-2); that Transfers also holds payments to
 #: and from other people, and that a card paid from checking must be linked (money-1); to check
-#: that the card's payment from checking counts as a card payment, and how to fix it (money-2).
+#: that the card's payment from checking counts as a card payment, and how to fix it (money-2);
+#: where money in that Plaid didn't classify goes (money-3).
 AFTER_THE_FIRST_BANK_SYNC = {
     "money-1": (
         "payments to people (Zelle, Venmo, Cash App), wires, and check or cash deposits",
@@ -703,6 +704,10 @@ AFTER_THE_FIRST_BANK_SYNC = {
         '**Counts as** should say **"A card payment, not spending"**',
         "set its category to Card Payments, then use **Always categorize like this**",
         "**Also apply to past transactions**",
+    ),
+    "money-3": (
+        "counts as Other Income and is marked **Needs review**",
+        "If it is a refund or a transfer, change its category",
     ),
     "reqs-2": (
         "Your overall target and every budget, annual and rollover ones included",

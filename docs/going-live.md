@@ -299,6 +299,8 @@ Check how its money is filed. Each transaction's details say how it counts (**Co
 - **Link every card you pay from checking.** A payment from checking to a card the app doesn't
   have is filed as a card payment too, so that card's spending counts nowhere. If you'd rather not
   link the card, set each payment's category yourself (rules don't change card payments).
+- **Money in that Plaid doesn't classify** counts as Other Income and is marked **Needs review**
+  (Transactions shows a Needs review tab). If it is a refund or a transfer, change its category.
 - **Paychecks, interest and other money in** show as income on the Dashboard and Trends
   ([Using the app](using-the-app.md#dashboard)).
 

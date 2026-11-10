@@ -20,7 +20,7 @@ from budgetapp import secrets as app_secrets
 from budgetapp.config import load_settings
 from budgetapp.models import Category, Transaction
 from budgetapp.periods import month_of
-from budgetapp.services import alerts, sync
+from budgetapp.services import alerts, categorize, sync
 from budgetapp.services import transactions as txns
 from budgetapp.services.events import SyncOutcome
 from budgetapp.services.spending import period_income, period_spending
@@ -540,3 +540,47 @@ def test_the_owner_files_a_miscoded_card_payment_from_checking_once(bank, db, no
     assert bank.sync().status == "success"
     assert bank.category("pmt-2") == ("Card Payments", "rule")
     assert [t for t in notifier.titles if t.startswith("$")] == []
+
+
+def test_money_in_plaid_did_not_classify_is_income_and_needs_review(bank, db, notifier):
+    """Final review money-3: a deposit Plaid sends without a category (nullable, RESEARCH T1.5)
+    or as OTHER took Uncategorized or Other, so it lowered spending like a refund and never
+    counted as income. It is now other income, marked for review when it arrives; money out and
+    the deposit Plaid did classify are unchanged, and re-applying categories agrees."""
+    day = today() - dt.timedelta(days=3)
+    rows = {
+        "rent": (
+            "2450.00",
+            "BAYVIEW PROPERTY MGMT",
+            "RENT_AND_UTILITIES",
+            "RENT_AND_UTILITIES_RENT",
+        ),
+        "dep": ("-1800.00", "MOBILE DEPOSIT", None, None),
+        "other": ("-600.00", "DEPOSIT 0423", "OTHER", "OTHER_OTHER"),
+        "check": ("40.00", "CHECK 1043", None, None),
+    }
+    for key, (amount, name, primary, detailed) in rows.items():
+        bank.add(
+            transaction_id=key,
+            amount=amount,
+            date=day,
+            name=name,
+            pfc_primary=primary,
+            pfc_detailed=detailed,
+        )
+    assert bank.sync().status == "success"
+    assert {key: bank.category(key) for key in rows} == {
+        "rent": ("Home", "plaid"),
+        "dep": ("Other Income", "default"),
+        "other": ("Other Income", "default"),
+        "check": ("Uncategorized", "default"),
+    }
+    for key in ("dep", "other"):
+        row = bank.row(key)
+        assert row.needs_review and row.review_reason == categorize.UNCLASSIFIED_MONEY_IN_REVIEW
+        assert not txns.get_row(db, row.id).is_refund
+    assert not bank.row("rent").needs_review and not bank.row("check").needs_review
+    month = month_of(day)
+    assert period_spending(db, month).total == Decimal("2490.00")  # rent and the check
+    assert period_income(db, month).total == Decimal("2400.00")
+    assert categorize.recategorize(db).changed == 0

@@ -42,9 +42,11 @@ The same rules apply on every page and in every alert:
   Plaid files as a transfer ("Transfers") is neither spending nor income: moving money between
   your own accounts and money a lender puts in your account, but also payments to and from other
   people (Zelle, Venmo, wires, check deposits) until a rule of yours moves them. Paychecks,
-  interest and other money coming in go to "Paycheck", "Interest" and "Other Income". A
-  transaction's details say how it counts (**Counts as**). Once a bank is linked, check what
-  [Going live](going-live.md#after-your-first-bank-account-syncs) lists.
+  interest and other money coming in go to "Paycheck", "Interest" and "Other Income", and so does
+  money coming in that Plaid doesn't classify, marked **Needs review** (change its category if it
+  is a refund or a transfer). A transaction's details say how it counts (**Counts as**). Once a
+  bank is linked, check what [Going live](going-live.md#after-your-first-bank-account-syncs)
+  lists.
 - **A budget period** is a calendar month, or a card's statement cycle if you choose that in
   [Settings](#settings).
 - **Which date counts:** in calendar-month mode, the day you made the charge; in statement-cycle
@@ -129,7 +131,8 @@ Every charge, refund, credit, payment and transfer on your cards and bank accoun
   its other side on checking), **Transfer** what Plaid files as a transfer: money moved between
   your own accounts, and payments to or from other people until a rule moves them.
 - **Needs review** lists rows where something changed after you edited them (for example Plaid
-  changed the amount of a split charge). **Possible duplicates** lists CSV rows held for review.
+  changed the amount of a split charge), and money in to a bank account that Plaid didn't
+  classify. **Possible duplicates** lists CSV rows held for review.
 
 **Changing a transaction**
 
@@ -285,7 +288,9 @@ then to Uncategorized. Some rows say "for credits": they are tried first for neg
 back goes to Credits & Rewards while fees stay in Fees & Interest. Rows marked **Bank accounts**
 are tried first for checking and savings accounts, so a paycheck goes to Paycheck there while the
 same Plaid category on a card stays in Credits & Rewards; the row without the mark is for cards
-(and for bank accounts when there is no bank row). A change applies to new
+(and for bank accounts when there is no bank row). Money in to a bank account that Plaid didn't
+classify (no category, or Other) goes where Income → Other's **Bank accounts** row says, and
+counts there. A change applies to new
 transactions; past ones keep their category until you [re-apply rules](#rules), and the message
 after saving says how many would move.
 

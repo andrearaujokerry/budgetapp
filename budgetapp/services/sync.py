@@ -68,7 +68,12 @@ from budgetapp.plaid_gateway import (
 from budgetapp.services import alerts, reconcile, statements, userstate
 from budgetapp.services.accounts import CARD, is_card
 from budgetapp.services.background import run_steps
-from budgetapp.services.categorize import Categorizer, apply_carried_state, apply_decision
+from budgetapp.services.categorize import (
+    UNCLASSIFIED_MONEY_IN_REVIEW,
+    Categorizer,
+    apply_carried_state,
+    apply_decision,
+)
 from budgetapp.services.events import PendingRaise, SyncOutcome
 from budgetapp.services.notify import Notifier
 
@@ -929,6 +934,14 @@ class _Applier:
         self.s.flush()
         return carried
 
+    def flag_unclassified_money_in(self) -> None:
+        """Mark each new row filed as money in that Plaid didn't classify for review (final review
+        money-3), once its category is final: after step 5, so a row that took the user's category
+        from the row it replaces is left alone."""
+        for txn in self.inserted:
+            if self.categorizer.filed_as_unclassified_money_in(txn):
+                _flag(txn, UNCLASSIFIED_MONEY_IN_REVIEW)
+
     def stored_postings(self, tombs: Sequence[TransactionTombstone]) -> list[Transaction]:
         """Posted Plaid rows an earlier sync stored in the last 30 days that could still be the
         posting of one of ``tombs`` (pending rows removed now): on their accounts, spend dates
@@ -1469,6 +1482,7 @@ def _apply_batch(
         applier.apply_upserts()
         applier.apply_deletes()
         applier.apply_replacements()
+        applier.flag_unclassified_money_in()
         completed_now = applier.update_history(batch.update_status)
         if applier.inserted or completed_now:
             result = reconcile.reconcile_item(s, item.id)

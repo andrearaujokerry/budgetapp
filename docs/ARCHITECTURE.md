@@ -329,7 +329,9 @@ with a `|bank` suffix come before all of those (detailed, then primary): migrati
 `LOAN_DISBURSEMENTS` and `LOAN_PAYMENTS` code (§6), and the "Plaid & Amex categories" editor
 lists them with a "Bank accounts" badge next to the card mapping of the same code. A primary's
 `|bank` key comes before a detailed code's plain key, so a group with a primary bank key gives
-every detailed code its own bank key.
+every detailed code its own bank key. Money coming in to a bank account that Plaid didn't
+classify (no category, or `OTHER`) tries `INCOME_OTHER|bank`, then `INCOME|bank` before anything
+else (`categorize.MONEY_IN_KEYS`, §6), and the editor counts it on `INCOME_OTHER|bank`.
 
 ### rules (CAT-3)
 | column | type | notes |
@@ -607,7 +609,15 @@ neither income nor spending. The cards' mappings of these codes are card-sided (
 in under a loan code is the card's payment, Card Payments, and a cash advance is spending), so
 every loan code has a bank key and no bank row reaches them. Every other code maps as for cards,
 and the positive-row guard is for cards only (money leaving for savings is a transfer, not a
-charge). Rules still come first, so a rule can turn a regular transfer into income, with one
+charge). One more bank-only step (final review money-3, a deviation from C3's "maps as for
+cards"): money coming in that Plaid didn't classify, a negative row with no category (Plaid's
+`personal_finance_category` is nullable, RESEARCH T1.5) or `OTHER`/`OTHER_OTHER`, is a deposit,
+not a refund that lowers spending, so step 3 tries `MONEY_IN_KEYS` first, the bank mapping of
+`INCOME_OTHER`, then of `INCOME` (both Other Income from 0005, so the owner can redirect them);
+the decision's source is `default`, and the sync marks such a new row `needs_review`
+(`UNCLASSIFIED_MONEY_IN_REVIEW`). With neither key mapped it maps as before (`OTHER` → Other, no
+category → Uncategorized); money out, a card's credit and an Amex CSV row never take this step.
+Rules still come first, so a rule can turn a regular transfer into income, with one
 exception: rules never apply to a bank row Plaid codes
 `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` (`categorize.is_bank_card_payment`). A rule written for card
 rows, where step 0 shields payments, could otherwise match the payment's ACH text on checking and
@@ -665,6 +675,8 @@ applies.
    without user state are matched to the rows inserted in this batch still unmatched by the same
    rules, only to record `consumed_by_transaction_id`: the row is the same charge (a posting
    Plaid didn't link, a re-delivery after account churn), not a new one (section 11, ALR-3).
+   Then each inserted row that categorization filed as money in that Plaid didn't classify (§6
+   bank accounts; not one that took the user's category) is marked `needs_review`.
 6. **Reconciliation** with CSV rows (below), then the cursor update.
 
 ### CSV ↔ Plaid reconciliation (SYNC-8)
