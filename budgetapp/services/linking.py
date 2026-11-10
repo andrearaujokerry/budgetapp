@@ -283,6 +283,19 @@ def _release(
             release_attempt(s, store, attempt)
 
 
+def _release_for_recovery_file(
+    session_factory: sessionmaker[Session], store: secrets.SecretStore | None, attempt: str | None
+) -> None:
+    """The attempt's token waits in a production recovery file, which keeps new links away by
+    itself until it is stored (:func:`secrets.unsaved_production_tokens`), so the marker goes:
+    once the owner has stored it and re-attached, the next link may start. Best effort: a failure
+    here must not hide the message that names the file (the marker then expires by itself)."""
+    try:
+        _release(session_factory, store, attempt)
+    except Exception:
+        log.warning("Couldn't clear the link-in-progress marker; it expires by itself")
+
+
 def _claim_marker(store: secrets.SecretStore | None, attempt: str | None) -> str | None:
     """While an exchange runs, the marker keeps new links away: (re)write it for this attempt
     unless another attempt's unexpired marker is there. Returns the attempt that now owns it (a new
@@ -842,11 +855,13 @@ def exchange(
     :class:`LinkBusy`), refused before anything reaches Plaid while the guard says no
     (:func:`_exchange_problem`; a v1 token is moved to its Item's key first). While it runs it
     keeps the link-in-progress marker (of ``attempt``, the id :func:`new_link_token` returned), and
-    clears it once the token is safe or Plaid gave a definite no; an unknown outcome keeps it until
-    it expires. The access token goes to Keychain under the Item's own key (write-once, read back)
-    BEFORE the database; then the Item, its accounts and ``/item/get`` details are saved in one
-    transaction, and a lone manual CSV account is attached to a lone American Express card. The
-    caller starts the post-link backfill (``sync.Backfill``).
+    clears it once the token is safe (in Keychain, or in a recovery file, which keeps new links away
+    by itself) or Plaid gave a definite no; an unknown outcome, or a token that only this answer
+    holds (:class:`TokenNotSaved`), keeps it until it expires. The access token goes to Keychain
+    under the Item's own key (write-once, read back) BEFORE the database; then the Item, its
+    accounts and ``/item/get`` details are saved in one transaction, and a lone manual CSV account
+    is attached to a lone American Express card. The caller starts the post-link backfill
+    (``sync.Backfill``).
     """
     if not public_token or not isinstance(public_token, str):
         raise LinkRefused("Plaid Link didn't send a public token. Nothing was linked.")
@@ -940,7 +955,7 @@ def _complete_exchange(
                 "The test Item was created, but its access token couldn't be saved, neither to "
                 "Keychain nor to a recovery file, so it can't be used. Create another test Item."
             ) from exc
-        if exc.recovery_path is None:
+        if exc.recovery_path is None:  # the marker stays: nothing else keeps new links away
             raise TokenNotSaved(
                 "The connection was created, but its access token couldn't be saved, neither to "
                 "Keychain nor to a recovery file. Copy the token shown below into your password "
@@ -948,6 +963,7 @@ def _complete_exchange(
                 f"{reattach} the connection on this page.{never_again}",
                 result.access_token,
             ) from exc
+        _release_for_recovery_file(session_factory, store, owned)
         raise LinkFailed(
             "The connection was created, but its access token couldn't be saved to Keychain. It "
             f"was saved to {exc.recovery_path} (readable only by you). Store it with {setup}, "
@@ -955,6 +971,8 @@ def _complete_exchange(
         ) from exc
     except secrets.AccessTokenConflict as exc:
         log.error("Keychain already held a different access token; Item %s", result.item_id)
+        if exc.recovery_path is not None:
+            _release_for_recovery_file(session_factory, store, owned)
         raise LinkFailed(
             "The connection was created, but Keychain already holds a different access token. "
             f"{exc} Re-attach the saved connection on this page instead.{never_again}"

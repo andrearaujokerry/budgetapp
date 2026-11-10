@@ -187,7 +187,15 @@ class KeychainApprovalNeeded(SecretStoreError):
 
 
 class AccessTokenConflict(SecretStoreError):
-    """A different access token is already stored where a new one was about to be written."""
+    """A different access token is already stored where a new one was about to be written.
+
+    ``recovery_path``: the 0600 recovery file that holds the new token, or ``None`` when none
+    could be written. The message never contains the token.
+    """
+
+    def __init__(self, message: str, recovery_path: Path | None = None) -> None:
+        self.recovery_path = recovery_path
+        super().__init__(message)
 
 
 class TokenNotSavedError(SecretStoreError):
@@ -651,7 +659,8 @@ def store_access_token(
       blocking new links (:func:`production_link_blockers`).
     * The Item is added to its environment's index (``plaid.item_ids.<env>``) BEFORE the token is
       written (an index entry without a token is harmless; a token nobody can find is an orphan).
-    * Callers clear the link-in-progress marker only after this returns normally.
+    * Callers clear the link-in-progress marker only after this returns normally, or once it
+      raised with a recovery file (``recovery_path``): that file keeps new links away by itself.
     """
     if not access_token:
         raise ValueError("an access token is required")
@@ -667,7 +676,7 @@ def store_access_token(
                 if path is not None
                 else "The new token could not be written to a recovery file either."
             )
-            return AccessTokenConflict(f"{reason} {where}")
+            return AccessTokenConflict(f"{reason} {where}", path)
         return TokenNotSavedError(reason, path)
 
     # Any failure below must not lose the token (each production token used a Trial connection),

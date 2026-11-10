@@ -194,7 +194,8 @@ The cases where the connection exists:
   `~/Library/Application Support/budgetapp/state/recovery`, and the message names the file. Run
   `./run setup --env production --access-token`, paste the token from that file, then click
   **Re-attach existing connection** on the Connection page. Delete the file once the token is also
-  in your password manager.
+  in your password manager. Until the token is stored, "Linking is paused." names the file; once
+  the connection is re-attached, you can link another bank right away.
 - **"Your access token, shown only this once"**: the rare case where even the recovery file
   couldn't be written. Copy all of it into your password manager right away (it isn't stored
   anywhere else), then follow the message: `./run setup --env production --access-token`, then

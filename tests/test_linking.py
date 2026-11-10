@@ -1054,6 +1054,48 @@ def test_a_token_nothing_could_save_is_handed_back_once_and_never_in_the_message
     assert items(db) == []
 
 
+@pytest.mark.parametrize("failure", ["keychain refuses", "another token is saved there"])
+def test_a_token_parked_in_a_recovery_file_frees_its_link_marker(
+    db, session_factory, production, prod_plaid, secrets, failure
+):
+    """Final review (ops-4): the unsaved recovery file keeps new links away by itself, so the
+    attempt's marker goes. It used to stay for 4 hours, so after the owner stored the token and
+    re-attached it, the page still said a link "may still be in progress"."""
+    attempt = linking.new_link_token(db, prod_plaid, production, store=secrets).attempt
+    db.commit()
+    tartan = prod_plaid.add_item(
+        item_id="item-tartan",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking()],
+    )
+    if failure == "keychain refuses":
+        secrets.fail_on[("set", prod_key("item-tartan"))] = app_secrets.SecretStoreError("no")
+    else:
+        secrets.values[prod_key("item-tartan")] = "access-production-older"
+    with pytest.raises(LinkFailed):
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(tartan),
+            link_meta(TARTAN["institution"], ("Checking", "0001")),
+            attempt=attempt,
+        )
+    assert app_secrets.get_link_in_progress(store=secrets) is None
+    (reason,) = linking.link_blocks(db, production, store=secrets)
+    assert "recovery file" in reason and "may still be in progress" not in reason
+    if failure == "keychain refuses":  # ./run setup --env production --access-token, Re-attach
+        del secrets.fail_on[("set", prod_key("item-tartan"))]
+        app_secrets.store_access_token(
+            production, "item-tartan", tartan.access_token, store=secrets
+        )
+        assert app_secrets.mark_recovery_saved(production, tartan.access_token)
+        linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+        assert linking.link_blocks(db, production, store=secrets) == ()
+
+
 @pytest.mark.parametrize("odd", ["item.with.dot", "a b"])
 def test_an_item_id_no_keychain_name_can_hold_ends_in_a_recovery_file(
     db, session_factory, production, prod_plaid, secrets, odd

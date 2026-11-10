@@ -806,7 +806,8 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   checked and the marker set under the link lock. A v1 token of the one Item is moved first.
   The marker records a random attempt id that goes back to the page with the Link token; only
   that attempt clears it: after its successful exchange (once `store_access_token` has returned
-  normally), a definite refusal, or Link's `onExit`. Otherwise it expires after 4 hours (a Link
+  normally, or once the token waits in a recovery file, which blocks new links by itself until it
+  is stored), a definite refusal, or Link's `onExit`. Otherwise it expires after 4 hours (a Link
   token's lifetime). `./run setup --env production --access-token` marks a stored token's
   recovery files `*.saved`.
 - **Duplicates are refused before the exchange** (BANK-3; plaid.com/docs/link/duplicate-items/:

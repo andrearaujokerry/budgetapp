@@ -842,6 +842,42 @@ def test_a_parked_token_never_comes_back_in_the_exchange_answer(prod_client, pro
     assert "Don't link this login again" in error and "show it to the user" not in error
 
 
+def test_a_token_saved_to_a_recovery_file_doesnt_leave_linking_paused(
+    prod_client, prod_plaid, production, secrets, freeze_today
+):
+    """Final review (ops-4), the owner's steps: Keychain refuses the new bank's token, the answer
+    names the recovery file, ./run setup --env production --access-token stores it and Re-attach
+    brings the connection in. Linking another bank then works at once; it used to stay paused
+    until the marker expired ("may still be in progress")."""
+    from budgetapp.commands import setup as setup_cmd
+
+    tartan = prod_plaid.add_item(
+        item_id="item-tartan", institution_id="ins_109511", institution_name="Tartan Bank"
+    )
+    attempt = prod_client.post("/connection/link-token", json={"mode": "new"}).json()["attempt"]
+    key = app_secrets.production_access_token_key("item-tartan")
+    secrets.fail_on[("set", key)] = app_secrets.SecretStoreError("refused")
+    answer = prod_client.post(
+        "/connection/exchange",
+        json={
+            "public_token": prod_plaid.public_token_for(tartan),
+            "metadata": {"institution": {"institution_id": "ins_109511", "name": "Tartan Bank"}},
+            "attempt": attempt,
+        },
+    )
+    assert answer.status_code == 502 and "readable only by you" in answer.json()["error"]
+    del secrets.fail_on[("set", key)]
+    freeze_today(now=NOW + dt.timedelta(minutes=20))
+    stored = setup_cmd.enter_access_token(
+        production, input_fn=lambda _prompt: tartan.access_token, gateway=prod_plaid, store=secrets
+    )
+    assert stored == 0 and app_secrets.unsaved_production_tokens(production) == []
+    recovered = prod_client.post("/connection/recover", follow_redirects=False)
+    assert flashed(recovered)[0]["text"].startswith("Re-attached 1 connection.")
+    assert "Linking is paused." not in prod_client.get("/connection").text
+    assert prod_client.post("/connection/link-token", json={"mode": "new"}).status_code == 200
+
+
 def test_an_item_id_no_keychain_name_can_hold_is_answered_with_its_recovery_file(
     prod_client, prod_plaid, secrets
 ):
