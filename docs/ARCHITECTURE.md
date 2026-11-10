@@ -53,7 +53,8 @@ Paths — never inside the git checkout, never under `~/Desktop`, `~/Documents`,
 - `~/Library/Application Support/budgetapp/bin/` — the postgres agent's start-up wrapper script
 - `~/Library/Application Support/budgetapp/backups/<env>/` — nightly `pg_dump` files (REL-2)
 - `~/Library/Application Support/budgetapp/state/` — small marker files (alert de-duplication
-  when the database or Keychain is unavailable, install stamp, recovery files)
+  when the database or Keychain is unavailable, install stamp, recovery files, the connections
+  Re-attach found removed at Plaid)
 - `~/Library/Logs/budgetapp/` — app, sync, backup and postgres logs (never contain secrets). The
   app's own logs rotate (5 MB, 3 kept); the backup agent trims any other log over 10 MB to its
   newest 1 MB in place (launchd and PostgreSQL keep those files open with `O_APPEND`)
@@ -155,10 +156,14 @@ Rules:
   Item's own key). The index entry is written before the token (an index entry without a token
   is harmless; a token nobody can find is an orphan). If the Keychain write fails after a
   successful exchange, the token goes to a 0600 recovery file under `state/` and the app stops
-  with instructions. `./run setup --env production --access-token` re-enters a saved token of
-  any connection (via `getpass`): `/item/get` verifies it and names its Item, and it is saved
-  under that Item's key. The user guide (`docs/going-live.md`) suggests keeping a copy of each
-  in the user's password manager.
+  with instructions; so does a token whose Item id can't be part of a Keychain name (the name is
+  worked out inside the same guard). An id may be any printable ASCII without spaces, up to 256
+  characters (Plaid doesn't document its ids' characters): the environment comes before the id,
+  so no id names another environment's item, the v1 name, an index or the marker, and ids never
+  reach a path, a shell or a URL. `./run setup --env production --access-token` re-enters a
+  saved token of any connection (via `getpass`): `/item/get` verifies it and names its Item, and
+  it is saved under that Item's key. The user guide (`docs/going-live.md`) suggests keeping a
+  copy of each in the user's password manager.
 - **The v1 token** (`plaid.access_token.production`, from before several Items were allowed) is
   moved once, on the first run of the new code that needs it (a sync, a link, update mode), when
   exactly one production Item exists: write the Item's key, read it back and compare, then delete
@@ -798,14 +803,16 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   offers no link once 10 exist (`TRIAL_ITEM_LIMIT`).
 - **The guard.** A production new-link token is issued only while no unexpired
   `plaid.link_in_progress.production` marker exists (one link at a time), no unsaved production
-  token waits in a recovery file, no token in Keychain lacks its Item row, no v1 token is left
+  token waits in a recovery file, no token in Keychain lacks its Item row (unless Re-attach found
+  its connection removed at Plaid), no v1 token is left
   that the app can't place (re-attach first, so the duplicate check knows every bank) or failed
   to move, and fewer than 10 Items exist
   (`linking.link_blocks`, with `secrets.production_link_blockers` for the Keychain-only facts) —
   checked and the marker set under the link lock. A v1 token of the one Item is moved first.
   The marker records a random attempt id that goes back to the page with the Link token; only
   that attempt clears it: after its successful exchange (once `store_access_token` has returned
-  normally), a definite refusal, or Link's `onExit`. Otherwise it expires after 4 hours (a Link
+  normally, or once the token waits in a recovery file, which blocks new links by itself until it
+  is stored), a definite refusal, or Link's `onExit`. Otherwise it expires after 4 hours (a Link
   token's lifetime). `./run setup --env production --access-token` marks a stored token's
   recovery files `*.saved`.
 - **Duplicates are refused before the exchange** (BANK-3; plaid.com/docs/link/duplicate-items/:
@@ -817,18 +824,30 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   checkbox in the confirm dialog, sent as `different_login`). Even then the link is refused when
   any picked account's name and mask match an account already linked at that institution. Masks
   are compared with masks only, never with account numbers (the app has none). With connections
-  in place, metadata without the institution's id (or, with the choice, without accounts) is
-  refused too: Plaid's `onSuccess` names an institution with both its id and its name, and every
-  Item the app saves has the id. The Sandbox applies the same check to Link; its test Items made
-  without Link don't. Whether a public token that is never exchanged counts toward the 10 is not
-  documented; the app treats the exchange as the step that creates the Item. The refusal can't
-  undo what happened in Plaid's window: at OAuth banks that don't allow duplicates, signing in to
-  the same login again already sends the first Item to `ITEM_LOGIN_REQUIRED` (RESEARCH T1), which
-  Reconnect repairs.
+  in place, metadata without the institution's id (or, with the choice, without accounts, or with
+  more picked accounts than the 20 the app reads) is refused too: Plaid's `onSuccess` names an
+  institution with both its id and its name. A connection saved with neither (a first link whose
+  metadata named no institution while `/item/get` failed right after linking) could be any bank,
+  so every new link is refused until a sync or Reconnect has asked `/item/get` which it is. The
+  Sandbox applies the same check to Link; its test Items made without Link don't. Whether a
+  public token that is never exchanged counts toward the 10 is not documented; the app treats the
+  exchange as the step that creates the Item. The refusal can't undo what happened in Plaid's
+  window: at OAuth banks that don't allow duplicates, signing in to the same login again already
+  sends the first Item to `ITEM_LOGIN_REQUIRED` (RESEARCH T1), which Reconnect repairs. A
+  connection Plaid removed (its last error `ITEM_NOT_FOUND`: deleted in Plaid Portal or by a
+  data-deletion request) can't be repaired by update mode (RESEARCH T2.4), so its refusal says
+  that instead of pointing to Reconnect or Add accounts; removing a connection isn't part of this
+  version (W3-PLAN §0), so that login stays refused while the connection is listed.
 - **Re-attach.** A token in Keychain whose Item row is missing (lost or restored database, or a
   crash between the Keychain write and the commit), and a v1 token the app can't place, are
   re-attached per token: `/item/get` names the Item, its row is rebuilt from `/item/get` and
-  `/accounts/get`, it syncs from a null cursor and reconciles — never a new link.
+  `/accounts/get`, it syncs from a null cursor and reconciles — never a new link. Each token is
+  handled on its own (`linking.ReattachOutcome`), so one that fails never stops the others or
+  hides what was done. A token whose `/item/get` answers `ITEM_NOT_FOUND` belongs to a connection
+  Plaid removed (RESEARCH T2.4): its id is noted in `state/removed-items-production.json`
+  (`secrets.mark_production_item_removed`; item ids aren't secrets) and it no longer waits to be
+  re-attached or blocks a link, while its token stays in Keychain and in the index, so it still
+  counts toward the 10. Any other failure is reported, and that token waits for the next try.
 - **Pre-flight.** Before a production link the Connection page shows Plaid's checklist (a Data
   Transparency use case selected; OAuth banks, which the Trial plan grants automatically: the
   Dashboard's OAuth institutions tab says no action is needed) and a live `/institutions/search`
@@ -853,7 +872,9 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   known: Plaid's, or the American Express estimate), Add accounts, and "Grant access to statement
   details" for card connections only. Those actions always need Plaid Link, so a page with a
   connection loads Plaid's script whenever linking is possible. It also names the connection's
-  Keychain item (never the token), so the owner's password-manager copies can be told apart.
+  Keychain item (never the token), so the owner's password-manager copies can be told apart;
+  while the v1 token waits to move (`movable`, section 3), that is the v1 name, with the item the
+  next sync moves it to.
   Connections at the same institution (a second login, or Sandbox test Items at one test bank)
   are told apart everywhere by a label from their first account, "Chase (Freedom ··5678)"
   (`status.connection_labels`).

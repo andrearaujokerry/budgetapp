@@ -75,9 +75,12 @@ class TestStores:
         assert sec.access_token_key("sandbox", "abc") == "plaid.access_token.sandbox.abc"
         assert sec.item_index_key("production") == PRODUCTION_ITEM_INDEX
         assert sec.item_index_key("sandbox") == SANDBOX_ITEM_INDEX
-        for bad in ("", "a.b", "../x", None):
+        for bad in ("", "a b", "tab\tid", "ünï", "x" * 257, None):
             with pytest.raises(ValueError):
                 sec.access_token_key("production", bad)
+        # Plaid doesn't document which characters its item ids use (security-1): any printable
+        # ASCII without spaces is a name, and it stays unambiguous (the environment comes first).
+        assert sec.access_token_key("production", "a.b=c") == "plaid.access_token.production.a.b=c"
         assert sec.db_password_key("budgetapp_live") == "db.password.budgetapp_live"
         with pytest.raises(ValueError):
             sec.db_password_key("postgres")
@@ -137,6 +140,36 @@ class TestAccessTokens:
         secrets.corrupt_reads.add(ITEM_1_KEY)
         with pytest.raises(TokenNotSavedError):
             sec.store_access_token(prod, "item-1", PROD_TOKEN)
+
+    @pytest.mark.parametrize("item_id", ["item.with.dot", "abc=", "a/b", "x" * 256])
+    def test_an_item_id_of_other_printable_characters_gets_its_own_keychain_item(
+        self, prod, secrets, item_id
+    ):
+        """Final review (security-1): Plaid doesn't document the characters of its item ids, so
+        any printable ASCII without spaces (up to 256) names a Keychain item, which setup
+        --access-token and Re-attach can use too. The environment comes before the id, so the
+        name can't be another environment's item, the v1 name or the index."""
+        sec.store_access_token(prod, item_id, PROD_TOKEN)
+        key = sec.production_access_token_key(item_id)
+        assert key == f"plaid.access_token.production.{item_id}"
+        assert secrets.values[key] == PROD_TOKEN and sec.production_item_ids() == [item_id]
+        assert not sec.is_sandbox_account(key) and sec.unsaved_production_tokens(prod) == []
+
+    @pytest.mark.parametrize("item_id", ["a b", "tab\tid", "ünï", "x" * 257])
+    def test_an_item_id_no_keychain_name_can_hold_still_keeps_the_token(
+        self, prod, secrets, item_id
+    ):
+        """Final review (security-1): the Keychain name is worked out inside the guard, so an
+        Item id it can't hold ends in the recovery file like any other failure. The token (a
+        Trial connection Plaid has already created) is never lost, and it still counts."""
+        with pytest.raises(TokenNotSavedError) as info:
+            sec.store_access_token(prod, item_id, PROD_TOKEN)
+        path = info.value.recovery_path
+        assert sec.unsaved_production_tokens(prod) == [path]
+        assert PROD_TOKEN in path.read_text() and _mode(path) == 0o600
+        assert PROD_TOKEN not in str(info.value)
+        assert PROD_TOKEN not in secrets.values.values()
+        assert sec.recovery_item_ids(prod) == {item_id}
 
     def test_sandbox_tokens_are_per_item_with_an_index(self, sandbox, secrets):
         sec.store_access_token(sandbox, "item-a", SANDBOX_TOKEN)
@@ -270,6 +303,19 @@ class TestProductionLinkGuard:
         assert len(sec.mark_recovery_saved(prod, PROD_TOKEN)) == 1
         [left] = sec.unsaved_production_tokens(prod)
         assert OTHER_TOKEN in left.read_text()
+
+    def test_connections_plaid_removed_are_noted_in_a_private_file(self, prod):
+        """Final review (ops-2): Re-attach notes a connection Plaid answered ITEM_NOT_FOUND for,
+        so it no longer waits to be re-attached. A note that can't be read counts as none (the
+        next Re-attach asks Plaid again)."""
+        assert sec.removed_production_items(prod) == set()
+        for item_id in ("item-dead", "item-gone", "item-dead"):
+            sec.mark_production_item_removed(prod, item_id)
+        assert sec.removed_production_items(prod) == {"item-dead", "item-gone"}
+        path = prod.state_dir / sec.REMOVED_ITEMS_FILE
+        assert _mode(path) == 0o600 and list(prod.state_dir.glob(".removed-items-*")) == []
+        path.write_text("{not json")
+        assert sec.removed_production_items(prod) == set()
 
 
 class TestLegacyTokenMove:

@@ -68,7 +68,12 @@ LEGACY_PRODUCTION_TOKEN = "plaid.access_token.production"
 SANDBOX_ITEM_INDEX = "plaid.item_ids.sandbox"
 PRODUCTION_ITEM_INDEX = "plaid.item_ids.production"
 LINK_TOKEN_LIFETIME = timedelta(hours=4)
-_ITEM_ID = re.compile(r"[A-Za-z0-9_-]+")
+#: A Plaid item id that can be part of a Keychain name: printable ASCII without spaces, at most
+#: 256 characters. Plaid's ids seen so far are letters and digits, but nothing documents their
+#: characters. ``plaid.access_token.<env>.<id>`` stays unambiguous: the environment comes before
+#: the id, so no id names another environment's item, the v1 name, an index or the marker. Ids
+#: never reach a path (recovery file names are sanitized), a shell or a URL.
+_ITEM_ID = re.compile(r"[!-~]{1,256}")
 
 #: Keychain status codes that mean "the Keychain wants the user to approve access":
 #: -25293 errSecAuthFailed (python binary changed, e.g. after `brew upgrade`), -25308
@@ -187,7 +192,15 @@ class KeychainApprovalNeeded(SecretStoreError):
 
 
 class AccessTokenConflict(SecretStoreError):
-    """A different access token is already stored where a new one was about to be written."""
+    """A different access token is already stored where a new one was about to be written.
+
+    ``recovery_path``: the 0600 recovery file that holds the new token, or ``None`` when none
+    could be written. The message never contains the token.
+    """
+
+    def __init__(self, message: str, recovery_path: Path | None = None) -> None:
+        self.recovery_path = recovery_path
+        super().__init__(message)
 
 
 class TokenNotSavedError(SecretStoreError):
@@ -643,21 +656,22 @@ def store_access_token(
       saving the new token to a recovery file, because every production token used a Trial
       connection).
     * If the write or the read-back fails — for ANY reason, including Ctrl-C (re-raised after
-      the file is written) — the token goes to a 0600 recovery file under ``settings.state_dir``
-      (or, if that fails too, under :func:`fallback_recovery_dir`) and
+      the file is written) or an Item id that can't be part of a Keychain name
+      (:func:`access_token_key`) — the token goes to a 0600 recovery file under
+      ``settings.state_dir`` (or, if that fails too, under :func:`fallback_recovery_dir`) and
       :class:`TokenNotSavedError` is raised; callers stop and show the path and
       ``./run setup --env production --access-token``. An unsaved production recovery file keeps
       blocking new links (:func:`production_link_blockers`).
     * The Item is added to its environment's index (``plaid.item_ids.<env>``) BEFORE the token is
       written (an index entry without a token is harmless; a token nobody can find is an orphan).
-    * Callers clear the link-in-progress marker only after this returns normally.
+    * Callers clear the link-in-progress marker only after this returns normally, or once it
+      raised with a recovery file (``recovery_path``): that file keeps new links away by itself.
     """
-    if not access_token or not item_id:
-        raise ValueError("item_id and access_token are required")
+    if not access_token:
+        raise ValueError("an access token is required")
     plaid_env = settings.plaid_env
     store = store or get_store()
     register_secret(access_token)
-    account = access_token_key(plaid_env, item_id)
 
     def _recover(reason: str, cls: type[SecretStoreError] = TokenNotSavedError) -> SecretStoreError:
         path = _save_recovery_file(settings, item_id, access_token)
@@ -667,11 +681,19 @@ def store_access_token(
                 if path is not None
                 else "The new token could not be written to a recovery file either."
             )
-            return AccessTokenConflict(f"{reason} {where}")
+            return AccessTokenConflict(f"{reason} {where}", path)
         return TokenNotSavedError(reason, path)
 
     # Any failure below must not lose the token (each production token used a Trial connection),
-    # so every exception — even KeyboardInterrupt/SystemExit — ends in the recovery file.
+    # so every exception — even KeyboardInterrupt/SystemExit — ends in the recovery file. That
+    # starts with the Keychain name: Plaid has created the Item even if its id can't be in one.
+    try:
+        account = access_token_key(plaid_env, item_id)
+    except BaseException as exc:
+        error = _recover("Plaid's Item id can't be part of a Keychain name.")
+        if not isinstance(exc, Exception):
+            raise
+        raise error from exc
     try:
         existing = store.get(account)
     except BaseException as exc:
@@ -745,14 +767,15 @@ def unsaved_production_tokens(settings: Settings) -> list[Path]:
 
 def recovery_item_ids(settings: Settings) -> set[str]:
     """The production item ids named by unsaved recovery files (each is an Item that exists at
-    Plaid, so it counts toward the 10). Unreadable files are skipped."""
+    Plaid, so it counts toward the 10), also an id no Keychain name can hold (only counted here).
+    Unreadable files are skipped."""
     found: set[str] = set()
     for path in unsaved_production_tokens(settings):
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        match = re.search(r"^item_id: ([A-Za-z0-9_-]+)$", text, flags=re.M)
+        match = re.search(r"^item_id: (.+)$", text, flags=re.M)
         if match:
             found.add(match.group(1))
     return found
@@ -772,6 +795,43 @@ def mark_recovery_saved(settings: Settings, access_token: str) -> list[Path]:
         except OSError:
             continue
     return renamed
+
+
+#: Production Items whose saved token Plaid answered ``ITEM_NOT_FOUND`` for when Re-attach asked
+#: (``/item/get``): the connection was removed at Plaid (deleted in Plaid Portal or by a
+#: data-deletion request, RESEARCH T2.4) and can't come back. A JSON list of Plaid item ids (not
+#: secrets) under ``state_dir``.
+REMOVED_ITEMS_FILE = "removed-items-production.json"
+
+
+def removed_production_items(settings: Settings) -> set[str]:
+    """Production item ids Re-attach found removed at Plaid. Their tokens stay in Keychain and in
+    the index, so each still counts toward the 10, but they no longer wait to be re-attached or
+    block a link (``services.linking.orphaned_production_items``). A missing or unreadable file
+    reads as none: the next Re-attach finds them again."""
+    try:
+        text = (Path(settings.state_dir) / REMOVED_ITEMS_FILE).read_text(encoding="utf-8")
+        data = json.loads(text)
+    except OSError, ValueError:
+        return set()
+    return {i for i in data if isinstance(i, str)} if isinstance(data, list) else set()
+
+
+def mark_production_item_removed(settings: Settings, item_id: str) -> None:
+    """Note that Plaid answered ``ITEM_NOT_FOUND`` for ``item_id``'s saved token (a 0600 file,
+    replaced in one step). Raises ``OSError`` when the state folder can't be written."""
+    directory = Path(settings.state_dir)
+    ids = sorted(removed_production_items(settings) | {item_id})
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".removed-items-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(ids, fh)
+        os.replace(temporary, directory / REMOVED_ITEMS_FILE)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
 
 
 def production_link_blockers(settings: Settings, *, store: SecretStore | None = None) -> list[str]:
@@ -803,7 +863,8 @@ def write_access_token_recovery_file(
 ) -> Path:
     """Write a token that could not be saved to Keychain to a 0600 file with instructions
     (under ``<state_dir or settings.state_dir>/recovery``), one file per Item and attempt:
-    ``access-token-<env>-<item id>-<UTC stamp>.txt``."""
+    ``access-token-<env>-<item id>-<UTC stamp>.txt``. The name keeps at most 64 characters of
+    the id (file names are limited); the file itself holds all of it."""
     stamp = clock.now().strftime("%Y%m%dT%H%M%SZ")
     content = (
         "Budget Tracker could not save this Plaid access token to the macOS Keychain.\n"
@@ -817,7 +878,7 @@ def write_access_token_recovery_file(
     )
     return write_recovery_file(
         state_dir or settings.state_dir,
-        f"access-token-{settings.plaid_env}-{item_id}-{stamp}",
+        f"access-token-{settings.plaid_env}-{str(item_id)[:64]}-{stamp}",
         content,
     )
 

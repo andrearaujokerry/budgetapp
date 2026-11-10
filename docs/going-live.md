@@ -194,7 +194,8 @@ The cases where the connection exists:
   `~/Library/Application Support/budgetapp/state/recovery`, and the message names the file. Run
   `./run setup --env production --access-token`, paste the token from that file, then click
   **Re-attach existing connection** on the Connection page. Delete the file once the token is also
-  in your password manager.
+  in your password manager. Until the token is stored, "Linking is paused." names the file; once
+  the connection is re-attached, you can link another bank right away.
 - **"Your access token, shown only this once"**: the rare case where even the recovery file
   couldn't be written. Copy all of it into your password manager right away (it isn't stored
   anywhere else), then follow the message: `./run setup --env production --access-token`, then
@@ -217,12 +218,18 @@ knows which bank it is), or all 10 connections used.
 Each connection's access token in Keychain is that connection. If one is ever lost, the only way
 back without using another connection is a copy. Once, after each link: on the Connection page,
 the connection's **Keychain item** line names its item, `plaid.access_token.production.<id>`
-(one per connection; `<id>` is Plaid's id for it). Open **Keychain Access**, search for
-`budgetapp`, open the item with that account name, tick **Show password** and copy the value into
-your password manager, labelled with the bank. Don't change the item there, and
-never put the token anywhere else. With that copy, `./run setup --env production --access-token`
-can restore it at any time; the app checks it with Plaid, which also says which connection it
-belongs to, before saving.
+(one per connection; `<id>` is Plaid's id for it). Right after the upgrade from the Amex-only
+version, the American Express line names `plaid.access_token.production`, the token's old name,
+until the first sync moves it ([Upgrading the live app](#upgrading-the-live-app)); it is the same
+token either way. Open **Keychain Access**, search for `budgetapp`, open the item with that
+account name, tick **Show password** and copy the value into your password manager, labelled with
+the bank. Don't change the item there, and never put the token anywhere else. With that copy,
+`./run setup --env production --access-token` can restore it at any time; the app checks it with
+Plaid, which also says which connection it belongs to, before saving.
+
+A copy can't bring back a connection that Plaid itself removed, for example one deleted in Plaid
+Portal (my.plaid.com): never delete a connection there ([what happens
+then](reconnecting.md#when-the-connection-or-its-token-is-missing)).
 
 ## 5. Import older history
 
@@ -297,11 +304,14 @@ needed"**, run `./run live` in Terminal and reload the page.
 The upgrade to the version that links banks keeps your linked American Express as it is; nothing
 needs linking again. Its access token was saved as `plaid.access_token.production`; the first sync
 afterwards moves it to the connection's own Keychain item (it writes the new item, reads it back,
-then deletes the old one). If macOS asks, click **Always Allow**. If the move can't happen, the old
-item keeps working, linking another bank waits, and `./run doctor --env production` says what to
-do. If only the old item couldn't be deleted (the background agents can't ask for your approval),
-nothing waits: every later sync tries again, and `./run sync --env production` in Terminal
-deletes it once you click **Always Allow**.
+then deletes the old one). The background agent's next scheduled sync can be a few hours away:
+until then the Connection page's **Keychain item** line names the old item and where the token
+goes, and `./run sync --env production` in Terminal moves it at once. It is the same token, so a
+copy you saved before stays valid. If macOS asks, click **Always Allow**. If the move can't
+happen, the old item keeps working, linking another bank waits, and
+`./run doctor --env production` says what to do. If only the old item couldn't be deleted (the
+background agents can't ask for your approval), nothing waits: every later sync tries again, and
+`./run sync --env production` in Terminal deletes it once you click **Always Allow**.
 
 ## Stopping the agents
 

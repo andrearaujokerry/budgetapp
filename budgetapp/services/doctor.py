@@ -903,10 +903,25 @@ def _production_token_checks(ctx: DoctorContext, present: dict[str, bool]) -> li
         indexed = secrets.production_item_ids(store=ctx.store)
     except secrets.SecretStoreError:
         indexed = []
+    # Re-attach found these removed at Plaid (ITEM_NOT_FOUND): they can't come back (ops-2).
+    removed = secrets.removed_production_items(ctx.settings)
+    gone = [pid for pid in indexed if pid not in known and pid in removed]
+    if gone and ctx.database()[0]:
+        problems.append(
+            Check(
+                section,
+                INFO,
+                f"Plaid no longer has {len(gone)} saved connection(s): removed at Plaid, they "
+                "still count toward your 10",
+                detail="Items " + ", ".join(gone),
+            )
+        )
     orphans = [
         pid
         for pid in indexed
-        if pid not in known and present.get(secrets.production_access_token_key(pid))
+        if pid not in known
+        and pid not in removed
+        and present.get(secrets.production_access_token_key(pid))
     ]
     if orphans and ctx.database()[0]:
         problems.append(

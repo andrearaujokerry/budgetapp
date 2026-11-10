@@ -744,6 +744,30 @@ def test_each_connection_names_its_keychain_item(db, prod_client, production, se
     assert "access-production-item-" not in html
 
 
+def test_until_the_upgrade_moves_it_the_keychain_item_line_names_the_v1_item(
+    db, prod_client, production, secrets
+):
+    """Final review (ops-7, reqs-1): right after ./run live upgrades the Amex-only version, the
+    token keeps its v1 name until the first sync moves it. The line used to name the Item's own
+    item, which an owner following going-live.md's "Keep a copy" couldn't find."""
+    from budgetapp.services import sync as sync_service
+
+    item = make_item(db, plaid_item_id="item-amex")
+    make_account(db, item)
+    legacy = app_secrets.LEGACY_PRODUCTION_TOKEN
+    secrets.values[legacy] = "access-production-v1"
+    html = main(page(prod_client))
+    assert f'<code class="keychain-item">{legacy}</code>' in html
+    words = text(html)
+    assert f"the next sync moves it to {legacy}.item-amex" in words
+    assert "./run doctor --env production explains if it stays" in words
+    assert "access-production-v1" not in html
+    assert sync_service.migrate_legacy_token(db, production, secrets).status == "moved"
+    html = main(page(prod_client))
+    assert f'<code class="keychain-item">{legacy}.item-amex</code>' in html
+    assert "the next sync moves it" not in text(html)
+
+
 def test_two_logins_at_one_bank_have_their_own_titles(db, client):
     first = make_item(db, institution_name="Chase", institution_id="ins_3")
     make_account(db, first, name="Sapphire Preferred", mask="1234")

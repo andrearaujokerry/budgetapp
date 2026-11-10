@@ -27,7 +27,8 @@ Trial plan's 10 connections, and linking the same login a second time can also b
   (:func:`update_link_token`, :func:`complete_update`): same Item, same token, no connection used.
 * A token in Keychain without an Item row (lost or restored database), and the v1 token when the
   app can't tell whose it is, is re-attached (:func:`recover_orphaned_items`, under the same
-  lock): Plaid's ``/item/get`` names the Item. Never linked again.
+  lock): Plaid's ``/item/get`` names the Item. Never linked again. One whose Item Plaid removed
+  (``ITEM_NOT_FOUND``) is noted and left out from then on; it still counts toward the 10.
 
 Tokens are never logged or stored outside Keychain (SEC-2), and never returned in messages except
 the one documented case above. Functions that need several transactions take a ``sessionmaker``
@@ -153,14 +154,22 @@ class LinkAccount:
     subtype: str | None = None
 
 
+#: The most picked accounts kept from Link's metadata (untrusted JSON from the browser). A link
+#: that sent more can't be checked account by account (BANK-3), so it isn't checked in part.
+LINK_ACCOUNTS_LIMIT = 20
+
+
 @dataclass(frozen=True, slots=True)
 class LinkMetadata:
-    """The parts of Link's ``onSuccess`` metadata the app uses (nothing else is kept)."""
+    """The parts of Link's ``onSuccess`` metadata the app uses (nothing else is kept).
+    ``accounts_truncated``: Link sent more picked accounts than :data:`LINK_ACCOUNTS_LIMIT`, and
+    only the first ones were kept."""
 
     institution_id: str | None = None
     institution_name: str | None = None
     accounts: tuple[LinkAccount, ...] = ()
     link_session_id: str | None = None
+    accounts_truncated: bool = False
 
     @classmethod
     def from_json(cls, data: Any) -> LinkMetadata:
@@ -188,8 +197,9 @@ class LinkMetadata:
         return cls(
             institution_id=text(institution.get("institution_id")),
             institution_name=text(institution.get("name")),
-            accounts=tuple(accounts[:20]),
+            accounts=tuple(accounts[:LINK_ACCOUNTS_LIMIT]),
             link_session_id=text(data.get("link_session_id")),
+            accounts_truncated=len(accounts) > LINK_ACCOUNTS_LIMIT,
         )
 
 
@@ -283,6 +293,19 @@ def _release(
             release_attempt(s, store, attempt)
 
 
+def _release_for_recovery_file(
+    session_factory: sessionmaker[Session], store: secrets.SecretStore | None, attempt: str | None
+) -> None:
+    """The attempt's token waits in a production recovery file, which keeps new links away by
+    itself until it is stored (:func:`secrets.unsaved_production_tokens`), so the marker goes:
+    once the owner has stored it and re-attached, the next link may start. Best effort: a failure
+    here must not hide the message that names the file (the marker then expires by itself)."""
+    try:
+        _release(session_factory, store, attempt)
+    except Exception:
+        log.warning("Couldn't clear the link-in-progress marker; it expires by itself")
+
+
 def _claim_marker(store: secrets.SecretStore | None, attempt: str | None) -> str | None:
     """While an exchange runs, the marker keeps new links away: (re)write it for this attempt
     unless another attempt's unexpired marker is there. Returns the attempt that now owns it (a new
@@ -332,11 +355,14 @@ def _clock_text(value: dt.datetime, today: dt.date) -> str:
 
 
 def orphaned_production_items(
-    session: Session, *, store: secrets.SecretStore | None = None
+    session: Session, settings: Settings, *, store: secrets.SecretStore | None = None
 ) -> list[str]:
     """Production Item ids whose token is in Keychain (the index) but whose Item row is missing:
-    a crash between the Keychain write and the commit, or a lost or restored database."""
+    a crash between the Keychain write and the commit, or a lost or restored database. One that
+    Re-attach found removed at Plaid (:func:`secrets.removed_production_items`) is left out: it
+    can't come back, so it no longer waits to be re-attached (it still counts toward the 10)."""
     known = set(session.scalars(select(PlaidItem.plaid_item_id)))
+    known |= secrets.removed_production_items(settings)
     return [
         item_id
         for item_id in secrets.production_item_ids(store=store)
@@ -398,7 +424,7 @@ def link_blocks(
     it can't lose its owner (placing it compares values), and syncs delete it."""
     today = clock.today()
     reasons: list[str] = []
-    orphans = orphaned_production_items(session, store=store)
+    orphans = orphaned_production_items(session, settings, store=store)
     legacy = legacy_state(session, store=store)
     if orphans or legacy.state == "unplaced":
         reasons.append(
@@ -623,6 +649,22 @@ def _normal(text: str | None) -> str:
     return " ".join((text or "").casefold().split())
 
 
+#: Plaid's answer for a connection it no longer has (deleted at my.plaid.com, removed with
+#: /item/remove or by a data-deletion request); update mode can't repair it (RESEARCH T2.4).
+ITEM_NOT_FOUND = "ITEM_NOT_FOUND"
+
+
+def _removed_refusal(name: str) -> str:
+    """The refusal to link a login again whose connection Plaid removed (ops-3): nothing on this
+    page can repair it, and removing a connection isn't part of this version (W3-PLAN §0)."""
+    return (
+        f"Plaid no longer has your {name} connection (it was removed at Plaid), so Reconnect and "
+        "Add accounts can't repair it, and the app can't link that login again while the "
+        "connection is listed here. This new link was not completed (its token was not "
+        "exchanged). The data already here stays."
+    )
+
+
 def _same_institution(item: PlaidItem, meta: LinkMetadata) -> bool:
     """Link's institution is this Item's: Plaid's id, or (an Item saved without one) its name."""
     if item.institution_id:
@@ -645,11 +687,19 @@ def duplicate_problem(
     * With that choice, still refused when any picked account's name and mask match an account
       already linked at that institution (the same login again). Masks are compared with masks
       only, never with account numbers (the app never has those).
+    * A connection whose last error is ``ITEM_NOT_FOUND`` was removed at Plaid: neither Reconnect
+      nor Add accounts can repair it, so its refusal says that instead. Linking that login again
+      stays refused while the connection is listed (removing one isn't in this version, W3-PLAN
+      §0, and a new link would use another of the 10).
     * With connections in place, Link metadata without the institution's id (or, with the
-      choice, without the picked accounts) can't be checked, so it is refused too (fail safe).
-      Plaid's ``onSuccess`` names the institution with both its id and its name (RESEARCH T2:
-      ``institution: {name, institution_id} | null``); every Item this app saves has the id, so a
-      name alone would match none of them."""
+      choice, without the picked accounts, or with more of them than :data:`LINK_ACCOUNTS_LIMIT`)
+      can't be checked, so it is refused too (fail safe). Plaid's ``onSuccess`` names the
+      institution with both its id and its name (RESEARCH T2: ``institution: {name,
+      institution_id} | null``), and Items get the id from it or from ``/item/get``, so a name
+      alone would match none of them.
+    * A connection saved with neither the institution's id nor its name (a first link whose
+      metadata named none, while ``/item/get`` failed right after linking) could be any bank:
+      every new link is refused until a sync or Reconnect has asked ``/item/get`` which it is."""
     items = list(session.scalars(select(PlaidItem).order_by(PlaidItem.id)))
     if not items:
         return None
@@ -659,11 +709,21 @@ def duplicate_problem(
             "linked it already. This new link was not completed (its token was not exchanged); "
             "try again."
         )
+    if any(not i.institution_id and not i.institution_name for i in items):
+        return (
+            "A connection here was saved without the name of its bank, so the app can't check "
+            "that this isn't the same bank and login again. This new link was not completed (its "
+            "token was not exchanged). Sync now (or Reconnect it, if it needs that) asks Plaid "
+            "which bank it is; then link again."
+        )
     same = [i for i in items if _same_institution(i, meta)]
     if not same:
         return None
     name = meta.institution_name or same[0].institution_name or "This bank"
+    removed = {i.id for i in same if i.error_code == ITEM_NOT_FOUND}
     if not different_login:
+        if len(removed) == len(same):
+            return _removed_refusal(name)
         return (
             f"{name} is already linked, so this new link was not completed (its token was not "
             "exchanged). To add accounts from that login, use Add accounts on its connection; "
@@ -684,6 +744,8 @@ def duplicate_problem(
     for picked in meta.accounts:
         for account in linked:
             if _normal(picked.name) == _normal(account.name) and picked.mask == account.mask:
+                if account.item_id in removed:
+                    return _removed_refusal(name)
                 label = account.display_name
                 return (
                     f"{label} is already linked at {name}: this looks like the same login linked "
@@ -691,6 +753,14 @@ def duplicate_problem(
                     "first one. This new link was not completed (its token was not exchanged). "
                     "To add accounts to that login, use Add accounts on its connection."
                 )
+    if meta.accounts_truncated:
+        return (
+            f"You picked more than {LINK_ACCOUNTS_LIMIT} accounts at {name}, more than the app "
+            "checks against the accounts already linked there, so it can't tell that this login "
+            "isn't linked already. This new link was not completed (its token was not "
+            f"exchanged). Link again with at most {LINK_ACCOUNTS_LIMIT}; Add accounts on the new "
+            "connection adds the others."
+        )
     return None
 
 
@@ -712,7 +782,7 @@ def _exchange_problem(
             "with ./run setup --env production --access-token, then re-attach it here."
         )
     legacy = legacy_state(session, store=store)
-    if orphaned_production_items(session, store=store) or legacy.state == "unplaced":
+    if orphaned_production_items(session, settings, store=store) or legacy.state == "unplaced":
         return (
             "Keychain holds the access token of a connection that this database doesn't show, "
             "so this new link was not completed (its token was not exchanged). Re-attach the "
@@ -842,11 +912,13 @@ def exchange(
     :class:`LinkBusy`), refused before anything reaches Plaid while the guard says no
     (:func:`_exchange_problem`; a v1 token is moved to its Item's key first). While it runs it
     keeps the link-in-progress marker (of ``attempt``, the id :func:`new_link_token` returned), and
-    clears it once the token is safe or Plaid gave a definite no; an unknown outcome keeps it until
-    it expires. The access token goes to Keychain under the Item's own key (write-once, read back)
-    BEFORE the database; then the Item, its accounts and ``/item/get`` details are saved in one
-    transaction, and a lone manual CSV account is attached to a lone American Express card. The
-    caller starts the post-link backfill (``sync.Backfill``).
+    clears it once the token is safe (in Keychain, or in a recovery file, which keeps new links away
+    by itself) or Plaid gave a definite no; an unknown outcome, or a token that only this answer
+    holds (:class:`TokenNotSaved`), keeps it until it expires. The access token goes to Keychain
+    under the Item's own key (write-once, read back) BEFORE the database; then the Item, its
+    accounts and ``/item/get`` details are saved in one transaction, and a lone manual CSV account
+    is attached to a lone American Express card. The caller starts the post-link backfill
+    (``sync.Backfill``).
     """
     if not public_token or not isinstance(public_token, str):
         raise LinkRefused("Plaid Link didn't send a public token. Nothing was linked.")
@@ -940,7 +1012,7 @@ def _complete_exchange(
                 "The test Item was created, but its access token couldn't be saved, neither to "
                 "Keychain nor to a recovery file, so it can't be used. Create another test Item."
             ) from exc
-        if exc.recovery_path is None:
+        if exc.recovery_path is None:  # the marker stays: nothing else keeps new links away
             raise TokenNotSaved(
                 "The connection was created, but its access token couldn't be saved, neither to "
                 "Keychain nor to a recovery file. Copy the token shown below into your password "
@@ -948,6 +1020,7 @@ def _complete_exchange(
                 f"{reattach} the connection on this page.{never_again}",
                 result.access_token,
             ) from exc
+        _release_for_recovery_file(session_factory, store, owned)
         raise LinkFailed(
             "The connection was created, but its access token couldn't be saved to Keychain. It "
             f"was saved to {exc.recovery_path} (readable only by you). Store it with {setup}, "
@@ -955,6 +1028,8 @@ def _complete_exchange(
         ) from exc
     except secrets.AccessTokenConflict as exc:
         log.error("Keychain already held a different access token; Item %s", result.item_id)
+        if exc.recovery_path is not None:
+            _release_for_recovery_file(session_factory, store, owned)
         raise LinkFailed(
             "The connection was created, but Keychain already holds a different access token. "
             f"{exc} Re-attach the saved connection on this page instead.{never_again}"
@@ -1288,9 +1363,25 @@ def reattach_available(
     can place, the next sync or link moves to that Item's key by itself)."""
     if not settings.is_production:
         return False
-    return bool(orphaned_production_items(session, store=store)) or legacy_unplaced(
+    return bool(orphaned_production_items(session, settings, store=store)) or legacy_unplaced(
         session, store=store
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ReattachOutcome:
+    """What Re-attach did (:func:`recover_orphaned_items`), one saved token at a time.
+
+    ``results``: the connections rebuilt, or whose v1 token moved to an Item the database has
+    (the caller syncs each from the beginning). ``removed``: production item ids whose token
+    Plaid answered ``ITEM_NOT_FOUND`` for: removed at Plaid, so they are noted
+    (:func:`secrets.mark_production_item_removed`) and left out from now on; their tokens stay
+    in Keychain and they still count toward the 10. ``problems``: why other saved tokens weren't
+    re-attached this time, in the user's words (each waits for the next try)."""
+
+    results: tuple[LinkResult, ...] = ()
+    removed: tuple[str, ...] = ()
+    problems: tuple[str, ...] = ()
 
 
 def recover_orphaned_items(
@@ -1298,12 +1389,13 @@ def recover_orphaned_items(
     gateway: PlaidGateway,
     store: secrets.SecretStore,
     settings: Settings,
-) -> list[LinkResult]:
+) -> ReattachOutcome:
     """Re-create the database rows of connections whose token is in Keychain but whose Item row is
     missing: rebuilt from ``/item/get`` and ``/accounts/get``; the caller then syncs from a null
     cursor (which reconciles). Production re-attaches every orphaned token, one Item per token,
     and the v1 token: ``/item/get`` names its Item, and the token moves to that Item's own key
-    (for an Item the database already has, that is all). Never a new link. Runs under
+    (for an Item the database already has, that is all). Never a new link. Each token is handled
+    on its own, so one that fails never stops the others (:class:`ReattachOutcome`). Runs under
     ``db.LINK_WORK_KEY`` (a second request at the same time — a double click — gets
     :class:`LinkBusy`). The Item keeps Plaid's ``created_at`` as its link date, so the consent
     estimate doesn't restart from today when Amex leaves the expiry empty."""
@@ -1320,11 +1412,11 @@ def _recover_locked(
     gateway: PlaidGateway,
     store: secrets.SecretStore,
     settings: Settings,
-) -> list[LinkResult]:
+) -> ReattachOutcome:
     env = settings.plaid_env
     with session_factory() as s:
         if settings.is_production:
-            orphans = orphaned_production_items(s, store=store)
+            orphans = orphaned_production_items(s, settings, store=store)
         else:
             orphans = orphaned_sandbox_items(s, store=store)
     candidates: list[tuple[str | None, str | None]] = [
@@ -1341,29 +1433,50 @@ def _recover_locked(
                 secrets.move_legacy_production_token(where.item_id, store=store)
             else:
                 candidates.append((None, legacy))
-    results = []
+    results: list[LinkResult] = []
+    removed: list[str] = []
+    problems: list[str] = []
     for expected_id, token in candidates:
         if not token:
             continue
         try:
             item_body = gateway.get_item(token)
         except PlaidGatewayError as err:
-            raise LinkFailed(
-                f"Plaid didn't recognise a saved connection ({err.error_code}). Nothing was "
-                "changed."
-            ) from err
+            log.warning(
+                "Re-attach: /item/get failed for %s: %s",
+                expected_id or "the v1 token",
+                err.error_code,
+            )
+            if err.error_code == ITEM_NOT_FOUND and expected_id and settings.is_production:
+                _note_removed(settings, expected_id)
+                removed.append(expected_id)
+            elif isinstance(err, PlaidTransportError):
+                problems.append(
+                    "Plaid couldn't be reached, so a saved connection wasn't re-attached. Try "
+                    "again in a moment."
+                )
+            else:
+                problems.append(
+                    f"Plaid didn't recognise a saved connection ({err.error_code}), so it wasn't "
+                    "re-attached."
+                )
+            continue
         data = item_body.get("item") or {}
         plaid_item_id = data.get("item_id") or expected_id
         if not plaid_item_id or (expected_id and plaid_item_id != expected_id):
-            raise LinkFailed("Plaid's answer didn't match the saved connection; nothing changed.")
+            problems.append(
+                "Plaid's answer didn't match a saved connection, so it wasn't re-attached."
+            )
+            continue
         if expected_id is None:
             move = secrets.move_legacy_production_token(plaid_item_id, store=store)
             if move.status != "moved":
-                raise LinkFailed(
-                    "Keychain couldn't save the access token of this connection under its new "
-                    f"name ({move.reason}). Nothing was changed; ./run doctor --env production "
-                    "says what to do."
+                problems.append(
+                    "Keychain couldn't save the access token of a saved connection under its new "
+                    f"name ({move.reason}), so it wasn't re-attached; ./run doctor --env "
+                    "production says what to do."
                 )
+                continue
             with session_factory() as s:
                 known = s.scalars(
                     select(PlaidItem).where(PlaidItem.plaid_item_id == plaid_item_id)
@@ -1408,7 +1521,19 @@ def _recover_locked(
                 attach_needed,
             )
         )
-    return results
+    return ReattachOutcome(tuple(results), tuple(removed), tuple(dict.fromkeys(problems)))
+
+
+def _note_removed(settings: Settings, plaid_item_id: str) -> None:
+    """Remember that Plaid removed this connection, so it no longer waits to be re-attached or
+    blocks a link. If the state folder can't be written, it keeps waiting (and the next Re-attach
+    notes it again)."""
+    try:
+        secrets.mark_production_item_removed(settings, plaid_item_id)
+    except OSError:
+        log.warning("Couldn't note that Plaid removed Item %s", plaid_item_id, exc_info=True)
+    else:
+        log.warning("Plaid no longer has Item %s (ITEM_NOT_FOUND); it is left out", plaid_item_id)
 
 
 # --------------------------------------------------------------------------- manual CSV accounts
@@ -1670,8 +1795,11 @@ class ItemView:
     institution_id: str | None = None
     is_amex: bool = False
     #: the Keychain item that holds this connection's access token (a name, never the token):
-    #: ``plaid.access_token.<env>.<Plaid's item id>``, for the copy going-live.md suggests
+    #: ``plaid.access_token.<env>.<Plaid's item id>``, for the copy going-live.md suggests; the
+    #: v1 name ``plaid.access_token.production`` until the token has moved (C6)
     keychain_item: str | None = None
+    #: while the token still has its v1 name: the item the next sync or link moves it to
+    keychain_moves_to: str | None = None
 
     @property
     def needs_reconnect(self) -> bool:
@@ -1814,6 +1942,9 @@ def connection_overview(
     many of the 10 Plaid connections are used, and the Sandbox's orphaned test Items."""
     status = status_service.connection_status(session, now=now)
     by_id = {i.item_id: i for i in status.items}
+    # The v1 token (C6) keeps its old name until a sync or link moves it to its Item's own item.
+    legacy = legacy_state(session, store=store) if settings.is_production else None
+    v1_owner = legacy.item_id if legacy is not None and legacy.state == "movable" else None
     items = []
     for item in session.scalars(select(PlaidItem).order_by(PlaidItem.id)):
         accounts = session.scalars(
@@ -1823,6 +1954,9 @@ def connection_overview(
             keychain_item = secrets.access_token_key(settings.plaid_env, item.plaid_item_id)
         except ValueError:  # an id Keychain names can't hold (never one of Plaid's)
             keychain_item = None
+        moves_to = None
+        if v1_owner is not None and item.plaid_item_id == v1_owner:
+            keychain_item, moves_to = secrets.LEGACY_PRODUCTION_TOKEN, keychain_item
         items.append(
             ItemView(
                 id=item.id,
@@ -1848,6 +1982,7 @@ def connection_overview(
                 institution_id=item.institution_id,
                 is_amex=status_service.is_amex(item),
                 keychain_item=keychain_item,
+                keychain_moves_to=moves_to,
             )
         )
     order = {s.item_id: n for n, s in enumerate(status.items)}  # worst first, like the status
