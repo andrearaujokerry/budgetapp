@@ -53,7 +53,8 @@ Paths — never inside the git checkout, never under `~/Desktop`, `~/Documents`,
 - `~/Library/Application Support/budgetapp/bin/` — the postgres agent's start-up wrapper script
 - `~/Library/Application Support/budgetapp/backups/<env>/` — nightly `pg_dump` files (REL-2)
 - `~/Library/Application Support/budgetapp/state/` — small marker files (alert de-duplication
-  when the database or Keychain is unavailable, install stamp, recovery files)
+  when the database or Keychain is unavailable, install stamp, recovery files, the connections
+  Re-attach found removed at Plaid)
 - `~/Library/Logs/budgetapp/` — app, sync, backup and postgres logs (never contain secrets). The
   app's own logs rotate (5 MB, 3 kept); the backup agent trims any other log over 10 MB to its
   newest 1 MB in place (launchd and PostgreSQL keep those files open with `O_APPEND`)
@@ -799,7 +800,8 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   offers no link once 10 exist (`TRIAL_ITEM_LIMIT`).
 - **The guard.** A production new-link token is issued only while no unexpired
   `plaid.link_in_progress.production` marker exists (one link at a time), no unsaved production
-  token waits in a recovery file, no token in Keychain lacks its Item row, no v1 token is left
+  token waits in a recovery file, no token in Keychain lacks its Item row (unless Re-attach found
+  its connection removed at Plaid), no v1 token is left
   that the app can't place (re-attach first, so the duplicate check knows every bank) or failed
   to move, and fewer than 10 Items exist
   (`linking.link_blocks`, with `secrets.production_link_blockers` for the Keychain-only facts) —
@@ -836,7 +838,13 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
 - **Re-attach.** A token in Keychain whose Item row is missing (lost or restored database, or a
   crash between the Keychain write and the commit), and a v1 token the app can't place, are
   re-attached per token: `/item/get` names the Item, its row is rebuilt from `/item/get` and
-  `/accounts/get`, it syncs from a null cursor and reconciles — never a new link.
+  `/accounts/get`, it syncs from a null cursor and reconciles — never a new link. Each token is
+  handled on its own (`linking.ReattachOutcome`), so one that fails never stops the others or
+  hides what was done. A token whose `/item/get` answers `ITEM_NOT_FOUND` belongs to a connection
+  Plaid removed (RESEARCH T2.4): its id is noted in `state/removed-items-production.json`
+  (`secrets.mark_production_item_removed`; item ids aren't secrets) and it no longer waits to be
+  re-attached or blocks a link, while its token stays in Keychain and in the index, so it still
+  counts toward the 10. Any other failure is reported, and that token waits for the next try.
 - **Pre-flight.** Before a production link the Connection page shows Plaid's checklist (a Data
   Transparency use case selected; OAuth banks, which the Trial plan grants automatically: the
   Dashboard's OAuth institutions tab says no action is needed) and a live `/institutions/search`

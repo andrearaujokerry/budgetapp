@@ -618,6 +618,76 @@ def test_production_re_attaches_the_saved_token(db, prod_client, prod_app, prod_
     assert prod_plaid.calls_to("exchange_public_token") == []
 
 
+DEAD_TOKEN = "access-production-of-an-item-plaid-removed"
+
+
+def failing_item_get(prod_plaid, token: str, error: Exception) -> None:
+    """``/item/get`` fails with ``error`` for ``token`` (every time) and answers for the rest."""
+    real = prod_plaid.get_item
+
+    def get_item(access_token: str):
+        if access_token == token:
+            raise error
+        return real(access_token)
+
+    prod_plaid.get_item = get_item
+
+
+def test_re_attach_leaves_out_a_connection_plaid_removed_and_says_so(
+    db, prod_client, prod_app, prod_plaid, production, secrets
+):
+    """Final review (ops-2): a saved token whose connection Plaid removed (ITEM_NOT_FOUND) used
+    to stop Re-attach with "Nothing was changed", leave the other saved connection out, and keep
+    every new link refused for good."""
+    amex = prod_plaid.add_item(item_id="item-amex")
+    app_secrets.store_access_token(production, "item-dead", DEAD_TOKEN, store=secrets)
+    app_secrets.store_access_token(production, "item-amex", amex.access_token, store=secrets)
+    failing_item_get(prod_plaid, DEAD_TOKEN, prod_plaid.plaid_error("ITEM_NOT_FOUND"))
+    assert "A saved connection was found." in prod_client.get("/connection").text
+    response = prod_client.post("/connection/recover", follow_redirects=False)
+    assert flashed(response) == [
+        {"level": "success", "text": "Re-attached 1 connection. Syncing from the beginning now."},
+        {
+            "level": "info",
+            "text": "Plaid no longer has 1 saved connection (it was removed at Plaid), so it can't "
+            "be re-attached. Its access token stays in Keychain, and it still counts toward your "
+            "10 Plaid connections.",
+        },
+    ]
+    item = db.scalars(select(PlaidItem)).one()
+    assert item.plaid_item_id == "item-amex"
+    assert prod_app.state.jobs.waiting_keys() == [f"backfill:{item.id}"]
+    html = prod_client.get("/connection").text
+    assert "A saved connection was found." not in html and "Linking is paused." not in html
+    assert prod_client.post("/connection/link-token", json={"mode": "new"}).status_code == 200
+
+
+def test_re_attach_says_what_it_did_when_another_token_fails(
+    db, prod_client, prod_app, prod_plaid, production, secrets
+):
+    """Final review (ops-2): the first connection is re-attached and synced even when Plaid can't
+    be reached for the next one; the page no longer says that nothing changed."""
+    amex = prod_plaid.add_item(item_id="item-amex")
+    tartan = prod_plaid.add_item(
+        item_id="item-tartan", institution_id="ins_109511", institution_name="Tartan Bank"
+    )
+    for fake in (amex, tartan):
+        app_secrets.store_access_token(production, fake.item_id, fake.access_token, store=secrets)
+    failing_item_get(prod_plaid, tartan.access_token, prod_plaid.transport_error())
+    response = prod_client.post("/connection/recover", follow_redirects=False)
+    assert flashed(response) == [
+        {"level": "success", "text": "Re-attached 1 connection. Syncing from the beginning now."},
+        {
+            "level": "error",
+            "text": "Plaid couldn't be reached, so a saved connection wasn't re-attached. Try "
+            "again in a moment.",
+        },
+    ]
+    item = db.scalars(select(PlaidItem)).one()
+    assert prod_app.state.jobs.waiting_keys() == [f"backfill:{item.id}"]
+    assert "A saved connection was found." in prod_client.get("/connection").text
+
+
 # --------------------------------------------------------------------------- attach, lost edits
 
 

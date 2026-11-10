@@ -844,6 +844,17 @@ class TestProductionTokens:
         assert orphan.status == WARN and orphan.detail == "Items item-tartan"
         assert "Re-attach" in orphan.fix
 
+    def test_a_connection_plaid_removed_is_no_longer_sent_to_re_attach(self, prod, db):
+        """Final review (ops-2): once Re-attach has found that Plaid removed it (ITEM_NOT_FOUND),
+        the page stops offering Re-attach for it, so doctor stops asking for it too."""
+        make_item(db, plaid_item_id="item-amex")
+        store = self.store(self.AMEX, self.TARTAN, index=("item-amex", "item-tartan"))
+        app_secrets.mark_production_item_removed(prod.settings, "item-tartan")
+        checks = prod.run(doctor.check_keychain_items, store=store)
+        assert not [c for c in checks if "no connection in the database" in c.title]
+        (gone,) = [c for c in checks if "removed at Plaid" in c.title]
+        assert gone.status == INFO and gone.detail == "Items item-tartan" and gone.fix is None
+
     def test_a_v1_token_not_moved_yet(self, prod, db):
         make_item(db, plaid_item_id="item-amex")
         titles = self.titles(prod, self.store(app_secrets.LEGACY_PRODUCTION_TOKEN))

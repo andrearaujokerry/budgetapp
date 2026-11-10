@@ -792,6 +792,43 @@ def mark_recovery_saved(settings: Settings, access_token: str) -> list[Path]:
     return renamed
 
 
+#: Production Items whose saved token Plaid answered ``ITEM_NOT_FOUND`` for when Re-attach asked
+#: (``/item/get``): the connection was removed at Plaid (deleted in Plaid Portal or by a
+#: data-deletion request, RESEARCH T2.4) and can't come back. A JSON list of Plaid item ids (not
+#: secrets) under ``state_dir``.
+REMOVED_ITEMS_FILE = "removed-items-production.json"
+
+
+def removed_production_items(settings: Settings) -> set[str]:
+    """Production item ids Re-attach found removed at Plaid. Their tokens stay in Keychain and in
+    the index, so each still counts toward the 10, but they no longer wait to be re-attached or
+    block a link (``services.linking.orphaned_production_items``). A missing or unreadable file
+    reads as none: the next Re-attach finds them again."""
+    try:
+        text = (Path(settings.state_dir) / REMOVED_ITEMS_FILE).read_text(encoding="utf-8")
+        data = json.loads(text)
+    except OSError, ValueError:
+        return set()
+    return {i for i in data if isinstance(i, str)} if isinstance(data, list) else set()
+
+
+def mark_production_item_removed(settings: Settings, item_id: str) -> None:
+    """Note that Plaid answered ``ITEM_NOT_FOUND`` for ``item_id``'s saved token (a 0600 file,
+    replaced in one step). Raises ``OSError`` when the state folder can't be written."""
+    directory = Path(settings.state_dir)
+    ids = sorted(removed_production_items(settings) | {item_id})
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".removed-items-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(ids, fh)
+        os.replace(temporary, directory / REMOVED_ITEMS_FILE)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
 def production_link_blockers(settings: Settings, *, store: SecretStore | None = None) -> list[str]:
     """Every reason, outside the database, not to issue a production new-link token (§7).
 

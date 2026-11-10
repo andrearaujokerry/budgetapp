@@ -287,6 +287,19 @@ class TestProductionLinkGuard:
         [left] = sec.unsaved_production_tokens(prod)
         assert OTHER_TOKEN in left.read_text()
 
+    def test_connections_plaid_removed_are_noted_in_a_private_file(self, prod):
+        """Final review (ops-2): Re-attach notes a connection Plaid answered ITEM_NOT_FOUND for,
+        so it no longer waits to be re-attached. A note that can't be read counts as none (the
+        next Re-attach asks Plaid again)."""
+        assert sec.removed_production_items(prod) == set()
+        for item_id in ("item-dead", "item-gone", "item-dead"):
+            sec.mark_production_item_removed(prod, item_id)
+        assert sec.removed_production_items(prod) == {"item-dead", "item-gone"}
+        path = prod.state_dir / sec.REMOVED_ITEMS_FILE
+        assert _mode(path) == 0o600 and list(prod.state_dir.glob(".removed-items-*")) == []
+        path.write_text("{not json")
+        assert sec.removed_production_items(prod) == set()
+
 
 class TestLegacyTokenMove:
     """C6: the v1 key is moved once to its Item's key; on any doubt it stays and keeps working."""

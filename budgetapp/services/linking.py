@@ -27,7 +27,8 @@ Trial plan's 10 connections, and linking the same login a second time can also b
   (:func:`update_link_token`, :func:`complete_update`): same Item, same token, no connection used.
 * A token in Keychain without an Item row (lost or restored database), and the v1 token when the
   app can't tell whose it is, is re-attached (:func:`recover_orphaned_items`, under the same
-  lock): Plaid's ``/item/get`` names the Item. Never linked again.
+  lock): Plaid's ``/item/get`` names the Item. Never linked again. One whose Item Plaid removed
+  (``ITEM_NOT_FOUND``) is noted and left out from then on; it still counts toward the 10.
 
 Tokens are never logged or stored outside Keychain (SEC-2), and never returned in messages except
 the one documented case above. Functions that need several transactions take a ``sessionmaker``
@@ -354,11 +355,14 @@ def _clock_text(value: dt.datetime, today: dt.date) -> str:
 
 
 def orphaned_production_items(
-    session: Session, *, store: secrets.SecretStore | None = None
+    session: Session, settings: Settings, *, store: secrets.SecretStore | None = None
 ) -> list[str]:
     """Production Item ids whose token is in Keychain (the index) but whose Item row is missing:
-    a crash between the Keychain write and the commit, or a lost or restored database."""
+    a crash between the Keychain write and the commit, or a lost or restored database. One that
+    Re-attach found removed at Plaid (:func:`secrets.removed_production_items`) is left out: it
+    can't come back, so it no longer waits to be re-attached (it still counts toward the 10)."""
     known = set(session.scalars(select(PlaidItem.plaid_item_id)))
+    known |= secrets.removed_production_items(settings)
     return [
         item_id
         for item_id in secrets.production_item_ids(store=store)
@@ -420,7 +424,7 @@ def link_blocks(
     it can't lose its owner (placing it compares values), and syncs delete it."""
     today = clock.today()
     reasons: list[str] = []
-    orphans = orphaned_production_items(session, store=store)
+    orphans = orphaned_production_items(session, settings, store=store)
     legacy = legacy_state(session, store=store)
     if orphans or legacy.state == "unplaced":
         reasons.append(
@@ -778,7 +782,7 @@ def _exchange_problem(
             "with ./run setup --env production --access-token, then re-attach it here."
         )
     legacy = legacy_state(session, store=store)
-    if orphaned_production_items(session, store=store) or legacy.state == "unplaced":
+    if orphaned_production_items(session, settings, store=store) or legacy.state == "unplaced":
         return (
             "Keychain holds the access token of a connection that this database doesn't show, "
             "so this new link was not completed (its token was not exchanged). Re-attach the "
@@ -1359,9 +1363,25 @@ def reattach_available(
     can place, the next sync or link moves to that Item's key by itself)."""
     if not settings.is_production:
         return False
-    return bool(orphaned_production_items(session, store=store)) or legacy_unplaced(
+    return bool(orphaned_production_items(session, settings, store=store)) or legacy_unplaced(
         session, store=store
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ReattachOutcome:
+    """What Re-attach did (:func:`recover_orphaned_items`), one saved token at a time.
+
+    ``results``: the connections rebuilt, or whose v1 token moved to an Item the database has
+    (the caller syncs each from the beginning). ``removed``: production item ids whose token
+    Plaid answered ``ITEM_NOT_FOUND`` for: removed at Plaid, so they are noted
+    (:func:`secrets.mark_production_item_removed`) and left out from now on; their tokens stay
+    in Keychain and they still count toward the 10. ``problems``: why other saved tokens weren't
+    re-attached this time, in the user's words (each waits for the next try)."""
+
+    results: tuple[LinkResult, ...] = ()
+    removed: tuple[str, ...] = ()
+    problems: tuple[str, ...] = ()
 
 
 def recover_orphaned_items(
@@ -1369,12 +1389,13 @@ def recover_orphaned_items(
     gateway: PlaidGateway,
     store: secrets.SecretStore,
     settings: Settings,
-) -> list[LinkResult]:
+) -> ReattachOutcome:
     """Re-create the database rows of connections whose token is in Keychain but whose Item row is
     missing: rebuilt from ``/item/get`` and ``/accounts/get``; the caller then syncs from a null
     cursor (which reconciles). Production re-attaches every orphaned token, one Item per token,
     and the v1 token: ``/item/get`` names its Item, and the token moves to that Item's own key
-    (for an Item the database already has, that is all). Never a new link. Runs under
+    (for an Item the database already has, that is all). Never a new link. Each token is handled
+    on its own, so one that fails never stops the others (:class:`ReattachOutcome`). Runs under
     ``db.LINK_WORK_KEY`` (a second request at the same time — a double click — gets
     :class:`LinkBusy`). The Item keeps Plaid's ``created_at`` as its link date, so the consent
     estimate doesn't restart from today when Amex leaves the expiry empty."""
@@ -1391,11 +1412,11 @@ def _recover_locked(
     gateway: PlaidGateway,
     store: secrets.SecretStore,
     settings: Settings,
-) -> list[LinkResult]:
+) -> ReattachOutcome:
     env = settings.plaid_env
     with session_factory() as s:
         if settings.is_production:
-            orphans = orphaned_production_items(s, store=store)
+            orphans = orphaned_production_items(s, settings, store=store)
         else:
             orphans = orphaned_sandbox_items(s, store=store)
     candidates: list[tuple[str | None, str | None]] = [
@@ -1412,29 +1433,50 @@ def _recover_locked(
                 secrets.move_legacy_production_token(where.item_id, store=store)
             else:
                 candidates.append((None, legacy))
-    results = []
+    results: list[LinkResult] = []
+    removed: list[str] = []
+    problems: list[str] = []
     for expected_id, token in candidates:
         if not token:
             continue
         try:
             item_body = gateway.get_item(token)
         except PlaidGatewayError as err:
-            raise LinkFailed(
-                f"Plaid didn't recognise a saved connection ({err.error_code}). Nothing was "
-                "changed."
-            ) from err
+            log.warning(
+                "Re-attach: /item/get failed for %s: %s",
+                expected_id or "the v1 token",
+                err.error_code,
+            )
+            if err.error_code == ITEM_NOT_FOUND and expected_id and settings.is_production:
+                _note_removed(settings, expected_id)
+                removed.append(expected_id)
+            elif isinstance(err, PlaidTransportError):
+                problems.append(
+                    "Plaid couldn't be reached, so a saved connection wasn't re-attached. Try "
+                    "again in a moment."
+                )
+            else:
+                problems.append(
+                    f"Plaid didn't recognise a saved connection ({err.error_code}), so it wasn't "
+                    "re-attached."
+                )
+            continue
         data = item_body.get("item") or {}
         plaid_item_id = data.get("item_id") or expected_id
         if not plaid_item_id or (expected_id and plaid_item_id != expected_id):
-            raise LinkFailed("Plaid's answer didn't match the saved connection; nothing changed.")
+            problems.append(
+                "Plaid's answer didn't match a saved connection, so it wasn't re-attached."
+            )
+            continue
         if expected_id is None:
             move = secrets.move_legacy_production_token(plaid_item_id, store=store)
             if move.status != "moved":
-                raise LinkFailed(
-                    "Keychain couldn't save the access token of this connection under its new "
-                    f"name ({move.reason}). Nothing was changed; ./run doctor --env production "
-                    "says what to do."
+                problems.append(
+                    "Keychain couldn't save the access token of a saved connection under its new "
+                    f"name ({move.reason}), so it wasn't re-attached; ./run doctor --env "
+                    "production says what to do."
                 )
+                continue
             with session_factory() as s:
                 known = s.scalars(
                     select(PlaidItem).where(PlaidItem.plaid_item_id == plaid_item_id)
@@ -1479,7 +1521,19 @@ def _recover_locked(
                 attach_needed,
             )
         )
-    return results
+    return ReattachOutcome(tuple(results), tuple(removed), tuple(dict.fromkeys(problems)))
+
+
+def _note_removed(settings: Settings, plaid_item_id: str) -> None:
+    """Remember that Plaid removed this connection, so it no longer waits to be re-attached or
+    blocks a link. If the state folder can't be written, it keeps waiting (and the next Re-attach
+    notes it again)."""
+    try:
+        secrets.mark_production_item_removed(settings, plaid_item_id)
+    except OSError:
+        log.warning("Couldn't note that Plaid removed Item %s", plaid_item_id, exc_info=True)
+    else:
+        log.warning("Plaid no longer has Item %s (ITEM_NOT_FOUND); it is left out", plaid_item_id)
 
 
 # --------------------------------------------------------------------------- manual CSV accounts

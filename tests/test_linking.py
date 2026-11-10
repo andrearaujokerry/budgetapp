@@ -659,14 +659,19 @@ def test_orphaned_sandbox_items_are_recreated_from_plaid(
     fake_item = fake_plaid.add_item(item_id="orphan")
     app_secrets.store_access_token(settings, "orphan", fake_item.access_token, store=secrets)
     assert linking.orphaned_sandbox_items(db, store=secrets) == ["orphan"]
-    (result,) = linking.recover_orphaned_items(session_factory, fake_plaid, secrets, settings)
+    (result,) = linking.recover_orphaned_items(
+        session_factory, fake_plaid, secrets, settings
+    ).results
     assert (result.plaid_item_id, result.account_count, result.institution_name) == (
         "orphan",
         1,
         "American Express",
     )
     assert linking.orphaned_sandbox_items(db, store=secrets) == []
-    assert linking.recover_orphaned_items(session_factory, fake_plaid, secrets, settings) == []
+    assert (
+        linking.recover_orphaned_items(session_factory, fake_plaid, secrets, settings)
+        == linking.ReattachOutcome()
+    )
 
 
 def test_production_re_attaches_the_saved_v1_token_never_a_new_link(
@@ -677,23 +682,32 @@ def test_production_re_attaches_the_saved_v1_token_never_a_new_link(
     fake_item = prod_plaid.add_item(item_id="restored")
     secrets.set(LEGACY, fake_item.access_token)
     assert linking.reattach_available(db, production, store=secrets)
-    (result,) = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    (result,) = linking.recover_orphaned_items(
+        session_factory, prod_plaid, secrets, production
+    ).results
     assert result.plaid_item_id == "restored" and result.created
     assert secrets.values[prod_key("restored")] == fake_item.access_token
     assert LEGACY not in secrets.values
     assert not linking.reattach_available(db, production, store=secrets)
     assert prod_plaid.calls_to("create_link_token") == []
     assert prod_plaid.calls_to("exchange_public_token") == []
-    assert linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production) == []
+    assert (
+        linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+        == linking.ReattachOutcome()
+    )
 
 
 def test_re_attaching_a_token_plaid_rejects_changes_nothing(
     db, session_factory, production, prod_plaid, secrets
 ):
     secrets.set(LEGACY, "access-production-dead")
-    with pytest.raises(LinkFailed, match="INVALID_ACCESS_TOKEN"):
-        linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
-    assert items(db) == []
+    outcome = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    assert (outcome.results, outcome.removed) == ((), ())
+    assert outcome.problems == (
+        "Plaid didn't recognise a saved connection (INVALID_ACCESS_TOKEN), so it wasn't "
+        "re-attached.",
+    )
+    assert items(db) == [] and secrets.values[LEGACY] == "access-production-dead"
 
 
 # --------------------------------------------------------------------------- Sandbox test Items
@@ -1269,7 +1283,9 @@ def test_a_second_re_attach_while_the_first_runs_is_refused(
         return real(token)
 
     prod_plaid.get_accounts = get_accounts  # type: ignore[method-assign]
-    (result,) = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    (result,) = linking.recover_orphaned_items(
+        session_factory, prod_plaid, secrets, production
+    ).results
     assert isinstance(nested["refused"], linking.LinkBusy) and result.created
     assert [i.plaid_item_id for i in items(db)] == ["restored"]
 
@@ -1290,7 +1306,9 @@ def test_re_attach_keeps_plaids_creation_date_for_the_consent_estimate(
         return body
 
     prod_plaid.get_item = get_item  # type: ignore[method-assign]
-    (result,) = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    (result,) = linking.recover_orphaned_items(
+        session_factory, prod_plaid, secrets, production
+    ).results
     db.expire_all()
     item = db.get(PlaidItem, result.item_id)
     assert item.consent_expires_at is None
@@ -1743,7 +1761,9 @@ def test_re_attach_asks_plaid_whose_v1_token_it_is(
     )
     secrets.set(LEGACY, amex.access_token)
     assert linking.reattach_available(db, production, store=secrets)
-    (result,) = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    (result,) = linking.recover_orphaned_items(
+        session_factory, prod_plaid, secrets, production
+    ).results
     assert (result.plaid_item_id, result.created) == ("item-amex", False)
     assert secrets.values[prod_key("item-amex")] == amex.access_token
     assert LEGACY not in secrets.values and len(items(db)) == 2
@@ -1773,7 +1793,9 @@ def test_a_v1_token_beside_another_items_own_token_is_re_attached_not_moved(
     assert (
         secrets.values[prod_key("item-tartan")] == tartan.access_token
     )  # Tartan Bank's token untouched
-    (result,) = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    (result,) = linking.recover_orphaned_items(
+        session_factory, prod_plaid, secrets, production
+    ).results
     assert (result.plaid_item_id, result.created) == ("item-amex", True)
     assert secrets.values[prod_key("item-amex")] == amex.access_token
     assert LEGACY not in secrets.values and not linking.legacy_unplaced(db, store=secrets)
@@ -1793,18 +1815,110 @@ def test_each_orphaned_token_is_re_attached_to_its_own_item(
     )
     for fake in (amex, tartan):
         app_secrets.store_access_token(production, fake.item_id, fake.access_token, store=secrets)
-    assert linking.orphaned_production_items(db, store=secrets) == ["item-amex", "item-tartan"]
+    assert linking.orphaned_production_items(db, production, store=secrets) == [
+        "item-amex",
+        "item-tartan",
+    ]
     assert not linking.connection_overview(db, production, store=secrets).can_link
-    results = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    results = linking.recover_orphaned_items(
+        session_factory, prod_plaid, secrets, production
+    ).results
     assert [(r.plaid_item_id, r.institution_name) for r in results] == [
         ("item-amex", "American Express"),
         ("item-tartan", "Tartan Bank"),
     ]
-    assert linking.orphaned_production_items(db, store=secrets) == []
+    assert linking.orphaned_production_items(db, production, store=secrets) == []
     assert [c["access_token"] for c in prod_plaid.calls_to("get_item")] == [
         amex.access_token,
         tartan.access_token,
     ]
+
+
+DEAD_TOKEN = "access-production-of-an-item-plaid-removed"
+
+
+def saved_tokens(production, prod_plaid, secrets, order):
+    """A restored database without three connections whose tokens Keychain still holds; Plaid
+    removed "item-dead" (deleted in Plaid Portal, say), so /item/get answers ITEM_NOT_FOUND for
+    it (RESEARCH T2.4b), every time."""
+    amex = prod_plaid.add_item(item_id="item-amex")
+    alive = prod_plaid.add_item(
+        item_id="item-alive",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking()],
+    )
+    tokens = {"item-amex": amex.access_token, "item-alive": alive.access_token}
+    tokens["item-dead"] = DEAD_TOKEN
+    for item_id in order:
+        app_secrets.store_access_token(production, item_id, tokens[item_id], store=secrets)
+    real = prod_plaid.get_item
+
+    def get_item(token: str):
+        if token == DEAD_TOKEN:
+            raise prod_plaid.plaid_error("ITEM_NOT_FOUND")
+        return real(token)
+
+    prod_plaid.get_item = get_item  # type: ignore[method-assign]
+
+
+@pytest.mark.parametrize(
+    "order",
+    [("item-amex", "item-dead", "item-alive"), ("item-amex", "item-alive", "item-dead")],
+    ids=["dead-in-between", "dead-last"],
+)
+def test_re_attach_leaves_out_a_connection_plaid_removed_and_re_attaches_the_rest(
+    db, session_factory, production, prod_plaid, secrets, order
+):
+    """Final review (ops-2): Re-attach stopped at the first token Plaid didn't accept, said
+    "Nothing was changed" though earlier ones were re-attached, never got to later ones, and the
+    dead token kept blocking every new link for good. Each token is handled on its own now; one
+    Plaid removed is noted and left out, never deleted, and still counts toward the 10."""
+    saved_tokens(production, prod_plaid, secrets, order)
+    outcome = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    assert sorted(r.plaid_item_id for r in outcome.results) == ["item-alive", "item-amex"]
+    assert all(r.created for r in outcome.results)
+    assert (outcome.removed, outcome.problems) == (("item-dead",), ())
+    assert sorted(i.plaid_item_id for i in items(db)) == ["item-alive", "item-amex"]
+    assert app_secrets.removed_production_items(production) == {"item-dead"}
+    assert secrets.values[prod_key("item-dead")] == DEAD_TOKEN
+    assert linking.orphaned_production_items(db, production, store=secrets) == []
+    assert not linking.reattach_available(db, production, store=secrets)
+    assert linking.link_blocks(db, production, store=secrets) == ()
+    assert linking.connections_used(db, production, store=secrets) == 3
+    nothing = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    assert nothing == linking.ReattachOutcome()
+
+
+def test_re_attach_reports_a_token_plaid_couldnt_check_and_re_attaches_the_others(
+    db, session_factory, production, prod_plaid, secrets
+):
+    """Final review (ops-2): any other failure (here Plaid can't be reached for the second
+    token) is reported for that token, which waits for the next try; the first one stays
+    re-attached and is reported as such."""
+    saved_tokens(production, prod_plaid, secrets, ("item-amex", "item-alive"))
+    flaky = prod_plaid.get_item
+    calls = {"n": 0}
+
+    def get_item(token: str):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise prod_plaid.transport_error()
+        return flaky(token)
+
+    prod_plaid.get_item = get_item  # type: ignore[method-assign]
+    outcome = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    assert [r.plaid_item_id for r in outcome.results] == ["item-amex"]
+    assert outcome.removed == ()
+    assert outcome.problems == (
+        "Plaid couldn't be reached, so a saved connection wasn't re-attached. Try again in a "
+        "moment.",
+    )
+    assert linking.orphaned_production_items(db, production, store=secrets) == ["item-alive"]
+    assert app_secrets.removed_production_items(production) == set()
+    again = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    assert [r.plaid_item_id for r in again.results] == ["item-alive"]
+    assert linking.link_blocks(db, production, store=secrets) == ()
 
 
 # --------------------------------------------------------------------------- update mode (BANK-5)
@@ -2000,7 +2114,10 @@ def test_re_attach_only_deletes_a_v1_copy(db, session_factory, production, prod_
     an orphan) deletes it and asks Plaid about nothing else."""
     amex, _row = v1_amex(db, prod_plaid, secrets)
     app_secrets.store_access_token(production, "item-amex", amex.access_token, store=secrets)
-    assert linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production) == []
+    assert (
+        linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+        == linking.ReattachOutcome()
+    )
     assert prod_plaid.calls_to("get_item") == [] and LEGACY not in secrets.values
 
 

@@ -652,28 +652,23 @@ def recover(
     jobs: JobsDep,
 ) -> Response:
     """Re-attach connections whose access token is in Keychain but whose row is missing (never a
-    new link), then sync each from the beginning."""
+    new link), then sync each from the beginning. Each saved token is handled on its own: the
+    answer says what was re-attached, which connections Plaid removed (left out from now on) and
+    why any other wasn't re-attached this time."""
     if is_demo(request):
         return redirect(request, PAGE, "info", DEMO_MESSAGE)
     gateway, problem = plaid_gateway(request)
     if gateway is None:
         return redirect(request, PAGE, "error", problem or KEYS_MISSING)
     try:
-        results = linking.recover_orphaned_items(session_factory, gateway, store, settings)
+        outcome = linking.recover_orphaned_items(session_factory, gateway, store, settings)
     except linking.LinkBusy as exc:  # e.g. a double click: the first request is still working
         return redirect(request, PAGE, "info", str(exc))
     except linking.LinkError as exc:
         return redirect(request, PAGE, "error", str(exc))
     except secrets.KeychainApprovalNeeded:
         return redirect(request, PAGE, "error", KEYCHAIN_MESSAGE)
-    if not results:
-        return redirect(
-            request,
-            PAGE,
-            "info",
-            "Nothing to re-attach: every saved connection is already here, or none was found.",
-        )
-    for result in results:
+    for result in outcome.results:
         start_backfill(
             jobs,
             session_factory,
@@ -684,15 +679,43 @@ def recover(
             result.item_id,
             trigger="link",
         )
-    count = sum(1 for r in results if r.created)
-    if not count:  # only the v1 token moved to an Item the database already has
-        return redirect(
-            request, PAGE, "success", "The saved connection is in place again. Syncing now."
+    messages: list[tuple[str, str]] = []
+    count = sum(1 for r in outcome.results if r.created)
+    if count:
+        noun = "connection" if count == 1 else "connections"
+        messages.append(("success", f"Re-attached {count} {noun}. Syncing from the beginning now."))
+    elif outcome.results:  # only the v1 token moved to an Item the database already has
+        messages.append(("success", "The saved connection is in place again. Syncing now."))
+    if len(outcome.removed) == 1:
+        messages.append(
+            (
+                "info",
+                "Plaid no longer has 1 saved connection (it was removed at Plaid), so it can't be "
+                "re-attached. Its access token stays in Keychain, and it still counts toward your "
+                "10 Plaid connections.",
+            )
         )
-    noun = "connection" if count == 1 else "connections"
-    return redirect(
-        request, PAGE, "success", f"Re-attached {count} {noun}. Syncing from the beginning now."
-    )
+    elif outcome.removed:
+        messages.append(
+            (
+                "info",
+                f"Plaid no longer has {len(outcome.removed)} saved connections (they were removed "
+                "at Plaid), so they can't be re-attached. Their access tokens stay in Keychain, "
+                "and they still count toward your 10 Plaid connections.",
+            )
+        )
+    messages += [("error", text) for text in outcome.problems]
+    if not messages:
+        messages.append(
+            (
+                "info",
+                "Nothing to re-attach: every saved connection is already here, or none was found.",
+            )
+        )
+    response = redirect(request, PAGE, *messages[0])
+    for level, text in messages[1:]:
+        flash(response, level, text)
+    return response
 
 
 @router.post("/connection/attach")
