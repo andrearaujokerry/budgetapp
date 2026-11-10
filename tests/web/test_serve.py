@@ -151,7 +151,10 @@ def test_live_prints_the_banner_and_hands_over(capsys, monkeypatch):
     assert serve.run_start(argparse.Namespace(no_browser=False), settings) == 0
     assert handed == [settings]
     out = capsys.readouterr().out
-    assert "LIVE DATA: this is your real American Express account." in out
+    # Wave 3 (C9; final review ops-8, reqs-3, ux-6): the live app holds every linked bank and
+    # card, so the banner names neither one bank nor American Express.
+    assert "LIVE DATA: your real bank and card accounts." in out
+    assert "American Express" not in out
     assert "http://127.0.0.1:8765" in out
 
 
