@@ -1452,6 +1452,50 @@ def test_an_item_saved_without_an_institution_id_is_matched_by_name(db):
     assert linking.duplicate_problem(db, other) is None
 
 
+@pytest.mark.parametrize("different_login", [False, True])
+def test_linking_a_bank_plaid_removed_again_is_refused_in_words_that_say_why(
+    db, session_factory, production, prod_plaid, secrets, different_login
+):
+    """Final review (ops-3, security-3): Plaid answers ITEM_NOT_FOUND for a connection it removed,
+    which update mode can't repair (RESEARCH T2.4). Linking that login again is still refused
+    (removing a connection isn't in this version, W3-PLAN §0), but the refusal no longer sends the
+    owner to Reconnect or Add accounts."""
+    tartan_bank(db, status="error", error_code="ITEM_NOT_FOUND")
+    again = prod_plaid.add_item(
+        item_id="tartan-again",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking()],
+    )
+    with pytest.raises(LinkRefused) as info:
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(again),
+            link_meta(TARTAN["institution"], ("Checking", "0001")),
+            different_login=different_login,
+        )
+    message = str(info.value)
+    assert "Plaid no longer has your Tartan Bank connection" in message
+    assert "can't repair it" in message and "not exchanged" in message
+    assert "use Reconnect" not in message and "use Add accounts" not in message
+    assert prod_plaid.calls_to("exchange_public_token") == []
+
+
+def test_a_removed_login_beside_a_live_one_at_that_bank(db):
+    """The live connection's buttons still help; the same login as the removed one doesn't."""
+    tartan_bank(db, plaid_item_id="tartan-gone", status="error", error_code="ITEM_NOT_FOUND")
+    tartan_bank(db, plaid_item_id="tartan-live", accounts=(("Joint Checking", "0777"),))
+    meta = LinkMetadata.from_json(link_meta(TARTAN["institution"], ("Checking", "0001")))
+    assert "use Add accounts on its connection" in linking.duplicate_problem(db, meta)
+    removed = linking.duplicate_problem(db, meta, different_login=True)
+    assert "Plaid no longer has your Tartan Bank connection" in removed
+    joint = LinkMetadata.from_json(link_meta(TARTAN["institution"], ("Joint Checking", "0777")))
+    assert "same login linked again" in linking.duplicate_problem(db, joint, different_login=True)
+
+
 @pytest.mark.parametrize("position", [19, 20, 24])
 def test_a_different_login_picking_more_accounts_than_are_checked_is_refused(
     db, session_factory, production, prod_plaid, secrets, position

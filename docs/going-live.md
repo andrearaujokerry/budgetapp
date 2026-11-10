@@ -225,6 +225,10 @@ never put the token anywhere else. With that copy, `./run setup --env production
 can restore it at any time; the app checks it with Plaid, which also says which connection it
 belongs to, before saving.
 
+A copy can't bring back a connection that Plaid itself removed, for example one deleted in Plaid
+Portal (my.plaid.com): never delete a connection there ([what happens
+then](reconnecting.md#when-the-connection-or-its-token-is-missing)).
+
 ## 5. Import older history
 
 American Express keeps about two years of activity online, and Plaid's history may start later

@@ -645,6 +645,22 @@ def _normal(text: str | None) -> str:
     return " ".join((text or "").casefold().split())
 
 
+#: Plaid's answer for a connection it no longer has (deleted at my.plaid.com, removed with
+#: /item/remove or by a data-deletion request); update mode can't repair it (RESEARCH T2.4).
+ITEM_NOT_FOUND = "ITEM_NOT_FOUND"
+
+
+def _removed_refusal(name: str) -> str:
+    """The refusal to link a login again whose connection Plaid removed (ops-3): nothing on this
+    page can repair it, and removing a connection isn't part of this version (W3-PLAN §0)."""
+    return (
+        f"Plaid no longer has your {name} connection (it was removed at Plaid), so Reconnect and "
+        "Add accounts can't repair it, and the app can't link that login again while the "
+        "connection is listed here. This new link was not completed (its token was not "
+        "exchanged). The data already here stays."
+    )
+
+
 def _same_institution(item: PlaidItem, meta: LinkMetadata) -> bool:
     """Link's institution is this Item's: Plaid's id, or (an Item saved without one) its name."""
     if item.institution_id:
@@ -667,6 +683,10 @@ def duplicate_problem(
     * With that choice, still refused when any picked account's name and mask match an account
       already linked at that institution (the same login again). Masks are compared with masks
       only, never with account numbers (the app never has those).
+    * A connection whose last error is ``ITEM_NOT_FOUND`` was removed at Plaid: neither Reconnect
+      nor Add accounts can repair it, so its refusal says that instead. Linking that login again
+      stays refused while the connection is listed (removing one isn't in this version, W3-PLAN
+      §0, and a new link would use another of the 10).
     * With connections in place, Link metadata without the institution's id (or, with the
       choice, without the picked accounts, or with more of them than :data:`LINK_ACCOUNTS_LIMIT`)
       can't be checked, so it is refused too (fail safe). Plaid's ``onSuccess`` names the
@@ -696,7 +716,10 @@ def duplicate_problem(
     if not same:
         return None
     name = meta.institution_name or same[0].institution_name or "This bank"
+    removed = {i.id for i in same if i.error_code == ITEM_NOT_FOUND}
     if not different_login:
+        if len(removed) == len(same):
+            return _removed_refusal(name)
         return (
             f"{name} is already linked, so this new link was not completed (its token was not "
             "exchanged). To add accounts from that login, use Add accounts on its connection; "
@@ -717,6 +740,8 @@ def duplicate_problem(
     for picked in meta.accounts:
         for account in linked:
             if _normal(picked.name) == _normal(account.name) and picked.mask == account.mask:
+                if account.item_id in removed:
+                    return _removed_refusal(name)
                 label = account.display_name
                 return (
                     f"{label} is already linked at {name}: this looks like the same login linked "

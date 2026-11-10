@@ -828,7 +828,11 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   public token that is never exchanged counts toward the 10 is not documented; the app treats the
   exchange as the step that creates the Item. The refusal can't undo what happened in Plaid's
   window: at OAuth banks that don't allow duplicates, signing in to the same login again already
-  sends the first Item to `ITEM_LOGIN_REQUIRED` (RESEARCH T1), which Reconnect repairs.
+  sends the first Item to `ITEM_LOGIN_REQUIRED` (RESEARCH T1), which Reconnect repairs. A
+  connection Plaid removed (its last error `ITEM_NOT_FOUND`: deleted in Plaid Portal or by a
+  data-deletion request) can't be repaired by update mode (RESEARCH T2.4), so its refusal says
+  that instead of pointing to Reconnect or Add accounts; removing a connection isn't part of this
+  version (W3-PLAN §0), so that login stays refused while the connection is listed.
 - **Re-attach.** A token in Keychain whose Item row is missing (lost or restored database, or a
   crash between the Keychain write and the commit), and a v1 token the app can't place, are
   re-attached per token: `/item/get` names the Item, its row is rebuilt from `/item/get` and
