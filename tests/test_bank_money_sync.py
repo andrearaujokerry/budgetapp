@@ -20,11 +20,20 @@ from budgetapp import secrets as app_secrets
 from budgetapp.config import load_settings
 from budgetapp.models import Category, Transaction
 from budgetapp.periods import month_of
-from budgetapp.services import sync
+from budgetapp.services import alerts, sync
 from budgetapp.services.events import SyncOutcome
 from budgetapp.services.spending import period_spending
 from tests.bank_factories import BANK_INSTITUTION_ID, BANK_NAME
-from tests.factories import get_category, make_item, make_rule, plaid_account, set_app_settings
+from tests.factories import (
+    get_category,
+    make_account,
+    make_budget,
+    make_item,
+    make_rule,
+    make_transaction,
+    plaid_account,
+    set_app_settings,
+)
 from tests.fake_plaid import FakePlaidGateway
 
 NOW = dt.datetime(2026, 10, 20, 15, 0, tzinfo=dt.UTC)
@@ -399,3 +408,50 @@ def test_large_charges_follow_rules_and_raises(bank, db, notifier):
     bank.fake.post_pending(bank.fake_item, "to-sav", amount="1380.00", new_id="to-sav-posted")
     assert bank.sync().status == "success"
     assert sorted(notifier.titles) == sorted([*first, "$455.00 at Hotel"])
+
+
+def test_the_first_bank_sync_checks_budgets_but_announces_no_large_charge(bank, db, notifier):
+    """Final review reqs-2, as going-live's "After your first bank account syncs" says: budgets
+    and an overall target sized for the card count checking's spending from the bank's first sync
+    on (W3-PLAN §0), loan payments in Transportation and Education, and the budget alerts come at
+    once (ALR-1), while large-charge alerts skip the history Plaid sends when it is linked."""
+    set_app_settings(
+        db,
+        budget_alerts_enabled=True,
+        alert_thresholds=[80, 100],
+        large_charge_threshold=Decimal("500.00"),
+    )
+    card = make_account(db)  # the owner's American Express card, synced before
+    home, groceries = get_category(db, "Home"), get_category(db, "Groceries")
+    make_budget(db, home, "300.00")
+    make_budget(db, None, "2000.00")  # the overall target, sized for the card
+    day = today() - dt.timedelta(days=5)
+    make_transaction(db, card, amount="120.00", date=day, category=home)
+    make_transaction(db, card, amount="900.00", date=day, category=groceries)
+    db.commit()
+    assert alerts.evaluate_budgets(db, notifier) == [] and notifier.titles == []
+    loans = "LOAN_PAYMENTS"
+    rows = {
+        "rent": ("1800.00", "OAKWOOD PROPERTY MGMT", "RENT_AND_UTILITIES", "RENT", "Home"),
+        "car": ("420.00", "AUTO LOAN PMT", loans, "CAR_PAYMENT", "Transportation"),
+        "student": ("310.00", "STUDENT LOAN PMT", loans, "STUDENT_LOAN_PAYMENT", "Education"),
+    }
+    for key, (amount, name, primary, detailed, _category) in rows.items():
+        bank.add(
+            transaction_id=key,
+            amount=amount,
+            date=day,
+            name=name,
+            pfc_primary=primary,
+            pfc_detailed=f"{primary}_{detailed}",
+        )
+    outcome = bank.sync()
+    assert outcome.ok and outcome.initial_history_load
+    assert {key: bank.category(key)[0] for key in rows} == {
+        "rent": "Home",
+        "car": "Transportation",
+        "student": "Education",
+    }
+    assert "Home: over budget" in notifier.titles
+    assert "Over your overall budget" in notifier.titles
+    assert not [t for t in notifier.titles if t.startswith("$")]  # no large charge, not even rent

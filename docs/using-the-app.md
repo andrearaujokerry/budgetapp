@@ -158,9 +158,10 @@ The budgets for one period at a time; the arrows next to the period go back and 
   budget row it saves like a typed amount, when you leave the field or press Enter; Esc puts
   the old amount back.
 - **Rollover** (per category) carries what is left, or what you overspent, into the next period.
-- **Overall target:** one number for all your spending, compared with every category except those
-  with an annual budget. Without one, the card adds up your category budgets and lists spending
-  in categories without a budget separately ("Not budgeted").
+- **Overall target:** one number for all your spending, from every card and bank account,
+  compared with every category except those with an annual budget. Without one, the card adds up
+  your category budgets and lists spending in categories without a budget separately
+  ("Not budgeted").
 - **Annual budgets** plan yearly costs such as the annual fee, travel or gifts with one amount for
   the calendar year. They are tracked year to date with a marker for an even pace, and never
   count in the monthly totals. A category has either a monthly or an annual budget, not both.

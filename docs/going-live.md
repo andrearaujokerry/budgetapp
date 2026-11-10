@@ -268,13 +268,25 @@ bank or card** button.
 - Each connection has its own Keychain item, its own status pill, its own Reconnect and Renew
   buttons and its own entry in `./run doctor --env production`; a problem with one never stops
   the others from syncing.
-- **After your first bank account syncs, check how its money is filed.** Your rules apply to bank
-  rows too (all but a card payment Plaid marks as one), and each rule's preview on the Rules page
-  lists the bank rows it matches. Rent from checking goes to Home, Plaid's rent category, so a
-  Home budget sized for card purchases fills up at once: a Rent category of your own and a rule on
-  your landlord's name keep the two apart. A large-charge alert amount now covers spending from
-  checking too, so rent above it alerts every month. Paychecks, interest and other money in show
-  as income on the Dashboard and Trends ([Using the app](using-the-app.md#dashboard)).
+
+### After your first bank account syncs
+
+Check how its money is filed. Each transaction's details say how it counts (**Counts as**).
+
+- **Your rules apply to bank rows too** (all but a card payment Plaid marks as one), and each
+  rule's preview on the Rules page lists the bank rows it matches.
+- **Budgets count spending from checking.** Your overall target and every budget, annual and
+  rollover ones included, count the bank's spending from its first sync on: debit purchases in
+  their categories, rent and a mortgage in Home, a car loan in Transportation and a student loan
+  in Education. Budgets are checked right after that first sync, so budget alerts can arrive at
+  once (large-charge alerts skip the history Plaid sends when you link). If your target was sized
+  for your card, raise it before you link, or move those rows with a rule and **Also apply to
+  past transactions** (a Rent category of your own and a rule on your landlord's name, say, keep
+  rent apart from what you buy for your home).
+- **A large-charge alert amount now covers spending from checking too**, so rent above it alerts
+  every month.
+- **Paychecks, interest and other money in** show as income on the Dashboard and Trends
+  ([Using the app](using-the-app.md#dashboard)).
 
 ## Upgrading the live app
 
