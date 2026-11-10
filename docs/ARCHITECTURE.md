@@ -557,11 +557,21 @@ broken down (Trends' Every month table).
 while the switch shows income, and `AccountBalances`: every visible card and bank account
 (`services.accounts`, C1) with Plaid's cached balances, cash (bank accounts' current balances)
 and owed (cards' current balances: positive is owed, negative a credit, RESEARCH T2.7). An
-account Plaid no longer shares (`sync.no_longer_shared`, §8) is listed, marked, but left out of
-cash, owed and "as of": its balance is only the last one Plaid sent.
+account without a balance (not synced yet, or a CSV account) adds nothing and is counted, so the
+card says how many a total leaves out; a total no account adds to is `None` (shown "—"), never
+zero. An account Plaid no longer shares (`sync.no_longer_shared`, §8) is listed, marked, but left
+out of cash, owed and "as of": its balance is only the last one Plaid sent.
 `insights.trends(..., income=True)` adds `TrendsIncome`: income per income category per month,
-all income, and the net per month, with the same months, statuses and complete-month averages as
-spending. An income figure's link lists every income category's rows for its dates
+all income, and the net per month, for the same months as spending. Without a bank account the
+months keep spending's statuses (card credits are known for the whole history). Once one exists,
+paychecks are known only from the bank history's first day (`insights.bank_history_start`: the
+earliest counted transaction on any bank account, hidden ones included, by purchase date), which
+can come after the card's (a bank that sends less history, or older Amex CSV files imported), so
+income months take their statuses from that day: a month before it has no income or net
+(`None`, never $0 and minus all spending), its month is partial, and the income averages,
+`complete_months` and the change count only the months it covers (`starts`; `partial` when a
+month in range has spending data but no or partial income data, which a note above the income
+chart explains). An income figure's link lists every income category's rows for its dates
 (`routes.dashboard.categories_url`); the list signs money in as Plaid does (negative), so its Net
 is the figure with a minus sign. Both income objects carry `cards_only` while no bank account
 exists (`insights.has_bank_account`, hidden accounts included since their money still counts):

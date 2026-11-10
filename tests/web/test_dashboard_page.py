@@ -714,8 +714,47 @@ class TestAccountsCard:
 
     def test_balances_not_synced_yet(self, client, db, groceries, account):
         text = text_of(card(client.get("/").text, "dash-accounts"))
-        assert text.startswith("Accounts Owed on cards $0.00")  # no "as of" without a date
-        assert f"Platinum Card — American Express ··{account.mask} · no balance yet" in text
+        # No "as of" without a date, and no total without a balance (ux-2): not "$0.00".
+        assert text.startswith(
+            f"Accounts Owed on cards — Platinum Card — American Express ··{account.mask} · no "
+            "balance yet"
+        )
+
+    def test_a_csv_account_alone_owes_nothing_known(self, client, db):
+        """ux-2: only the manual "American Express (CSV)" account (nothing linked): its balance
+        is unknown, so the card's total is "—", never "Owed on cards $0.00"."""
+        manual = make_account(db, manual=True)
+        make_transaction(db, manual, amount="42.00", date="2026-10-05", source="csv",
+                         category=get_category(db, "Groceries"))  # fmt: skip
+        page = client.get("/").text
+        accounts = card(page, "dash-accounts")
+        assert text_of(accounts) == (
+            f"Accounts Owed on cards — American Express (CSV) — Imported from a CSV file "
+            f"··{manual.mask} · no balance"
+        )
+        assert "$0.00" not in accounts and "isn’t included" not in accounts
+        assert csp_problems(page, rendered=True) == []
+
+    def test_cash_before_any_bank_balance_is_unknown(self, client, db):
+        bank = make_bank_item(db, institution_id="ins_109511", institution_name="Tartan Bank")
+        make_bank_account(db, bank, name="Everyday Checking", mask="4417")
+        text = text_of(card(client.get("/").text, "dash-accounts"))
+        assert text == "Accounts Cash — Everyday Checking — Tartan Bank ··4417 · no balance yet"
+
+    def test_a_total_says_which_accounts_it_leaves_out(self, client, db, account):
+        """ux-2: a total that adds up only some of its accounts says how many it leaves out."""
+        account.current_balance = D("1234.56")
+        make_account(db, manual=True)
+        bank = make_bank_item(db, institution_id="ins_109511", institution_name="Tartan Bank")
+        make_bank_account(db, bank, name="Everyday Checking", mask="4417",
+                          current_balance=D("2500.00"))  # fmt: skip
+        make_bank_account(db, bank, name="Joint Checking", mask="5528")
+        make_bank_account(db, bank, name="High Yield Savings", mask="6639", subtype="savings")
+        page = client.get("/").text
+        text = text_of(card(page, "dash-accounts"))
+        assert "Cash $2,500.00 2 accounts without a balance aren’t included. Everyday" in text
+        assert "Owed on cards $1,234.56 1 card without a balance isn’t included. Platinum" in text
+        assert csp_problems(page, rendered=True) == []
 
     def test_shown_before_the_first_transactions_arrive(self, client, db, checking):
         page = client.get("/").text

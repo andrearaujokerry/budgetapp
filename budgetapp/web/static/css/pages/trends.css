@@ -98,7 +98,7 @@
   position: sticky;
   left: 0;
   z-index: 1;
-  max-width: 13rem;
+  max-width: 14rem; /* with its padding: room for "Subscriptions & Streaming" */
   background: var(--surface);
   text-align: left;
   font-weight: var(--fw-medium);
@@ -112,10 +112,8 @@
   background: var(--surface-sunken);
 }
 
-.trends-grid .trends-grid__name .cat {
-  max-width: 12rem;
-}
-
+/* A category badge keeps app.css's max-width: 100%, the cell's content box: a long name ends in
+   an ellipsis inside the cell's padding instead of running into the next column. */
 .trends-grid .trends-grid__name .cat__name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -192,19 +190,35 @@
   margin: 0;
 }
 
+/* Above the income chart when the bank history starts later than the spending's. */
+.trends-income-start {
+  margin: 0 0 var(--sp-3);
+}
+
 /* Under the Net tile while no bank account exists: only card credits are income yet. */
 .income-hint {
   color: var(--text-muted);
   font-size: var(--fs-xs);
 }
 
-@media (max-width: 599px) {
+@media (max-width: 599.98px) {
   #trends-kpis {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .trends-grid .trends-grid__name,
-  .trends-grid .trends-grid__name .cat {
+  /* The sticky name column stays narrow and clips what it holds, so nothing in it prints over
+     the months scrolling under it. A small right padding leaves names the room they had; a
+     longer one ends in an ellipsis, and the Net row's note takes a line of its own. */
+  .trends-grid .trends-grid__name {
     max-width: 8.5rem;
+    padding-right: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .trends-grid__note {
+    display: block;
+    margin-left: 0;
+    white-space: normal;
   }
 }

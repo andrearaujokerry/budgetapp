@@ -83,9 +83,12 @@ it open those pages.
   accounts with their balance (and, under it, the available balance when the bank sends one),
   their balances added up as **Cash**, and cards with what you owe, added up as **Owed on
   cards** (a negative balance is a credit in your favour; an overdrawn bank account shows in
-  red). An account imported from a CSV file has no balance. An account Plaid no longer shares
-  (see [Connection](#connection)) keeps the last balance Plaid sent, marked "no longer shared", and
-  is left out of **Cash** and **Owed on cards**. Each name opens that account's transactions.
+  red). An account imported from a CSV file has no balance, nor has one whose balance Plaid
+  hasn't sent yet. A total adds up only the balances it has: under it, a note says how many
+  accounts without a balance it leaves out, and while none of its accounts has a balance it
+  shows "—" rather than $0.00. An account Plaid no longer shares (see [Connection](#connection))
+  keeps the last balance Plaid sent, marked "no longer shared", and is left out of **Cash** and
+  **Owed on cards**. Each name opens that account's transactions.
 - **Budgets:** your six most-used monthly budgets with what is left; **All budgets** opens the
   Budgets page.
 - **Top categories:** where the money went this period, with each category's share (hidden
@@ -199,7 +202,9 @@ note says so), with the same pending setting as budgets.
   The first month of your history has no month before it, so there the page says "No month to
   compare yet" rather than comparing with $0. The month in progress is shown "so far" and
   compared with the same days of the month before (only days your history covers), so a few days
-  are never set against a whole month. The **Monthly average** counts complete months only.
+  are never set against a whole month. The **Monthly spending average** (a category's **Monthly
+  average** in its own view) counts complete months only. The tiles that hold spending say so
+  ("Spent in …"), so they are never read as income or net when income is shown.
 - **Change from last month** lists each category with both months, the change and the average;
   **Every month** shows every category for every month, in whole dollars ("—" before your
   history starts).
@@ -214,6 +219,11 @@ note says so), with the same pending setting as budgets.
   income** and **Net** (income minus spending). Each income amount opens that month's income in
   Transactions (money in shows as negative amounts there). A single category's view stays
   spending only; with the switch on, it says that income and net show with **All categories**.
+  Once a bank account is linked, income counts from the day its history starts, since that is
+  where your paychecks arrive. If that is later than your card's history (a bank that sends
+  less history, or older Amex statements you imported), the months before it show "—" for
+  income and net rather than a loss, its first month is partial, the averages count only the
+  months it covers, and a note above **Income and spending** says when it starts.
 
 ## Recurring
 

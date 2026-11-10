@@ -116,6 +116,56 @@ def test_not_linked_in_the_sandbox_explains_linking_and_offers_both_ways(client)
     assert '<script src="/static/js/link.js" defer></script>' in response.text
 
 
+SANDBOX_TEST_BANKS = [
+    ("ins_109508", "First Platypus Bank"),
+    ("ins_109511", "Tartan Bank"),
+    ("ins_109509", "First Gingham Credit Union"),
+    ("ins_109512", "Houndstooth Bank"),
+]
+
+
+def test_the_sandbox_names_a_test_bank_that_isnt_linked_yet(db, client):
+    """ux-5: linking a test bank again is refused like a real bank (BANK-3: same institution,
+    and with the different-login choice user_good's same account names and masks), so the
+    dialog and the Sandbox tools name the first non-OAuth Sandbox bank (RESEARCH T3.1) that
+    has no connection yet, never one already linked."""
+
+    def advice(html: str) -> tuple[str, str]:
+        dialog = html[html.index('<dialog id="confirm-link"') :]
+        tools = re.search(r'<section[^>]*id="sandbox-tools".*?</section>', html, re.S)
+        return text(dialog[: dialog.index("</dialog>")]), text(tools.group(0)) if tools else ""
+
+    dialog, tools = advice(page(client))
+    assert "pick First Platypus Bank and sign in with user_good and pass_good" in dialog
+    assert tools == ""  # not linked: the Sandbox card says the same, untouched
+    nexts = [name for _, name in SANDBOX_TEST_BANKS[1:]] + ["a test bank you haven't linked yet"]
+    for (institution_id, name), suggested in zip(SANDBOX_TEST_BANKS, nexts, strict=True):
+        item = make_item(db, institution_id=institution_id, institution_name=name,
+                         consent_expires_at=None)  # fmt: skip
+        make_account(db, item, name="Plaid Checking", mask="0000", type="depository",
+                     subtype="checking")  # fmt: skip
+        dialog, tools = advice(page(client))
+        assert f"pick {suggested} and sign in with user_good and pass_good" in dialog, name
+        assert f"pick {suggested} and sign in with user_good and pass_good" in tools, name
+        assert f"pick {name}" not in dialog + tools
+        assert "Linking a test bank again is refused, as it would be for a real bank." in tools
+        assert "unless you tick" not in tools
+
+
+def test_the_different_login_choice_is_named_by_its_label_alone(client):
+    """ux-7: the dialog's decision point is read as "A different login at a bank I've already
+    linked", checkbox; its help is read once, as the description, not inside the name too."""
+    html = page(client)
+    control = re.search(r'<input id="link-different-login"[^>]*>', html).group(0)
+    assert 'aria-labelledby="link-different-login-label"' in control
+    assert 'aria-describedby="link-different-login-help"' in control
+    name = re.search(r'<span id="link-different-login-label">(.*?)</span>', html).group(1)
+    assert text(name) == "A different login at a bank I've already linked"
+    help_text = re.search(r'<span class="check__help" id="link-different-login-help">(.*?)</span>',
+                          html).group(1)  # fmt: skip
+    assert text(help_text).startswith("For example someone else's login at the same bank.")
+
+
 def test_production_shows_the_checklist_and_confirms_the_one_time_link(prod_client):
     response = prod_client.get("/connection")
     html = main(page(prod_client))

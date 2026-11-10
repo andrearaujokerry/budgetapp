@@ -189,10 +189,11 @@ The app has two separate environments, plus demo data. They never share a databa
 Open **Connection** in the Sandbox app (http://127.0.0.1:8766/connection). With your Sandbox
 keys saved you can:
 
-- click **Link a bank or card**, then in the dialog **Link a bank or card** again, pick **First
-  Platypus Bank** and sign in with `user_good` and `pass_good`: the same Plaid window your real
-  links will use. Linking First Platypus Bank a second time is refused, as it would be for a real
-  bank, unless you tick "A different login at a bank I've already linked";
+- click **Link a bank or card**, then in the dialog **Link a bank or card** again, pick the test
+  bank the dialog names and sign in with `user_good` and `pass_good`: the same Plaid window your
+  real links will use. Linking a test bank again is refused, as it would be for a real bank, so
+  the dialog names one you haven't linked yet: **First Platypus Bank**, then Tartan Bank, First
+  Gingham Credit Union and Houndstooth Bank;
 - or choose test data under **Sandbox** and click **Create a test Item without Link**. "Amex-like
   card, known totals" gives a credit card with a known set of purchases, a refund and payments;
   "Bank login: checking, savings and a card" gives a checking account with paychecks, rent, a

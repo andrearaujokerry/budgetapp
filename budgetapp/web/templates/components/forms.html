@@ -186,14 +186,17 @@
 
 {#- checkbox_field(name, label, checked=false, value="1", help=none, switch=false, id=none, disabled=false, **attrs)
     Checkbox (or switch=true for a toggle switch, role="switch") with its label
-    on the right and optional help under the label. Unchecked boxes submit
-    nothing, so the server treats a missing field as false. -#}
+    on the right and optional help under the label. The <label> wraps both (one
+    click target), so with help the control is named by its label text alone
+    (aria-labelledby) and the help is read once, as its description
+    (aria-describedby). Unchecked boxes submit nothing, so the server treats a
+    missing field as false. -#}
 {%- macro checkbox_field(name, label, checked=false, value="1", help=none, switch=false, id=none, disabled=false, wrapper_class=none) -%}
 {%- set fid = _id(id, name) -%}
 <label class="check{{ ' ' ~ wrapper_class if wrapper_class }}" for="{{ fid }}">
 <input id="{{ fid }}" name="{{ name }}" type="checkbox" value="{{ value }}"{% if switch %} class="{{ _cls('switch', kwargs) }}" role="switch"{% elif kwargs.get('class') %} class="{{ kwargs['class'] }}"{% endif %}
-{%- if checked %} checked{% endif %}{% if disabled %} disabled{% endif %}{% if help %} aria-describedby="{{ fid }}-help"{% endif %}{{ ui.html_attrs(kwargs, ['class']) }}>
-<span class="check__text"><span>{{ label }}</span>{% if help %}<span class="check__help" id="{{ fid }}-help">{{ help }}</span>{% endif %}</span>
+{%- if checked %} checked{% endif %}{% if disabled %} disabled{% endif %}{% if help %} aria-labelledby="{{ fid }}-label" aria-describedby="{{ fid }}-help"{% endif %}{{ ui.html_attrs(kwargs, ['class']) }}>
+<span class="check__text"><span{% if help %} id="{{ fid }}-label"{% endif %}>{{ label }}</span>{% if help %}<span class="check__help" id="{{ fid }}-help">{{ help }}</span>{% endif %}</span>
 </label>
 {%- endmacro -%}
 

@@ -7,7 +7,7 @@
 {{ form.select_field("user", "Add a test Item", sandbox_users, value="custom", id="sandbox-user") }}
 <div>{{ ui.button("Create without Link", type="submit", icon="plus", disabled=not link_enabled) }}</div>
 </form>
-<p class="text-secondary">Or go through Plaid's window: <strong>Link a bank or card</strong> at the top of this page, then pick First Platypus Bank and sign in with <code>user_good</code> and <code>pass_good</code>. A test bank you already linked is refused unless you tick “A different login at a bank I've already linked”.</p>
+<p class="text-secondary">Or go through Plaid's window: <strong>Link a bank or card</strong> at the top of this page, then pick {% if overview.sandbox_bank %}{{ overview.sandbox_bank }}{% else %}a test bank you haven't linked yet{% endif %} and sign in with <code>user_good</code> and <code>pass_good</code>. Linking a test bank again is refused, as it would be for a real bank.</p>
 </div>
 <p class="sandbox-hint">In Terminal, <code>./run sandbox-refresh</code> asks Plaid for new test data and <code>./run sandbox-reset-login</code> breaks the sign-in so you can try Reconnect.</p>
 {% endcall %}

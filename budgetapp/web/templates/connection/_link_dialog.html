@@ -4,7 +4,8 @@
     must all be ticked before its Link button turns on (link.js, [data-needs-checklist]). Both
     environments: the choice "a different login at a bank I've already linked" (#link-different-
     login), which link.js sends with the exchange; without it a bank that is already linked is
-    refused before the exchange. Context as for connection/index.html. -#}
+    refused before the exchange. The Sandbox names a test bank not linked yet
+    (overview.sandbox_bank). Context as for connection/index.html. -#}
 {%- import "components/ui.html" as ui -%}
 {%- import "components/forms.html" as form -%}
 {%- set o = overview -%}
@@ -19,7 +20,7 @@
 {%- endfor %}
 </fieldset>
 {%- else %}
-<p>Sandbox test connections are free and never count toward your 10 real ones. In Plaid's window, pick First Platypus Bank and sign in with <code>user_good</code> and <code>pass_good</code>.</p>
+<p>Sandbox test connections are free and never count toward your 10 real ones. In Plaid's window, pick {% if o.sandbox_bank %}{{ o.sandbox_bank }}{% else %}a test bank you haven't linked yet{% endif %} and sign in with <code>user_good</code> and <code>pass_good</code>.</p>
 {%- endif %}
 <fieldset class="link-confirm link-confirm--choice">
 <legend class="sr-only">Which login</legend>

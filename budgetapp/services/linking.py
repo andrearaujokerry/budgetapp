@@ -86,10 +86,18 @@ TRIAL_ITEM_LIMIT = 10
 DEFAULT_SANDBOX_INSTITUTION = "ins_109508"
 SANDBOX_INSTITUTIONS = {
     "ins_109508": "First Platypus Bank",
+    "ins_109509": "First Gingham Credit Union",
+    "ins_109511": "Tartan Bank",
+    "ins_109512": "Houndstooth Bank",
     "ins_127287": "Platypus OAuth Bank",
     "ins_129644": "First Platypus Bank - OAuth",
     "ins_10": "American Express",
 }
+#: Sandbox banks without OAuth, where user_good / pass_good signs in (RESEARCH T3.1), in the
+#: order the Sandbox copy suggests them in Plaid's window: a test bank links once, like a real
+#: one (BANK-3), so the page names the first one not linked yet (``ConnectionOverview``).
+#: Houndstooth Bank is last: Plaid also uses it for automated micro-deposits.
+SANDBOX_TEST_BANKS = ("ins_109508", "ins_109511", "ins_109509", "ins_109512")
 RECENT_RUNS = 20
 LOST_EDITS_LIMIT = 50
 
@@ -1915,6 +1923,13 @@ class ConnectionOverview:
         if self.connections_used is None:
             return None
         return max(0, self.connection_limit - self.connections_used)
+
+    @property
+    def sandbox_bank(self) -> str | None:
+        """The test bank to pick in Plaid's window in the Sandbox: the first of
+        :data:`SANDBOX_TEST_BANKS` with no connection yet (``None`` once each one has)."""
+        linked = {item.institution_id for item in self.items}
+        return next((SANDBOX_INSTITUTIONS[i] for i in SANDBOX_TEST_BANKS if i not in linked), None)
 
 
 def _account_view(a: Account) -> AccountView:
