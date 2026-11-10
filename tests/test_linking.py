@@ -1700,6 +1700,25 @@ def test_a_link_first_moves_the_v1_token_of_the_one_item(db, production, prod_pl
     assert LEGACY not in secrets.values
 
 
+def test_until_the_v1_token_moves_the_overview_names_its_v1_keychain_item(db, production, secrets):
+    """Final review (ops-7, reqs-1): right after the upgrade the Amex token keeps its v1 name
+    until the first sync (or link) moves it, which can wait for the next 6-hourly run; the
+    Keychain item line named the Item's own item, which Keychain didn't hold yet."""
+    make_item(db, plaid_item_id="item-amex")
+    secrets.set(LEGACY, "access-production-v1")
+    (view,) = linking.connection_overview(db, production, store=secrets).items
+    assert view.keychain_item == LEGACY and prod_key("item-amex") not in secrets.values
+    assert view.keychain_moves_to == prod_key("item-amex")
+    secrets.fail_on[("set", prod_key("item-amex"))] = app_secrets.SecretStoreError("locked")
+    assert sync_service.migrate_legacy_token(db, production, secrets).status == "kept"
+    (view,) = linking.connection_overview(db, production, store=secrets).items
+    assert view.keychain_item == LEGACY  # still where the token is
+    del secrets.fail_on[("set", prod_key("item-amex"))]
+    assert sync_service.migrate_legacy_token(db, production, secrets).status == "moved"
+    (view,) = linking.connection_overview(db, production, store=secrets).items
+    assert (view.keychain_item, view.keychain_moves_to) == (prod_key("item-amex"), None)
+
+
 def test_a_v1_token_that_cannot_be_moved_pauses_linking(db, production, prod_plaid, secrets):
     """Otherwise the second Item would leave the first without a token it can find."""
     make_item(db, plaid_item_id="item-amex")

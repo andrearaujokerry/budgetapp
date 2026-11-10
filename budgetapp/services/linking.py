@@ -1741,8 +1741,11 @@ class ItemView:
     institution_id: str | None = None
     is_amex: bool = False
     #: the Keychain item that holds this connection's access token (a name, never the token):
-    #: ``plaid.access_token.<env>.<Plaid's item id>``, for the copy going-live.md suggests
+    #: ``plaid.access_token.<env>.<Plaid's item id>``, for the copy going-live.md suggests; the
+    #: v1 name ``plaid.access_token.production`` until the token has moved (C6)
     keychain_item: str | None = None
+    #: while the token still has its v1 name: the item the next sync or link moves it to
+    keychain_moves_to: str | None = None
 
     @property
     def needs_reconnect(self) -> bool:
@@ -1885,6 +1888,9 @@ def connection_overview(
     many of the 10 Plaid connections are used, and the Sandbox's orphaned test Items."""
     status = status_service.connection_status(session, now=now)
     by_id = {i.item_id: i for i in status.items}
+    # The v1 token (C6) keeps its old name until a sync or link moves it to its Item's own item.
+    legacy = legacy_state(session, store=store) if settings.is_production else None
+    v1_owner = legacy.item_id if legacy is not None and legacy.state == "movable" else None
     items = []
     for item in session.scalars(select(PlaidItem).order_by(PlaidItem.id)):
         accounts = session.scalars(
@@ -1894,6 +1900,9 @@ def connection_overview(
             keychain_item = secrets.access_token_key(settings.plaid_env, item.plaid_item_id)
         except ValueError:  # an id Keychain names can't hold (never one of Plaid's)
             keychain_item = None
+        moves_to = None
+        if v1_owner is not None and item.plaid_item_id == v1_owner:
+            keychain_item, moves_to = secrets.LEGACY_PRODUCTION_TOKEN, keychain_item
         items.append(
             ItemView(
                 id=item.id,
@@ -1919,6 +1928,7 @@ def connection_overview(
                 institution_id=item.institution_id,
                 is_amex=status_service.is_amex(item),
                 keychain_item=keychain_item,
+                keychain_moves_to=moves_to,
             )
         )
     order = {s.item_id: n for n, s in enumerate(status.items)}  # worst first, like the status

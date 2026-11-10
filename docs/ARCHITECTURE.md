@@ -861,7 +861,9 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   known: Plaid's, or the American Express estimate), Add accounts, and "Grant access to statement
   details" for card connections only. Those actions always need Plaid Link, so a page with a
   connection loads Plaid's script whenever linking is possible. It also names the connection's
-  Keychain item (never the token), so the owner's password-manager copies can be told apart.
+  Keychain item (never the token), so the owner's password-manager copies can be told apart;
+  while the v1 token waits to move (`movable`, section 3), that is the v1 name, with the item the
+  next sync moves it to.
   Connections at the same institution (a second login, or Sandbox test Items at one test bank)
   are told apart everywhere by a label from their first account, "Chase (Freedom ··5678)"
   (`status.connection_labels`).

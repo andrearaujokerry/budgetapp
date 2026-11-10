@@ -84,9 +84,12 @@
 ] %}
 {%- if item.has_cards %}{% set _ = rows.append(("Statement details", statements)) %}{% endif %}
 {#- The Keychain item's name (never the token) tells the copies of several connections apart
-    (going-live.md "Keep a copy of the access token"). Demo data has no Keychain item. -#}
+    (going-live.md "Keep a copy of each access token"). Until the upgrade's first sync moves the
+    v1 token, it is still under its v1 name: name that, and where it goes. Demo data has no
+    Keychain item. -#}
 {%- if item.keychain_item and not demo %}
-{%- set keychain %}<code class="keychain-item">{{ item.keychain_item }}</code>{% endset %}
+{%- set keychain %}<code class="keychain-item">{{ item.keychain_item }}</code>
+{%- if item.keychain_moves_to %} <span class="muted">(its old name: the next sync moves it to <code class="keychain-item">{{ item.keychain_moves_to }}</code>; <code>./run doctor --env production</code> explains if it stays)</span>{% endif %}{% endset %}
 {%- set _ = rows.append(("Keychain item", keychain)) %}
 {%- endif %}
 {{ ui.kv(rows) }}
