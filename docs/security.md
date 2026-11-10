@@ -82,8 +82,8 @@ touch your money. This page lists what protects it, and the few things that are 
 - **Delete CSV downloads** from your Downloads folder once they are imported.
 - **Keep each access token's only copy outside Keychain in your password manager**, nowhere
   else.
-- **Never delete a connection in Plaid Portal (my.plaid.com).** Plaid removes it for good: no
-  copy of its token or Reconnect brings it back, and the app won't link that login again
+- **Never delete a connection in Plaid Portal (my.plaid.com).** Plaid removes it for good:
+  neither a copy of its token nor Reconnect brings it back
   ([Reconnecting and renewing](reconnecting.md#when-the-connection-or-its-token-is-missing)).
 - **Protect your Plaid account** with a strong password and two-step verification: it holds your
   keys.
