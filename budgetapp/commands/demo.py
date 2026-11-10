@@ -1,9 +1,11 @@
-"""``demo create|drop|list`` — demo databases with realistic, made-up card data (Sandbox only).
+"""``demo create|drop|list`` — demo databases with realistic, made-up card and bank data (Sandbox
+only).
 
 * ``./run demo create NAME [--seed N] [--today YYYY-MM-DD]``: (re)creates the database
   ``budgetapp_test_demo_<NAME>`` as ``budgetapp_test``, migrates it and fills it with about two
-  years of consistent fake data (a linked Amex card, ~2,500 transactions, statements, budgets,
-  rules, sync history and alerts). The same seed and date always give the same data.
+  years of consistent fake data (a linked Amex card and a made-up bank, Harbor Bank, with checking
+  and savings; about 2,900 transactions, statements, budgets, rules, sync history and alerts). The
+  same seed and date always give the same data.
 * ``./run demo drop NAME`` and ``./run demo list``.
 
 View one with ``./run serve --demo NAME [--port N]`` (default port 8800). Nothing here touches
