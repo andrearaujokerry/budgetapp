@@ -138,6 +138,22 @@ class TestAccessTokens:
         with pytest.raises(TokenNotSavedError):
             sec.store_access_token(prod, "item-1", PROD_TOKEN)
 
+    @pytest.mark.parametrize("item_id", ["item.with.dot", "abc=", "a b", "a/b"])
+    def test_an_item_id_no_keychain_name_can_hold_still_keeps_the_token(
+        self, prod, secrets, item_id
+    ):
+        """Final review (security-1): the Keychain name is worked out inside the guard, so an
+        Item id it can't hold ends in the recovery file like any other failure. The token (a
+        Trial connection Plaid has already created) is never lost, and it still counts."""
+        with pytest.raises(TokenNotSavedError) as info:
+            sec.store_access_token(prod, item_id, PROD_TOKEN)
+        path = info.value.recovery_path
+        assert sec.unsaved_production_tokens(prod) == [path]
+        assert PROD_TOKEN in path.read_text() and _mode(path) == 0o600
+        assert PROD_TOKEN not in str(info.value)
+        assert PROD_TOKEN not in secrets.values.values()
+        assert sec.recovery_item_ids(prod) == {item_id}
+
     def test_sandbox_tokens_are_per_item_with_an_index(self, sandbox, secrets):
         sec.store_access_token(sandbox, "item-a", SANDBOX_TOKEN)
         sec.store_access_token(sandbox, "item-b", SANDBOX_TOKEN + "x")

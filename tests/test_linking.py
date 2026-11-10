@@ -1054,6 +1054,36 @@ def test_a_token_nothing_could_save_is_handed_back_once_and_never_in_the_message
     assert items(db) == []
 
 
+@pytest.mark.parametrize("odd", ["item.with.dot", "a b"])
+def test_an_item_id_no_keychain_name_can_hold_ends_in_a_recovery_file(
+    db, session_factory, production, prod_plaid, secrets, odd
+):
+    """Final review (security-1): after the exchange (a Trial connection is used) such an Item id
+    escaped as a bare ValueError, leaving the token nowhere and nothing to count or block on."""
+    attempt = linking.new_link_token(db, prod_plaid, production, store=secrets).attempt
+    db.commit()
+    fake_item = prod_plaid.add_item(
+        item_id=odd, institution_id="ins_109511", institution_name="Tartan Bank"
+    )
+    with pytest.raises(LinkFailed) as info:
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(fake_item),
+            TARTAN,
+            attempt=attempt,
+        )
+    (path,) = app_secrets.unsaved_production_tokens(production)
+    assert str(path) in str(info.value) and fake_item.access_token not in str(info.value)
+    assert fake_item.access_token in path.read_text()
+    assert len(prod_plaid.calls_to("exchange_public_token")) == 1
+    assert linking.connections_used(db, production, store=secrets) == 1
+    assert any(str(path) in reason for reason in linking.link_blocks(db, production, store=secrets))
+    assert items(db) == []
+
+
 def test_a_sandbox_token_nothing_could_save_is_simply_lost(
     session_factory, fake_plaid, secrets, sandbox, monkeypatch
 ):

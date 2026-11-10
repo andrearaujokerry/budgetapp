@@ -155,10 +155,11 @@ Rules:
   Item's own key). The index entry is written before the token (an index entry without a token
   is harmless; a token nobody can find is an orphan). If the Keychain write fails after a
   successful exchange, the token goes to a 0600 recovery file under `state/` and the app stops
-  with instructions. `./run setup --env production --access-token` re-enters a saved token of
-  any connection (via `getpass`): `/item/get` verifies it and names its Item, and it is saved
-  under that Item's key. The user guide (`docs/going-live.md`) suggests keeping a copy of each
-  in the user's password manager.
+  with instructions; so does a token whose Item id can't be part of a Keychain name (the name is
+  worked out inside the same guard). `./run setup --env production --access-token` re-enters a
+  saved token of any connection (via `getpass`): `/item/get` verifies it and names its Item, and
+  it is saved under that Item's key. The user guide (`docs/going-live.md`) suggests keeping a
+  copy of each in the user's password manager.
 - **The v1 token** (`plaid.access_token.production`, from before several Items were allowed) is
   moved once, on the first run of the new code that needs it (a sync, a link, update mode), when
   exactly one production Item exists: write the Item's key, read it back and compare, then delete

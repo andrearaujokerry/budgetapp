@@ -643,8 +643,9 @@ def store_access_token(
       saving the new token to a recovery file, because every production token used a Trial
       connection).
     * If the write or the read-back fails — for ANY reason, including Ctrl-C (re-raised after
-      the file is written) — the token goes to a 0600 recovery file under ``settings.state_dir``
-      (or, if that fails too, under :func:`fallback_recovery_dir`) and
+      the file is written) or an Item id that can't be part of a Keychain name
+      (:func:`access_token_key`) — the token goes to a 0600 recovery file under
+      ``settings.state_dir`` (or, if that fails too, under :func:`fallback_recovery_dir`) and
       :class:`TokenNotSavedError` is raised; callers stop and show the path and
       ``./run setup --env production --access-token``. An unsaved production recovery file keeps
       blocking new links (:func:`production_link_blockers`).
@@ -652,12 +653,11 @@ def store_access_token(
       written (an index entry without a token is harmless; a token nobody can find is an orphan).
     * Callers clear the link-in-progress marker only after this returns normally.
     """
-    if not access_token or not item_id:
-        raise ValueError("item_id and access_token are required")
+    if not access_token:
+        raise ValueError("an access token is required")
     plaid_env = settings.plaid_env
     store = store or get_store()
     register_secret(access_token)
-    account = access_token_key(plaid_env, item_id)
 
     def _recover(reason: str, cls: type[SecretStoreError] = TokenNotSavedError) -> SecretStoreError:
         path = _save_recovery_file(settings, item_id, access_token)
@@ -671,7 +671,15 @@ def store_access_token(
         return TokenNotSavedError(reason, path)
 
     # Any failure below must not lose the token (each production token used a Trial connection),
-    # so every exception — even KeyboardInterrupt/SystemExit — ends in the recovery file.
+    # so every exception — even KeyboardInterrupt/SystemExit — ends in the recovery file. That
+    # starts with the Keychain name: Plaid has created the Item even if its id can't be in one.
+    try:
+        account = access_token_key(plaid_env, item_id)
+    except BaseException as exc:
+        error = _recover("Plaid's Item id can't be part of a Keychain name.")
+        if not isinstance(exc, Exception):
+            raise
+        raise error from exc
     try:
         existing = store.get(account)
     except BaseException as exc:
@@ -745,14 +753,15 @@ def unsaved_production_tokens(settings: Settings) -> list[Path]:
 
 def recovery_item_ids(settings: Settings) -> set[str]:
     """The production item ids named by unsaved recovery files (each is an Item that exists at
-    Plaid, so it counts toward the 10). Unreadable files are skipped."""
+    Plaid, so it counts toward the 10), also an id no Keychain name can hold (only counted here).
+    Unreadable files are skipped."""
     found: set[str] = set()
     for path in unsaved_production_tokens(settings):
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        match = re.search(r"^item_id: ([A-Za-z0-9_-]+)$", text, flags=re.M)
+        match = re.search(r"^item_id: (.+)$", text, flags=re.M)
         if match:
             found.add(match.group(1))
     return found

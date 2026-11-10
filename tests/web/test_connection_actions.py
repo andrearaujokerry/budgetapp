@@ -842,6 +842,20 @@ def test_a_parked_token_never_comes_back_in_the_exchange_answer(prod_client, pro
     assert "Don't link this login again" in error and "show it to the user" not in error
 
 
+def test_an_item_id_no_keychain_name_can_hold_is_answered_with_its_recovery_file(
+    prod_client, prod_plaid, secrets
+):
+    """Final review (security-1): it used to be a bare 500 with the token in no file."""
+    fake_item = prod_plaid.add_item(item_id="item.with.dot")
+    response = prod_client.post(
+        "/connection/exchange",
+        json={"public_token": prod_plaid.public_token_for(fake_item), "metadata": AMEX},
+    )
+    assert response.status_code == 502 and set(response.json()) == {"error"}
+    assert "readable only by you" in response.json()["error"]
+    assert fake_item.access_token not in response.text
+
+
 def test_a_token_nothing_could_save_is_shown_once_by_the_exchange_answer(
     prod_client, prod_plaid, secrets, monkeypatch
 ):
