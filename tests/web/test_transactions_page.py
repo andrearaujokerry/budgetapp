@@ -1107,7 +1107,8 @@ class TestAccounts:
         assert "is-muted" in row(transfer) and ">Transfer<" in row(transfer)
         assert ">Payment<" in row(payment)
         detail = client.get(f"/transactions/{transfer.id}").text
-        assert "A transfer between your accounts, not spending or income" in detail
+        assert "A transfer, not spending or income." in detail  # final review money-1
+        assert "between your accounts" not in detail
 
 
 # --------------------------------------------------------------------------- export

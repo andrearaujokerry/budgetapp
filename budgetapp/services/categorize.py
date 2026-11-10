@@ -31,7 +31,10 @@ Payments, any other loan payment to spending (the car, mortgage, student loan, p
 buy-now-pay-later codes to their card category, the rest to Other) and money a lender deposits
 (``LOAN_DISBURSEMENTS``) to Transfers. Every other code maps as for cards, and a positive bank row
 may land in a ``transfer`` category (money leaving for savings or the card is a transfer, not a
-charge). Rules never apply to a bank row Plaid codes as a card payment
+charge). Money coming in that Plaid didn't classify (no category, or ``OTHER``) is a deposit, not a
+refund: it tries :data:`MONEY_IN_KEYS` first, the bank mapping of other income
+(``'default'``; final review money-3, a deviation from C3's "maps as for cards"), and sync marks it
+for review. Rules never apply to a bank row Plaid codes as a card payment
 (:func:`is_bank_card_payment`): paying the card from checking is never spending or income and
 never counted twice (W3-PLAN §0), even when a rule written for card rows matches its text; it
 keeps its bank mapping, and a category set on the row itself still wins. Anything that is not on
@@ -118,6 +121,19 @@ CHANGE_SAMPLE_LIMIT = 200
 CREDIT_KEY_SUFFIX = "|credit"
 #: Suffix of Plaid mapping keys tried first for a row on a bank account (``"INCOME_SALARY|bank"``).
 BANK_KEY_SUFFIX = "|bank"
+#: Plaid's codes for money it couldn't classify (PFC v2 ``OTHER``); its category may also be
+#: missing altogether (``personal_finance_category`` is nullable, RESEARCH T1.5).
+UNCLASSIFIED_PFC = frozenset({"OTHER", "OTHER_OTHER"})
+#: Keys tried first for money coming in to a bank account that Plaid didn't classify: the bank
+#: mapping of other income, then of the income group (migration 0005: Other Income). On a card
+#: such a credit is most likely a refund; on a bank account it is a deposit (final review money-3).
+MONEY_IN_KEYS = (f"INCOME_OTHER{BANK_KEY_SUFFIX}", f"INCOME{BANK_KEY_SUFFIX}")
+UNCLASSIFIED_MONEY_IN = "money in that Plaid didn't classify"
+#: The review note sync puts on such a row when it arrives.
+UNCLASSIFIED_MONEY_IN_REVIEW = (
+    "Plaid didn't say what this money coming in is, so it was filed as other income. If it is a "
+    "refund or a transfer, change its category."
+)
 
 
 class TransactionLike(Protocol):
@@ -329,6 +345,15 @@ def is_bank_card_payment(txn: TransactionLike, *, bank: bool | None = None) -> b
     return on_bank_account(txn) if bank is None else bank
 
 
+def money_in_keys(txn: TransactionLike, *, bank: bool) -> tuple[str, ...]:
+    """:data:`MONEY_IN_KEYS` for money coming in to a bank account (a negative amount on a Plaid
+    row) that Plaid didn't classify (no category, or ``OTHER``); ``()`` for any other row."""
+    if not bank or txn.source == "csv" or to_money(txn.amount) >= 0:
+        return ()
+    codes = (txn.pfc_primary, txn.pfc_detailed)
+    return MONEY_IN_KEYS if all(not c or c in UNCLASSIFIED_PFC for c in codes) else ()
+
+
 _AMEX_SEPARATOR = re.compile(r"\s*(?:-|–|—|>)\s*")
 
 
@@ -449,6 +474,15 @@ class Categorizer:
             self.account_types[account_id] = account.type if account is not None else None
         return self.account_types[account_id] == BANK
 
+    def filed_as_unclassified_money_in(self, txn: Transaction) -> bool:
+        """Whether ``txn``'s category is the one :data:`MONEY_IN_KEYS` gave it (money in to a bank
+        account that Plaid didn't classify), not a rule's, the user's or the refund rule's: sync
+        marks such a row for review when it arrives (final review money-3)."""
+        if txn.category_source != "default" or not money_in_keys(txn, bank=self.on_bank(txn)):
+            return False
+        found = self._mapped(txn, True)
+        return found is not None and found[1] == "default" and found[0] == txn.category_id
+
     def card_payment_from_bank(self, txn: TransactionLike) -> bool:
         """Whether rules skip ``txn``: a card payment from a bank account
         (:func:`is_bank_card_payment`)."""
@@ -503,8 +537,9 @@ class Categorizer:
     def _mapped(self, txn: TransactionLike, bank: bool = False) -> tuple[int, str, str] | None:
         """``(category_id, source, label)`` from the Plaid or Amex mapping, or ``None``.
 
-        A Plaid row on a bank account tries the ``|bank`` keys first (detailed, then primary);
-        Amex CSV rows are always card rows.
+        A Plaid row on a bank account tries the ``|bank`` keys first (detailed, then primary),
+        and before them, for money in that Plaid didn't classify, :data:`MONEY_IN_KEYS`
+        (``'default'``: no mapping of its own code decided); Amex CSV rows are always card rows.
         """
         if txn.source == "csv":
             keys = amex_category_keys(txn.external_category)
@@ -515,11 +550,14 @@ class Categorizer:
         candidates = list(keys)
         if to_money(txn.amount) < 0 and not looks_like_fee(txn):
             candidates = [k + CREDIT_KEY_SUFFIX for k in keys] + candidates
+        money_in = money_in_keys(txn, bank=bank)
         if bank and source == "plaid":
-            candidates = [k + BANK_KEY_SUFFIX for k in keys] + candidates
+            candidates = [*money_in, *(k + BANK_KEY_SUFFIX for k in keys), *candidates]
         for key in candidates:
             category_id = mapping.get(key.casefold() if source == "amex" else key)
             if category_id is not None:
+                if key in money_in:
+                    return category_id, "default", UNCLASSIFIED_MONEY_IN
                 label = f"{kind} {key}"
                 if key.endswith(BANK_KEY_SUFFIX):
                     label = f"{kind} {key[: -len(BANK_KEY_SUFFIX)]} (bank accounts)"

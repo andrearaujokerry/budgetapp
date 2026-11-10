@@ -553,6 +553,29 @@ class TestBankRows:
         assert (change.transaction_count, change.reapply_count) == (4, 3)
         assert change.old_category_id == get_category(db, "Paycheck").id
 
+    def test_money_in_plaid_did_not_classify_counts_on_the_other_income_bank_row(
+        self, db, checking
+    ):
+        """Final review money-3: on a bank account, money in without a usable Plaid category
+        (none, or OTHER) goes where Income → Other's bank row says, so that row counts it, and
+        changing the row counts it as moving."""
+        auto = {"category": get_category(db, "Other Income"), "category_source": "default"}
+        deposits = [
+            plaid(db, checking, None, None, amount="-1800.00", name="MOBILE DEPOSIT", **auto),
+            plaid(db, checking, "OTHER_OTHER", "OTHER", amount="-600.00", name="DEPOSIT", **auto),
+        ]
+        plaid(db, checking, "OTHER_OTHER", "OTHER", amount="45.00")  # money out: as on cards
+        plaid(db, make_account(db), "OTHER_OTHER", "OTHER", amount="-20.00")  # a card's credit
+        listing = categories.list_mappings(db, "plaid_pfc", only_used=True)
+        counted = row(listing, "INCOME_OTHER|bank")
+        assert counted.transaction_count == 2
+        cz = Categorizer.load(db)
+        assert {cz.decide(t).category_id for t in deposits} == {counted.effective_category_id}
+        assert row(listing, "OTHER_OTHER").transaction_count == 2
+        gifts = make_category(db, "Gifts received", kind="income")
+        change = categories.set_mapping(db, "plaid_pfc", "INCOME_OTHER|bank", gifts.id)
+        assert (change.transaction_count, change.reapply_count) == (2, 2)
+
     def test_bank_keys_are_plaid_only(self, db):
         assert categories.normalize_mapping_key("plaid_pfc", " INCOME_SALARY|bank ") == (
             "INCOME_SALARY|bank"

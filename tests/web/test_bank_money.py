@@ -9,6 +9,7 @@ import re
 
 import pytest
 
+from budgetapp import clock
 from budgetapp.models import CategoryMapping
 from tests.bank_factories import make_bank_account
 from tests.factories import get_category, make_account, make_statement, make_transaction
@@ -125,3 +126,56 @@ def test_the_rule_form_picks_any_account(client, db, checking):
     options = re.findall(r'<option value="([^"]*)">([^<]*)</option>', field.group(2))
     assert options[0] == ("", "Any account")
     assert {value for value, _ in options[1:]} >= {str(card.id), str(checking.id)}
+
+
+#: How the details describe a row in a transfer category other than Card Payments (money-1).
+TRANSFER_COUNTS_AS = (
+    "A transfer, not spending or income. If it is really spending or income (a payment to "
+    "someone, a deposit), change its category."
+)
+#: What the pages said before (final review money-1): every Transfers row moved money between
+#: your own accounts.
+OWN_ACCOUNTS_ONLY = (
+    "A transfer between your accounts",
+    "moving money between your accounts",
+    "transfers between your accounts are neither",
+)
+
+
+def counts_as(page: str) -> str:
+    found = re.search(r"<dt>Counts as</dt>\s*<dd>(.*?)</dd>", page, re.S)
+    assert found is not None
+    return html.unescape(found.group(1).strip())
+
+
+def test_a_transfer_is_never_called_a_move_between_your_accounts(client, db, checking):
+    """Final review money-1: Plaid files payments to people, wires and check deposits as transfers
+    too (its TRANSFER_* codes, W3-PLAN C3), so no page says a Transfers row moved money between
+    your own accounts, and the details say what to do when one is really spending or income."""
+    zelle = make_transaction(
+        db,
+        checking,
+        amount="300.00",
+        name="ZELLE PAYMENT TO JORDAN LEE",
+        category=get_category(db, "Transfers"),
+        category_source="plaid",
+        pfc_primary="TRANSFER_OUT",
+        pfc_detailed="TRANSFER_OUT_TRANSFER_OUT_FROM_APPS",
+    )
+    paycheck = get_category(db, "Paycheck")
+    make_transaction(db, checking, amount="-2000.00", category=paycheck, date=clock.today())
+    detail = client.get(f"/transactions/{zelle.id}").text
+    assert counts_as(detail) == TRANSFER_COUNTS_AS
+    split = html.unescape(client.get(f"/transactions/{zelle.id}/split").text)
+    assert (
+        "A transfer isn't spending, so it can't be split. If this one is really spending" in split
+    )
+    categories = html.unescape(client.get("/categories").text)
+    assert (
+        "Not spending or income: card payments, money moved between your accounts and anything "
+        "else Plaid files as a transfer."
+    ) in categories
+    trends = client.get("/trends").text
+    assert "Card payments and transfers are neither." in trends
+    for page in (detail, split, categories, trends):
+        assert not [old for old in OWN_ACCOUNTS_ONLY if old in html.unescape(page)]

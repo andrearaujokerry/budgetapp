@@ -418,7 +418,11 @@ class TestSplits:
         two = parts((cats["groceries"], "300.00", None), (cats["home"], "200.00", None))
         with pytest.raises(TransactionEditError) as err:
             txns.set_splits(db, transfer.id, two)
-        assert "transfer between your accounts can't be split" in err.value.errors["parts"]
+        # Final review money-1: Plaid files payments to people as transfers too.
+        assert err.value.errors["parts"] == (
+            "A transfer can't be split. If this one is really spending (a payment to someone, "
+            "say), change its category first."
+        )
         assert not txns.get_row(db, transfer.id).can_split
 
     def test_zero_amount_transactions_cannot_be_split(self, db, card, cats):

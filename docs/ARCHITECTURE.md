@@ -310,7 +310,7 @@ nulling `item_id`.
 | column | type | notes |
 | --- | --- | --- |
 | name | text not null | unique on `lower(name)` |
-| kind | text not null default 'expense' | `expense` (spending) \| `income` (paychecks, interest, other income, credits/rewards: not spending) \| `transfer` (card payments, transfers between your own accounts: not spending) |
+| kind | text not null default 'expense' | `expense` (spending) \| `income` (paychecks, interest, other income, credits/rewards: not spending) \| `transfer` (card payments, and what Plaid codes as a transfer on a bank account: moves between your own accounts, also payments to and from other people; neither spending nor income) |
 | system_key | text unique, null | `uncategorized` (always `expense`), `card_payments` (always `transfer`) — cannot be merged away, hidden or change kind (CHECK) |
 | is_hidden | bool not null default false | hidden from pickers and budget lists; transactions still count |
 | color | text | palette slot `cat-1` … `cat-16` (theme-aware; the seeded categories use these), `other` (neutral grey), or a custom `#rrggbb` |
@@ -337,7 +337,9 @@ with a `|bank` suffix come before all of those (detailed, then primary): migrati
 `LOAN_DISBURSEMENTS` and `LOAN_PAYMENTS` code (§6), and the "Plaid & Amex categories" editor
 lists them with a "Bank accounts" badge next to the card mapping of the same code. A primary's
 `|bank` key comes before a detailed code's plain key, so a group with a primary bank key gives
-every detailed code its own bank key.
+every detailed code its own bank key. Money coming in to a bank account that Plaid didn't
+classify (no category, or `OTHER`) tries `INCOME_OTHER|bank`, then `INCOME|bank` before anything
+else (`categorize.MONEY_IN_KEYS`, §6), and the editor counts it on `INCOME_OTHER|bank`.
 
 ### rules (CAT-3)
 | column | type | notes |
@@ -515,8 +517,9 @@ period". It reads `app_settings`: the date basis (posting date in statement mode
 `spend_date = COALESCE(authorized_date, date)` in calendar mode) and
 `include_pending_in_budgets`, and sums `v_allocations.amount` over allocations whose category
 `kind = 'expense'`, per category. Charges add; refunds (negative amounts in an expense
-category) subtract from it (TXN-3). Card payments and transfers between your own accounts
-(`kind = 'transfer'`) and income (`kind = 'income'`) never count. Every account counts the same:
+category) subtract from it (TXN-3). Card payments and transfers (`kind = 'transfer'`: moves
+between your own accounts and whatever else Plaid codes as a transfer, payments to other people
+included) and income (`kind = 'income'`) never count. Every account counts the same:
 rent, debit purchases and ATM withdrawals from checking are spending like card charges. The
 Budgets page, every "this period" widget on the dashboard,
 and the budget alerts all call it. `spending.periods_spending(session, periods)` is the same
@@ -543,8 +546,9 @@ exactly what they did before.
 
 **Net = income − spending**, where spending is `period_spending`'s total (every expense
 category, annual-budget ones included) or the month's `monthly_spending` total. Transfers (kind
-`transfer`: card payments from either side, moves between own accounts) are neither, so for any
-period `spending − income + transfers` is the plain sum of every counted row's amount
+`transfer`: card payments from either side, and Plaid's transfers, between own accounts or to
+and from other people) are neither, so for any period `spending − income + transfers` is the
+plain sum of every counted row's amount
 (`tests/test_spending.py` checks this in both modes, pending on and off). Credits & Rewards is
 income kind, so Amex statement credits are income and stay their own line wherever income is
 broken down (Trends' Every month table).
@@ -588,12 +592,24 @@ For a new transaction:
 in from savings or a deposit that reads like a payment is not forced into Card Payments. Step 3
 tries the `|bank` mappings first (section 5): `INCOME_SALARY` (and PFC v1's `INCOME_WAGES`) →
 Paycheck; `INCOME_INTEREST_EARNED` and `INCOME_DIVIDENDS` → Interest; every other `INCOME` code
-→ Other Income; `TRANSFER_IN` and `TRANSFER_OUT` codes → Transfers, except
-`TRANSFER_OUT_WITHDRAWAL` (ATM and cash) → Cash & ATM (spending);
+→ Other Income; `TRANSFER_IN` and `TRANSFER_OUT` codes → Transfers (Plaid's taxonomy uses them
+for moves between the owner's accounts and also for payments to and from other people, apps and
+wires and for check and cash deposits, so Transfers holds both, neither spending nor income,
+until a rule moves one; the pages and guides say so, and going-live has the owner look through
+Transfers after the first bank sync), except `TRANSFER_OUT_WITHDRAWAL` (ATM and cash) → Cash &
+ATM (spending);
 `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, positive on the bank side, → Card Payments, so a card
 payment from checking that Plaid codes this way is never spending and never counts the card's
 charges twice (one coded `TRANSFER_OUT_*` lands in Transfers, not spending either, but rules
-apply to it; which code Plaid gives such a payment is unverified); any other loan payment is
+apply to it; which code Plaid gives such a payment is unverified; a payment to a card the app
+doesn't have is a card payment too, so that card's spending counts nowhere, and the guides say to
+link every card paid from checking). One that Plaid gives a spending code
+(`LOAN_PAYMENTS_OTHER_PAYMENT` → Other, a merchant's code, or no code at all → Uncategorized) is
+spending, and counts the card's charges a second time until the owner files it in Card Payments
+(on the row, then a rule from it), so going-live's checklist has the owner check the payment's
+**Counts as** after the first bank sync. The app doesn't guess such a payment from its text:
+RESEARCH has no verified bank-side description, and a pattern loose enough for every bank's
+wording could also match ordinary spending (final review money-2). Any other loan payment is
 spending (the car, mortgage, student loan, personal loan and buy-now-pay-later codes keep their
 card category, Transportation, Home, Education, Utilities & Bills and Shopping; `LOAN_PAYMENTS`
 and its other codes → Other); and money a lender deposits (`LOAN_DISBURSEMENTS` codes) → Transfers,
@@ -601,14 +617,24 @@ neither income nor spending. The cards' mappings of these codes are card-sided (
 in under a loan code is the card's payment, Card Payments, and a cash advance is spending), so
 every loan code has a bank key and no bank row reaches them. Every other code maps as for cards,
 and the positive-row guard is for cards only (money leaving for savings is a transfer, not a
-charge). Rules still come first, so a rule can turn a regular transfer into income, with one
+charge). One more bank-only step (final review money-3, a deviation from C3's "maps as for
+cards"): money coming in that Plaid didn't classify, a negative row with no category (Plaid's
+`personal_finance_category` is nullable, RESEARCH T1.5) or `OTHER`/`OTHER_OTHER`, is a deposit,
+not a refund that lowers spending, so step 3 tries `MONEY_IN_KEYS` first, the bank mapping of
+`INCOME_OTHER`, then of `INCOME` (both Other Income from 0005, so the owner can redirect them);
+the decision's source is `default`, and the sync marks such a new row `needs_review`
+(`UNCLASSIFIED_MONEY_IN_REVIEW`). With neither key mapped it maps as before (`OTHER` → Other, no
+category → Uncategorized); money out, a card's credit and an Amex CSV row never take this step.
+Rules still come first, so a rule can turn a regular transfer into income, with one
 exception: rules never apply to a bank row Plaid codes
 `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` (`categorize.is_bank_card_payment`). A rule written for card
 rows, where step 0 shields payments, could otherwise match the payment's ACH text on checking and
 count the card's charges twice; the row keeps its bank mapping, and a category set on the row
 itself still wins. The refund rule applies as on cards. Plaid's `transaction_code` is mostly
-empty for US banks, so bank rows are classified by the PFC and the text. Anything not on a bank
-account (a card, the manual CSV account, an account Plaid hasn't typed yet) is a card.
+empty for US banks, so bank rows are classified by the PFC; the text counts only through the
+owner's rules (no built-in text test, unlike step 0 on cards: final review money-2). Anything
+not on a bank account (a card, the manual CSV account, an account Plaid hasn't typed yet) is a
+card.
 Re-applying rules (CAT-4) follows the same rules for bank rows. The categories (Paycheck,
 Interest, Other Income, Transfers, Cash & ATM) and the mappings come from migration
 `0005_bank_categories`, which only adds: a category whose name is taken keeps its kind, and a
@@ -659,6 +685,8 @@ applies.
    without user state are matched to the rows inserted in this batch still unmatched by the same
    rules, only to record `consumed_by_transaction_id`: the row is the same charge (a posting
    Plaid didn't link, a re-delivery after account churn), not a new one (section 11, ALR-3).
+   Then each inserted row that categorization filed as money in that Plaid didn't classify (§6
+   bank accounts; not one that took the user's category) is marked `needs_review`.
 6. **Reconciliation** with CSV rows (below), then the cursor update.
 
 ### CSV ↔ Plaid reconciliation (SYNC-8)

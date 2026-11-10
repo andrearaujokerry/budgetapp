@@ -33,12 +33,20 @@ The same rules apply on every page and in every alert:
   category's spending. Card payments ("Card Payments") and credits such as cash back ("Credits &
   Rewards") never count as spending.
 - **Bank accounts count the same way.** Rent, debit-card purchases, loan payments (a car,
-  mortgage or student loan) and ATM withdrawals ("Cash & ATM") from checking are spending; paying
-  your card from checking is a card payment when Plaid marks it as one (else usually a transfer),
-  so the money counts once, as the card's charges; moving money between your own accounts, or
-  money a lender puts in your account ("Transfers"), is neither spending nor income; paychecks,
-  interest and other money coming in go to "Paycheck", "Interest" and "Other Income". A
-  transaction's details say how it counts (**Counts as**).
+  mortgage or student loan) and ATM withdrawals ("Cash & ATM") from checking are spending. Paying
+  your card from checking is a card payment when Plaid marks it as one, so the money counts once,
+  as the card's charges, when that card is linked too: a payment to a card the app doesn't have
+  is still a card payment, so that card's spending counts nowhere. Plaid's category for that
+  payment isn't guaranteed: if Plaid files one as spending, the card's charges count twice until
+  you set it to Card Payments, so check its **Counts as** once after linking. What
+  Plaid files as a transfer ("Transfers") is neither spending nor income: moving money between
+  your own accounts and money a lender puts in your account, but also payments to and from other
+  people (Zelle, Venmo, wires, check deposits) until a rule of yours moves them. Paychecks,
+  interest and other money coming in go to "Paycheck", "Interest" and "Other Income", and so does
+  money coming in that Plaid doesn't classify, marked **Needs review** (change its category if it
+  is a refund or a transfer). A transaction's details say how it counts (**Counts as**). Once a
+  bank is linked, check what [Going live](going-live.md#after-your-first-bank-account-syncs)
+  lists.
 - **A budget period** is a calendar month, or a card's statement cycle if you choose that in
   [Settings](#settings).
 - **Which date counts:** in calendar-month mode, the day you made the charge; in statement-cycle
@@ -65,8 +73,8 @@ it open those pages.
   **Net**: income minus all your spending so far (above zero is money you kept). Income is money
   in to your income categories from any account: paychecks, interest, other income, and Amex
   credits (Credits & Rewards, its own line wherever income is broken down). It uses the same dates
-  and pending setting as your budgets. Card payments and transfers between your own accounts are
-  neither income nor spending. The switch is on to begin with, and the app remembers your choice
+  and pending setting as your budgets. Card payments and transfers are neither income nor
+  spending. The switch is on to begin with, and the app remembers your choice
   for the Dashboard and Trends. The **Income** tile opens the period's income in Transactions,
   where money in shows as negative amounts (as Plaid sends it), so the list's **Net** is the
   figure with a minus sign. Until you link a bank account, the only income is your card credits,
@@ -120,9 +128,11 @@ Every charge, refund, credit, payment and transfer on your cards and bank accoun
   amounts, card payments, transfers, paychecks and credits included, so they differ from spending
   figures.
 - Rows that are never spending are greyed out: **Payment** marks a card payment (on the card, and
-  its other side on checking), **Transfer** money moved between your own accounts.
+  its other side on checking), **Transfer** what Plaid files as a transfer: money moved between
+  your own accounts, and payments to or from other people until a rule moves them.
 - **Needs review** lists rows where something changed after you edited them (for example Plaid
-  changed the amount of a split charge). **Possible duplicates** lists CSV rows held for review.
+  changed the amount of a split charge), and money in to a bank account that Plaid didn't
+  classify. **Possible duplicates** lists CSV rows held for review.
 
 **Changing a transaction**
 
@@ -158,9 +168,10 @@ The budgets for one period at a time; the arrows next to the period go back and 
   budget row it saves like a typed amount, when you leave the field or press Enter; Esc puts
   the old amount back.
 - **Rollover** (per category) carries what is left, or what you overspent, into the next period.
-- **Overall target:** one number for all your spending, compared with every category except those
-  with an annual budget. Without one, the card adds up your category budgets and lists spending
-  in categories without a budget separately ("Not budgeted").
+- **Overall target:** one number for all your spending, from every card and bank account,
+  compared with every category except those with an annual budget. Without one, the card adds up
+  your category budgets and lists spending in categories without a budget separately
+  ("Not budgeted").
 - **Annual budgets** plan yearly costs such as the annual fee, travel or gifts with one amount for
   the calendar year. They are tracked year to date with a marker for an even pace, and never
   count in the monthly totals. A category has either a monthly or an annual budget, not both.
@@ -254,7 +265,7 @@ With more than one card, each has its own tab. Checking and savings accounts hav
 | --- | --- | --- |
 | Spending | yes; refunds in it reduce it | Groceries, Dining & Drinks, Travel, Cash & ATM |
 | Credits & income | no | Paycheck, Interest, Other Income, Credits & Rewards (cash back, statement credits) |
-| Card payments & transfers | no | Card Payments, Transfers (between your own accounts) |
+| Card payments & transfers | no | Card Payments, Transfers (moves between your accounts, and anything else Plaid files as a transfer) |
 
 Paycheck, Interest, Other Income, Transfers and Cash & ATM are for money in and out of your bank
 accounts; they were added with bank accounts and work like any other category. A category you
@@ -277,7 +288,9 @@ then to Uncategorized. Some rows say "for credits": they are tried first for neg
 back goes to Credits & Rewards while fees stay in Fees & Interest. Rows marked **Bank accounts**
 are tried first for checking and savings accounts, so a paycheck goes to Paycheck there while the
 same Plaid category on a card stays in Credits & Rewards; the row without the mark is for cards
-(and for bank accounts when there is no bank row). A change applies to new
+(and for bank accounts when there is no bank row). Money in to a bank account that Plaid didn't
+classify (no category, or Other) goes where Income → Other's **Bank accounts** row says, and
+counts there. A change applies to new
 transactions; past ones keep their category until you [re-apply rules](#rules), and the message
 after saving says how many would move.
 
@@ -298,7 +311,8 @@ Charges no rule matches go by Plaid's or Amex's category (above).
   A payment on your card always goes to Card Payments, and a payment from checking that Plaid
   marks as a card payment goes where its **Bank accounts** row on the Plaid & Amex categories tab
   says (Card Payments), so no rule can count it as spending. Otherwise your rules come first on a
-  bank account too, so a rule can, for example, turn a regular transfer into income.
+  bank account too, so a rule can, for example, turn a regular transfer into income, or a payment
+  Plaid files as a transfer (a Zelle or Venmo payment to someone) into spending.
 
 **Re-apply rules to past transactions** runs card payments, your rules and the category mappings
 again on every past transaction, all of them, since a date, or only Uncategorized ones. **Preview

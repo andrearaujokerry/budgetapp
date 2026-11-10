@@ -23,7 +23,9 @@
   ``sub|bank`` and ``group|bank`` come first, ARCHITECTURE §6). ``|credit`` and ``|bank`` keys
   are shown as such, and a code's credits that reach a ``|credit`` mapping count on the code's
   own credit row, and its bank-account rows that reach a ``|bank`` mapping on the code's own bank
-  row, so every row shows where its transactions really go. External categories found
+  row, so every row shows where its transactions really go (money in to a bank account that Plaid
+  didn't classify counts on Income → Other's bank row, where it goes: ``categorize.MONEY_IN_KEYS``).
+  External categories found
   in transactions but not mapped (for example Amex subgroups nobody has verified, such as
   ``Other-Charities``) are listed so they can be mapped, and any row's own mapping can be
   removed again. A mapping change affects new transactions; past ones change only when
@@ -72,9 +74,11 @@ from budgetapp.services.accounts import BANK
 from budgetapp.services.categorize import (
     BANK_KEY_SUFFIX,
     CREDIT_KEY_SUFFIX,
+    MONEY_IN_KEYS,
     Categorizer,
     amex_category_keys,
     looks_like_fee,
+    money_in_keys,
 )
 from budgetapp.textutil import strip_control_chars
 
@@ -87,7 +91,10 @@ KIND_LABELS: dict[str, str] = {
 KIND_HELP: dict[str, str] = {
     "expense": "Counts toward budgets and spending totals. Refunds in it reduce its spending.",
     "income": "Not spending: paychecks, interest, cash back and other money coming in.",
-    "transfer": "Not spending: paying a card and moving money between your accounts.",
+    "transfer": (
+        "Not spending or income: card payments, money moved between your accounts and anything "
+        "else Plaid files as a transfer."
+    ),
 }
 #: The theme-aware palette slots (``components/README.md`` §3.3) and the neutral grey.
 PALETTE: tuple[str, ...] = tuple(f"cat-{n}" for n in range(1, 17))
@@ -1072,6 +1079,13 @@ def _stored(session: Session, source: str) -> tuple[dict[str, int], dict[str, st
     return mapped, spelling
 
 
+def _credit(row: Any) -> SimpleNamespace:
+    """A grouped Plaid credit row (no amount or source column) as categorization reads it."""
+    return SimpleNamespace(
+        source="plaid", amount=-1, pfc_primary=row.pfc_primary, pfc_detailed=row.pfc_detailed
+    )
+
+
 def _key_counts(
     session: Session, source: str, mapped: Mapping[str, int]
 ) -> dict[str, tuple[str, int]]:
@@ -1111,7 +1125,11 @@ def _key_counts(
         .join(Account, Account.id == Transaction.account_id)
         .where(Transaction.source == txn_source, Transaction.amount < 0)
     )
+    reaches_money_in = any(_canon(source, k) in mapped for k in MONEY_IN_KEYS)
     for row in session.execute(credits.group_by(*cols, *detail, kind)):
+        if reaches_money_in and on_bank(row) and money_in_keys(_credit(row), bank=True):
+            add(MONEY_IN_KEYS[0], row.n)  # where categorization sends it (final review money-3)
+            continue
         keys = _raw_keys(source, row)
         if not keys:
             continue
@@ -1275,10 +1293,11 @@ def _mapping_effect(
     )
     for row in rows:
         keys = _raw_keys(source, row)
-        if not keys:
-            continue
         bank = source == "plaid_pfc" and row.account_type == BANK
         order = _lookup_order(keys, row.amount < 0 and not looks_like_fee(row), bank)
+        order = [*money_in_keys(row, bank=bank), *order]  # final review money-3
+        if not order:
+            continue
         first_before, _ = _first_mapped(source, order, before)
         first_after, _ = _first_mapped(source, order, after)
         hits = {_canon(source, k) for k in (first_before, first_after) if k is not None}

@@ -20,11 +20,21 @@ from budgetapp import secrets as app_secrets
 from budgetapp.config import load_settings
 from budgetapp.models import Category, Transaction
 from budgetapp.periods import month_of
-from budgetapp.services import sync
+from budgetapp.services import alerts, categorize, sync
+from budgetapp.services import transactions as txns
 from budgetapp.services.events import SyncOutcome
-from budgetapp.services.spending import period_spending
+from budgetapp.services.spending import period_income, period_spending
 from tests.bank_factories import BANK_INSTITUTION_ID, BANK_NAME
-from tests.factories import get_category, make_item, make_rule, plaid_account, set_app_settings
+from tests.factories import (
+    get_category,
+    make_account,
+    make_budget,
+    make_item,
+    make_rule,
+    make_transaction,
+    plaid_account,
+    set_app_settings,
+)
 from tests.fake_plaid import FakePlaidGateway
 
 NOW = dt.datetime(2026, 10, 20, 15, 0, tzinfo=dt.UTC)
@@ -399,3 +409,178 @@ def test_large_charges_follow_rules_and_raises(bank, db, notifier):
     bank.fake.post_pending(bank.fake_item, "to-sav", amount="1380.00", new_id="to-sav-posted")
     assert bank.sync().status == "success"
     assert sorted(notifier.titles) == sorted([*first, "$455.00 at Hotel"])
+
+
+def test_the_first_bank_sync_checks_budgets_but_announces_no_large_charge(bank, db, notifier):
+    """Final review reqs-2, as going-live's "After your first bank account syncs" says: budgets
+    and an overall target sized for the card count checking's spending from the bank's first sync
+    on (W3-PLAN §0), loan payments in Transportation and Education, and the budget alerts come at
+    once (ALR-1), while large-charge alerts skip the history Plaid sends when it is linked."""
+    set_app_settings(
+        db,
+        budget_alerts_enabled=True,
+        alert_thresholds=[80, 100],
+        large_charge_threshold=Decimal("500.00"),
+    )
+    card = make_account(db)  # the owner's American Express card, synced before
+    home, groceries = get_category(db, "Home"), get_category(db, "Groceries")
+    make_budget(db, home, "300.00")
+    make_budget(db, None, "2000.00")  # the overall target, sized for the card
+    day = today() - dt.timedelta(days=5)
+    make_transaction(db, card, amount="120.00", date=day, category=home)
+    make_transaction(db, card, amount="900.00", date=day, category=groceries)
+    db.commit()
+    assert alerts.evaluate_budgets(db, notifier) == [] and notifier.titles == []
+    loans = "LOAN_PAYMENTS"
+    rows = {
+        "rent": ("1800.00", "OAKWOOD PROPERTY MGMT", "RENT_AND_UTILITIES", "RENT", "Home"),
+        "car": ("420.00", "AUTO LOAN PMT", loans, "CAR_PAYMENT", "Transportation"),
+        "student": ("310.00", "STUDENT LOAN PMT", loans, "STUDENT_LOAN_PAYMENT", "Education"),
+    }
+    for key, (amount, name, primary, detailed, _category) in rows.items():
+        bank.add(
+            transaction_id=key,
+            amount=amount,
+            date=day,
+            name=name,
+            pfc_primary=primary,
+            pfc_detailed=f"{primary}_{detailed}",
+        )
+    outcome = bank.sync()
+    assert outcome.ok and outcome.initial_history_load
+    assert {key: bank.category(key)[0] for key in rows} == {
+        "rent": "Home",
+        "car": "Transportation",
+        "student": "Education",
+    }
+    assert "Home: over budget" in notifier.titles
+    assert "Over your overall budget" in notifier.titles
+    assert not [t for t in notifier.titles if t.startswith("$")]  # no large charge, not even rent
+
+
+def test_payments_to_people_are_transfers_until_a_rule_moves_them(bank, db):
+    """Final review money-1 (W3-PLAN C3), as using-the-app and going-live now say: Plaid's
+    TRANSFER_* codes also cover payments to and from other people, apps and wires, so those rows
+    land in Transfers, neither spending nor income, until a rule of the owner's moves them."""
+    make_rule(db, get_category(db, "Services"), description_pattern="ZELLE PAYMENT TO JORDAN")
+    db.commit()
+    day = today() - dt.timedelta(days=2)
+    apps = "TRANSFER_OUT_TRANSFER_OUT_FROM_APPS"
+    rows = {
+        "zelle": ("300.00", "ZELLE PAYMENT TO JORDAN LEE", "TRANSFER_OUT", apps),
+        "venmo": ("45.00", "VENMO PAYMENT 1023", "TRANSFER_OUT", apps),
+        "wire": ("900.00", "OUTGOING WIRE BAY BUILDERS", "TRANSFER_OUT", "TRANSFER_OUT_WIRE"),
+        "check": ("-500.00", "MOBILE CHECK DEPOSIT", "TRANSFER_IN", "TRANSFER_IN_DEPOSIT"),
+    }
+    for key, (amount, name, primary, detailed) in rows.items():
+        bank.add(
+            transaction_id=key,
+            amount=amount,
+            date=day,
+            name=name,
+            pfc_primary=primary,
+            pfc_detailed=detailed,
+        )
+    assert bank.sync().status == "success"
+    assert {key: bank.category(key) for key in rows} == {
+        "zelle": ("Services", "rule"),
+        "venmo": ("Transfers", "plaid"),
+        "wire": ("Transfers", "plaid"),
+        "check": ("Transfers", "plaid"),
+    }
+    month = month_of(day)
+    assert period_spending(db, month).total == Decimal("300.00")  # only what the rule moved
+    assert period_income(db, month).total == Decimal("0.00")
+
+
+def test_the_owner_files_a_miscoded_card_payment_from_checking_once(bank, db, notifier):
+    """Final review money-2, the remedy going-live's checklist gives: a payment to the card that
+    Plaid codes as spending (here LOAN_PAYMENTS_OTHER_PAYMENT, which maps to Other) counts the
+    card's charges a second time; set to Card Payments and turned into a rule with "Always
+    categorize like this", it and every later payment are card payments, so the card's charges
+    count once and no payment sets off a large-charge alert."""
+    set_app_settings(db, large_charge_threshold=Decimal("1000.00"))
+    card = make_account(db)
+    day = today() - dt.timedelta(days=12)
+    shopping, card_payments = get_category(db, "Shopping"), get_category(db, "Card Payments")
+    make_transaction(db, card, amount="1500.00", date=day, name="BEST BUY", category=shopping)
+    make_transaction(
+        db,
+        card,
+        amount="-1500.00",
+        date=day,
+        name="PAYMENT RECEIVED - THANK YOU",
+        category=card_payments,
+        category_source="system",
+    )
+    db.commit()
+    assert bank.sync().initial_history_load
+    payment = {"name": "AMEX EPAYMENT ACH PMT", "pfc_primary": "LOAN_PAYMENTS",
+               "pfc_detailed": "LOAN_PAYMENTS_OTHER_PAYMENT"}  # fmt: skip
+    bank.add(transaction_id="pmt-1", amount="1500.00", date=day, **payment)
+    assert bank.sync().status == "success"
+    assert bank.category("pmt-1") == ("Other", "plaid")  # spending: counted twice
+    month = month_of(day)
+    assert period_spending(db, month).total == Decimal("3000.00")
+    first = bank.row("pmt-1")
+    txns.update(db, first.id, category_id=card_payments.id)
+    draft = txns.one_click_draft(db, first.id)
+    assert not draft.is_payment  # an ordinary rule: rules apply to this row
+    txns.create_one_click_rule(
+        db,
+        first.id,
+        merchant_pattern=draft.merchant_pattern,
+        category_id=draft.category_id,
+        apply_to_past=True,
+    )
+    db.commit()
+    assert period_spending(db, month).total == Decimal("1500.00")  # the purchase, once
+    notifier.sent.clear()
+    bank.add(transaction_id="pmt-2", amount="1180.00", date=today(), **payment)
+    assert bank.sync().status == "success"
+    assert bank.category("pmt-2") == ("Card Payments", "rule")
+    assert [t for t in notifier.titles if t.startswith("$")] == []
+
+
+def test_money_in_plaid_did_not_classify_is_income_and_needs_review(bank, db, notifier):
+    """Final review money-3: a deposit Plaid sends without a category (nullable, RESEARCH T1.5)
+    or as OTHER took Uncategorized or Other, so it lowered spending like a refund and never
+    counted as income. It is now other income, marked for review when it arrives; money out and
+    the deposit Plaid did classify are unchanged, and re-applying categories agrees."""
+    day = today() - dt.timedelta(days=3)
+    rows = {
+        "rent": (
+            "2450.00",
+            "BAYVIEW PROPERTY MGMT",
+            "RENT_AND_UTILITIES",
+            "RENT_AND_UTILITIES_RENT",
+        ),
+        "dep": ("-1800.00", "MOBILE DEPOSIT", None, None),
+        "other": ("-600.00", "DEPOSIT 0423", "OTHER", "OTHER_OTHER"),
+        "check": ("40.00", "CHECK 1043", None, None),
+    }
+    for key, (amount, name, primary, detailed) in rows.items():
+        bank.add(
+            transaction_id=key,
+            amount=amount,
+            date=day,
+            name=name,
+            pfc_primary=primary,
+            pfc_detailed=detailed,
+        )
+    assert bank.sync().status == "success"
+    assert {key: bank.category(key) for key in rows} == {
+        "rent": ("Home", "plaid"),
+        "dep": ("Other Income", "default"),
+        "other": ("Other Income", "default"),
+        "check": ("Uncategorized", "default"),
+    }
+    for key in ("dep", "other"):
+        row = bank.row(key)
+        assert row.needs_review and row.review_reason == categorize.UNCLASSIFIED_MONEY_IN_REVIEW
+        assert not txns.get_row(db, row.id).is_refund
+    assert not bank.row("rent").needs_review and not bank.row("check").needs_review
+    month = month_of(day)
+    assert period_spending(db, month).total == Decimal("2490.00")  # rent and the check
+    assert period_income(db, month).total == Decimal("2400.00")
+    assert categorize.recategorize(db).changed == 0

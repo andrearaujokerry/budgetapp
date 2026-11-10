@@ -1115,6 +1115,81 @@ class TestBankAccounts:
         assert on_bank.category_id == salary.id
         assert on_card.category_id == get_category(db, "Credits & Rewards").id
 
+    @pytest.mark.parametrize(
+        ("on", "primary", "detailed", "amount", "category", "source"),
+        [
+            # Money in to a bank account that Plaid didn't classify (no category: nullable in
+            # Plaid's spec, RESEARCH T1.5; or PFC v2's OTHER) is a deposit, never a refund.
+            ("bank", None, None, "-1800.00", "Other Income", "default"),
+            ("bank", "OTHER", "OTHER_OTHER", "-600.00", "Other Income", "default"),
+            ("bank", "OTHER", None, "-600.00", "Other Income", "default"),
+            # Money out, and credits on a card (most likely refunds), map as before.
+            ("bank", None, None, "45.00", "Uncategorized", "default"),
+            ("bank", "OTHER", "OTHER_OTHER", "45.00", "Other", "plaid"),
+            ("card", None, None, "-20.00", "Uncategorized", "default"),
+            ("card", "OTHER", "OTHER_OTHER", "-20.00", "Other", "plaid"),
+            # A code Plaid did give keeps its mapping (a debit-card refund lowers spending).
+            ("bank", "FOOD_AND_DRINK", "FOOD_AND_DRINK_GROCERIES", "-8.00", "Groceries", "plaid"),
+        ],
+    )
+    def test_money_in_plaid_did_not_classify_is_other_income(
+        self, db, checking, on, primary, detailed, amount, category, source
+    ):
+        """Final review money-3: such a deposit took Uncategorized or Other (spending), so it
+        lowered spending and budgets like a refund and never counted as income."""
+        account = checking if on == "bank" else make_account(db)
+        decision = self._decide(
+            db, account, amount=amount, name="DEPOSIT", pfc_primary=primary, pfc_detailed=detailed
+        )
+        assert (decision.category_id, decision.source) == (get_category(db, category).id, source)
+
+    def test_rules_still_come_first_for_money_in_plaid_did_not_classify(self, db, checking):
+        transfers = get_category(db, "Transfers")
+        rule = make_rule(db, transfers, description_pattern="TRANSFER FROM BROKERAGE")
+        decision = self._decide(db, checking, amount="-900.00", name="TRANSFER FROM BROKERAGE")
+        assert (decision.category_id, decision.source, decision.rule_id) == (
+            transfers.id,
+            "rule",
+            rule.id,
+        )
+
+    def test_a_refund_plaid_did_not_classify_still_lowers_the_merchants_spending(
+        self, db, checking
+    ):
+        home = get_category(db, "Home")
+        make_transaction(
+            db, checking, amount="64.00", merchant_name="Corner Hardware", category=home
+        )
+        decision = self._decide(
+            db,
+            checking,
+            amount="-14.00",
+            merchant_name="Corner Hardware",
+            transaction_code="refund",
+        )
+        assert (decision.category_id, decision.source) == (home.id, "default")
+
+    def test_money_in_plaid_did_not_classify_follows_the_other_income_bank_row(self, db, checking):
+        """It goes where the "Bank accounts" row of Income → Other says (else Income's), so the
+        owner can send it elsewhere; with neither, it maps as before."""
+        from budgetapp.services import categories
+
+        gifts = make_category(db, "Gifts received", kind="income")
+        categories.set_mapping(db, "plaid_pfc", "INCOME_OTHER|bank", gifts.id)
+        deposit = {"amount": "-150.00", "name": "MOBILE DEPOSIT"}
+        assert self._decide(db, checking, **deposit).category_id == gifts.id
+        categories.set_mapping(db, "plaid_pfc", "INCOME_OTHER|bank", None)
+        other_income = get_category(db, "Other Income")
+        assert self._decide(db, checking, **deposit).category_id == other_income.id
+        categories.set_mapping(db, "plaid_pfc", "INCOME|bank", None)
+        assert self._decide(db, checking, **deposit).category_id == uncategorized(db).id
+
+    def test_recategorize_moves_money_in_plaid_did_not_classify(self, db, checking):
+        deposit = make_transaction(db, checking, amount="-1800.00", name="MOBILE DEPOSIT")
+        assert recategorize(db, transaction_ids=[deposit.id]).changed == 1
+        assert deposit.category_id == get_category(db, "Other Income").id
+        assert deposit.category_source == "default"
+
     def test_amex_csv_rows_never_use_bank_keys(self, db):
         manual = make_account(db, manual=True)
         row = make_transaction(

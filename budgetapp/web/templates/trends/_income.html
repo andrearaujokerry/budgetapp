@@ -18,5 +18,5 @@
 {%- endfor %}
 </tbody></table>
 {% endcall %}
-<p class="trends-footnote muted text-xs" id="trends-income-note">Income is money in to your income categories, from any account. Net is income minus all spending: above zero, money you kept. Card payments and transfers between your accounts are neither.{% if inc.cards_only %} {{ income.cards_only_hint() }}{% endif %}</p>
+<p class="trends-footnote muted text-xs" id="trends-income-note">Income is money in to your income categories, from any account. Net is income minus all spending: above zero, money you kept. Card payments and transfers are neither.{% if inc.cards_only %} {{ income.cards_only_hint() }}{% endif %}</p>
 {% endcall %}
