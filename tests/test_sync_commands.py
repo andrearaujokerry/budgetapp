@@ -220,8 +220,52 @@ def test_an_unexpected_failure_exits_1(
     monkeypatch.setattr(sync._Applier, "apply_upserts", boom)
     fake_plaid.add_transaction(fake_plaid.items["item-amex"], name="X")
     assert sync_cmd.sync_command(args(), make_rt()) == 1
-    assert "failed unexpectedly" in out.text
+    assert out == [
+        "American Express: failed (INTERNAL). Something went wrong in the app during the sync. "
+        "The details are in the sync log."
+    ]
     assert runs(db)[0].error_code == "INTERNAL"
+
+
+def test_one_connections_internal_error_still_prints_the_others(
+    db, make_rt, out, fake_plaid, secrets, settings, caplog
+):
+    """Final review 3 ops-6: a bug while syncing one connection replaced every connection's line
+    with "the sync failed unexpectedly", so with several banks neither the terminal nor the sync
+    agent's sync.log said which one failed or what the others did. Each connection keeps its
+    line, the failed one as failed (INTERNAL); the traceback is in the log; the exit stays 1."""
+    link(db, fake_plaid, secrets, settings)
+    tartan, _ = link(
+        db,
+        fake_plaid,
+        secrets,
+        settings,
+        item_id="item-tartan",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+    )
+    fake_plaid.add_transaction(tartan, name="Coffee", amount=Decimal("4.50"))
+    fake_plaid.queue_error("transactions_sync", RuntimeError("bug"))  # the first connection's
+    assert sync_cmd.sync_command(args(), make_rt()) == 1
+    assert out == [
+        "American Express: failed (INTERNAL). Something went wrong in the app during the sync. "
+        "The details are in the sync log.",
+        "Tartan Bank: 1 new, 0 changed, 0 removed. Plaid has now sent the full history.",
+    ]
+    assert [(r.status, r.error_code) for r in runs(db)] == [
+        ("error", "INTERNAL"),
+        ("success", None),
+    ]
+    assert "Traceback" in caplog.text and "RuntimeError: bug" in caplog.text
+
+
+def test_a_failure_outside_any_one_sync_is_still_reported(make_rt, out, monkeypatch):
+    def boom(_self):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(Runtime, "item_names", boom)
+    assert sync_cmd.sync_command(args(), make_rt()) == 1
+    assert out == ["error: the sync failed unexpectedly; the details are in the sync log."]
 
 
 def test_keychain_approval_notifies_once_a_day_when_unattended(

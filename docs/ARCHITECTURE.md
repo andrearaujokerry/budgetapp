@@ -894,7 +894,8 @@ sync_item(item_id, trigger):
      class, set item status 'error'
   release the sync lock, then alerts.evaluate_after_sync in its own transaction (after success,
      not_ready and every failure; ALR-2 once a day); an INTERNAL exception is then re-raised
-     (non-zero exit)
+     (sync_all, the sync command's loop, logs its traceback, reports it as that Item's
+     "failed (INTERNAL)" line, syncs the other Items and exits 1)
 ```
 
 - **Schedule:** the launchd sync agent runs at 00:15, 06:15, 12:15 and 18:15

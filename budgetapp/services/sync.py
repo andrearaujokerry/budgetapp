@@ -1812,7 +1812,11 @@ def sync_all(
 ) -> SyncAllResult:
     """Sync every Item (or ``item_ids``). ``if_due`` skips Items whose last success is newer
     than ``min_age`` (5 h: the launchd schedule). An unexpected exception in one Item does not
-    stop the others; the first one is re-raised at the end."""
+    stop the others: it is logged with its traceback and becomes that Item's ``INTERNAL``
+    outcome (``sync_item`` has recorded it on the Item and the run, and alerted), so the caller
+    reports every Item (final review 3 ops-6). A database that isn't ready, a schema mismatch,
+    Keychain approval or a missing key stops the run (re-raised: the caller says what to do), as
+    no other Item could sync either."""
     wanted = set(item_ids) if item_ids is not None else None
     with session_factory() as s:
         rows = s.execute(
@@ -1825,7 +1829,6 @@ def sync_all(
     now = clock.now()
     outcomes: list[SyncOutcome] = []
     not_due: list[int] = []
-    first_error: BaseException | None = None
     for row in rows:
         if wanted is not None and row.id not in wanted:
             continue
@@ -1849,12 +1852,26 @@ def sync_all(
                     sleep=sleep,
                 )
             )
-        except db.DatabaseUnavailable, db.SchemaMismatch, secrets.KeychainApprovalNeeded:
+        except (
+            db.DatabaseUnavailable,
+            db.SchemaMismatch,
+            secrets.KeychainApprovalNeeded,
+            secrets.MissingSecretError,
+        ):
             raise
         except Exception as exc:
-            first_error = first_error or exc
-    if first_error is not None:
-        raise first_error
+            log.exception("The sync of Item %s failed unexpectedly; syncing the others", row.id)
+            outcomes.append(
+                SyncOutcome(
+                    row.id,
+                    trigger,
+                    "error",
+                    item_status="error",
+                    error_code=INTERNAL,
+                    error_message=type(exc).__name__,
+                    internal_error=True,
+                )
+            )
     return SyncAllResult(tuple(outcomes), tuple(not_due))
 
 
