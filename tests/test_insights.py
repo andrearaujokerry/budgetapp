@@ -12,6 +12,7 @@ from budgetapp.models import get_app_settings
 from budgetapp.money import to_money
 from budgetapp.periods import month_period
 from budgetapp.services import budgets, insights, spending
+from budgetapp.services import sync as sync_service
 from budgetapp.services.insights import Change, change, month_param
 from tests.bank_factories import make_bank_account, make_bank_item
 from tests.factories import (
@@ -746,7 +747,31 @@ class TestAccountBalances:
 
     def test_no_accounts(self, db):
         a = insights.account_balances(db)
-        assert not a.any and (a.cash, a.owed, a.as_of) == (0, 0, None)
+        assert not a.any and (a.cash, a.owed, a.as_of) == (None, None, None)
+
+    def test_a_total_with_no_balance_to_add_up_is_unknown(self, db, bank):
+        """ux-2: a group whose accounts have no balance (an Amex CSV account, a bank account
+        before its first sync) has no total, not $0.00; once one has a balance the total is
+        that balance and the others are counted as left out."""
+        manual = make_account(db, manual=True)
+        checking = make_bank_account(db, bank, name="Plaid Checking", mask="0000")
+        a = insights.account_balances(db)
+        assert (a.cash, a.owed) == (None, None)
+        assert (a.banks_without_balance, a.cards_without_balance) == (1, 1)
+        assert [x.id for x in a.cards] == [manual.id] and a.cards[0].current is None
+        checking.current_balance = D("0.00")  # a known zero is a total
+        make_account(db, name="Platinum Card", current_balance=D("12.34"))
+        db.flush()
+        a = insights.account_balances(db)
+        assert (a.cash, a.owed) == (D("0.00"), D("12.34"))
+        assert (a.banks_without_balance, a.cards_without_balance) == (0, 1)
+
+    def test_a_group_of_accounts_plaid_no_longer_shares_has_no_total(self, db, bank):
+        card = make_account(db, bank, name="Plaid Credit Card", current_balance=D("410.00"))
+        assert sync_service.mark_not_shared(card, dt.datetime(2026, 10, 20, tzinfo=dt.UTC))
+        db.flush()
+        a = insights.account_balances(db)
+        assert a.cards[0].no_longer_shared and a.owed is None and a.cards_without_balance == 0
 
     def test_the_dashboard_carries_them(self, db, account):
         assert insights.dashboard(db, today=day("2026-10-20")).accounts.cards[0].id == account.id

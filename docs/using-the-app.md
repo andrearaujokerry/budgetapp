@@ -75,9 +75,12 @@ it open those pages.
   accounts with their balance (and, under it, the available balance when the bank sends one),
   their balances added up as **Cash**, and cards with what you owe, added up as **Owed on
   cards** (a negative balance is a credit in your favour; an overdrawn bank account shows in
-  red). An account imported from a CSV file has no balance. An account Plaid no longer shares
-  (see [Connection](#connection)) keeps the last balance Plaid sent, marked "no longer shared", and
-  is left out of **Cash** and **Owed on cards**. Each name opens that account's transactions.
+  red). An account imported from a CSV file has no balance, nor has one whose balance Plaid
+  hasn't sent yet. A total adds up only the balances it has: under it, a note says how many
+  accounts without a balance it leaves out, and while none of its accounts has a balance it
+  shows "—" rather than $0.00. An account Plaid no longer shares (see [Connection](#connection))
+  keeps the last balance Plaid sent, marked "no longer shared", and is left out of **Cash** and
+  **Owed on cards**. Each name opens that account's transactions.
 - **Budgets:** your six most-used monthly budgets with what is left; **All budgets** opens the
   Budgets page.
 - **Top categories:** where the money went this period, with each category's share (hidden

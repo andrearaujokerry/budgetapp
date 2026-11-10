@@ -2,8 +2,10 @@
     Bank accounts first, added up as "Cash" (each with its available balance when Plaid sends
     one), then cards, added up as "Owed on cards" (a negative balance is a credit in your
     favour). An account without a balance (not synced yet, or imported from a CSV file) shows
-    "—" and adds nothing. An account Plaid no longer shares keeps its last balance, marked, and
-    adds nothing to the totals. Each name opens that account's transactions. -#}
+    "—" and adds nothing: a total that adds up some of its accounts says how many it leaves out,
+    and one that adds up none is "—" itself, never $0.00. An account Plaid no longer
+    shares keeps its last balance, marked, and adds nothing to the totals. Each name opens that
+    account's transactions. -#}
 {%- import "components/ui.html" as ui -%}
 {%- set a = d.accounts -%}
 {%- macro account_row(acc) -%}
@@ -23,6 +25,12 @@
 </div>
 </li>
 {%- endmacro -%}
+{#- Under a total that adds up only some of its accounts: how many have no balance to add. -#}
+{%- macro left_out(count, noun, id) -%}
+{%- if count %}
+<p class="text-sm muted" id="{{ id }}">{{ count|pluralize(noun) }} without a balance {{ 'isn’t' if count == 1 else 'aren’t' }} included.</p>
+{%- endif %}
+{%- endmacro -%}
 {%- set subtitle = ('Balances as of ' ~ (a.as_of|relative_time)) if a.as_of else none -%}
 {% call ui.card('Accounts', subtitle=subtitle, id='dash-accounts') %}
 <div class="dash-accounts">
@@ -30,8 +38,9 @@
 <div class="dash-accounts__group" id="dash-accounts-banks" role="group" aria-labelledby="dash-accounts-cash">
 <div class="dash-accounts__head">
 <h3 class="dash-accounts__title" id="dash-accounts-cash">Cash</h3>
-<span class="dash-accounts__total">{{ ui.money(a.cash, tone='over' if a.cash < 0 else none) }}</span>
+<span class="dash-accounts__total">{{ ui.money(a.cash, tone='over' if a.cash is not none and a.cash < 0 else none) }}</span>
 </div>
+{%- if a.cash is not none %}{{ left_out(a.banks_without_balance, 'account', 'dash-accounts-cash-note') }}{% endif %}
 <ul class="dash-list dash-accounts__list">
 {%- for acc in a.banks %}
 {{ account_row(acc) }}
@@ -45,6 +54,7 @@
 <h3 class="dash-accounts__title" id="dash-accounts-owed">Owed on cards</h3>
 <span class="dash-accounts__total">{{ ui.money(a.owed) }}</span>
 </div>
+{%- if a.owed is not none %}{{ left_out(a.cards_without_balance, 'card', 'dash-accounts-owed-note') }}{% endif %}
 <ul class="dash-list dash-accounts__list">
 {%- for acc in a.cards %}
 {{ account_row(acc) }}

@@ -243,14 +243,16 @@ class AccountBalance:
 class AccountBalances:
     """Every visible card and bank account (``services.accounts``, oldest first), with ``cash``
     (the bank accounts' balances added up) and ``owed`` (the cards' balances added up); accounts
-    without a balance add nothing and are counted in ``*_without_balance``. ``as_of`` is the
-    oldest balance date shown (``None`` when none has one). An account Plaid no longer shares is
-    listed but adds nothing to ``cash`` or ``owed`` and has no say in ``as_of``."""
+    without a balance (not synced yet, or imported from a CSV file) add nothing and are counted
+    in ``*_without_balance``. A total that no account adds to is ``None``: unknown, not zero.
+    ``as_of`` is the oldest balance date shown (``None`` when none has one). An account Plaid no
+    longer shares is listed but adds nothing to ``cash`` or ``owed`` and has no say in
+    ``as_of``."""
 
     banks: tuple[AccountBalance, ...] = ()
     cards: tuple[AccountBalance, ...] = ()
-    cash: Decimal = ZERO
-    owed: Decimal = ZERO
+    cash: Decimal | None = None
+    owed: Decimal | None = None
     as_of: dt.datetime | None = None
 
     @property
@@ -290,9 +292,9 @@ def account_balances(session: Session) -> AccountBalances:
     banks = tuple(_balance(a, is_card=False) for a in accounts.bank_accounts(session))
     cards = tuple(_balance(a, is_card=True) for a in accounts.card_accounts(session))
 
-    def total(rows: tuple[AccountBalance, ...]) -> Decimal:
-        shared = (a.current for a in rows if a.current is not None and not a.no_longer_shared)
-        return to_money(sum(shared, ZERO))
+    def total(rows: tuple[AccountBalance, ...]) -> Decimal | None:
+        shared = [a.current for a in rows if a.current is not None and not a.no_longer_shared]
+        return to_money(sum(shared, ZERO)) if shared else None
 
     dates = [a.as_of for a in (*banks, *cards) if a.as_of is not None and not a.no_longer_shared]
     return AccountBalances(

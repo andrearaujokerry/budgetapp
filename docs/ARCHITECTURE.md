@@ -545,8 +545,10 @@ broken down (Trends' Every month table).
 while the switch shows income, and `AccountBalances`: every visible card and bank account
 (`services.accounts`, C1) with Plaid's cached balances, cash (bank accounts' current balances)
 and owed (cards' current balances: positive is owed, negative a credit, RESEARCH T2.7). An
-account Plaid no longer shares (`sync.no_longer_shared`, §8) is listed, marked, but left out of
-cash, owed and "as of": its balance is only the last one Plaid sent.
+account without a balance (not synced yet, or a CSV account) adds nothing and is counted, so the
+card says how many a total leaves out; a total no account adds to is `None` (shown "—"), never
+zero. An account Plaid no longer shares (`sync.no_longer_shared`, §8) is listed, marked, but left
+out of cash, owed and "as of": its balance is only the last one Plaid sent.
 `insights.trends(..., income=True)` adds `TrendsIncome`: income per income category per month,
 all income, and the net per month, with the same months, statuses and complete-month averages as
 spending. An income figure's link lists every income category's rows for its dates
