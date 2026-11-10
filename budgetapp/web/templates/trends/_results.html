@@ -4,8 +4,10 @@
     With income shown (show_income: the switch is on and all categories are shown, INC-4) the
     first row of tiles is the month's spending, income and net, and an "Income and spending"
     chart comes before the spending chart; with no bank account (cards_only) the Net tile says
-    the only income is card credits. With the switch on in one category's view
-    (income_elsewhere) a note under the category says income shows with all categories. -#}
+    the only income is card credits. A month the bank history doesn't cover has no income or
+    net ("—"), and the net's average counts the complete months it covers. With the switch on
+    in one category's view (income_elsewhere) a note under the category says income shows with
+    all categories. -#}
 {%- import "components/ui.html" as ui -%}
 {%- import "trends/_macros.html" as tm -%}
 {%- import "dashboard/_income_switch.html" as income -%}
@@ -66,12 +68,13 @@
 {%- set earned = t.income.totals.amounts[ii] %}
 {%- set top = t.income.largest_in(ii) %}
 {%- if im == t.ended and t.compare and t.income.change %}{% set income_sub = tm.change_text(t.income.change, short_month(t.previous), 'income')|trim %}
+{%- elif earned is none %}{% set income_sub = 'no bank history for this month yet' %}
 {%- elif top and top.amounts[ii] == earned %}{% set income_sub = 'all from ' ~ top.category.name %}
 {%- elif top %}{% set income_sub = 'largest: ' ~ top.category.name ~ ', ' ~ ui.money_text(top.amounts[ii], cents=false) %}
 {%- else %}{% set income_sub = 'nothing came in' %}{% endif %}
 {{ ui.stat('Income in ' ~ im_label, ui.money(earned, cents=false), sub=income_sub, icon='download', href=income_href(t.income.category_ids, im.period) if earned else none, id='trend-income') }}
 {%- set kept = t.income.net[ii] %}
-{%- if t.income.net_average is not none %}{% set net_sub = 'average ' ~ ui.money_text(t.income.net_average, signed=true, cents=false) ~ ' over ' ~ (t.complete_months|pluralize('complete month')) %}
+{%- if t.income.net_average is not none %}{% set net_sub = 'average ' ~ ui.money_text(t.income.net_average, signed=true, cents=false) ~ ' over ' ~ (t.income.complete_months|pluralize('complete month')) %}
 {%- else %}{% set net_sub = 'income − all spending' %}{% endif %}
 {%- set net_value = ui.money(kept, signed=true, cents=false, tone='neutral') %}
 {%- if t.income.cards_only %}

@@ -190,6 +190,11 @@
   margin: 0;
 }
 
+/* Above the income chart when the bank history starts later than the spending's. */
+.trends-income-start {
+  margin: 0 0 var(--sp-3);
+}
+
 /* Under the Net tile while no bank account exists: only card credits are income yet. */
 .income-hint {
   color: var(--text-muted);

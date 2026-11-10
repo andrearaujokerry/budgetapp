@@ -15,6 +15,7 @@ import pytest
 
 from tests.bank_factories import make_bank_account, make_bank_item
 from tests.factories import (
+    card_payments,
     get_category,
     make_account,
     make_category,
@@ -449,7 +450,11 @@ def checking(db):
 @pytest.fixture
 def earnings(db, cat, spend, checking, history):
     """On top of the spending history: a paycheck every month from Dec 2025 ($2,000; two in
-    Oct), savings interest in Sep and Oct, and an Amex credit in Oct."""
+    Oct), savings interest in Sep and Oct, and an Amex credit in Oct. The checking account's
+    history starts with the card's (Nov 10, 2025: a card payment, neither spending nor income),
+    so every month of the history has income data."""
+    make_transaction(db, checking, amount="100.00", category=card_payments(db), date="2025-11-10",
+                     name="AMEX PAYMENT")  # fmt: skip
     paycheck = income_category(db, "Paycheck")
     interest = income_category(db, "Interest")
     for year, month in [(2025, 12)] + [(2026, m) for m in range(1, 11)]:
@@ -760,6 +765,66 @@ class TestIncome:
         grid = section(page, "trends-grid-card")
         assert "All income $1,000" in shown(row(grid, "grid-income-total"))
         assert csp_problems(page, rendered=True) == []
+
+    def test_income_starts_with_the_bank_history(self, client, db, cat, spend, checking):
+        """ux-3: the card's history starts in January, the bank's (where paychecks arrive) on
+        Jun 15. Income isn't known before it, so January to May show "—" for income and net
+        (not $0 and −all spending, which read as losses), their card credits aren't listed,
+        the net average counts the months the bank history covers, and a note says why."""
+        paycheck = income_category(db, "Paycheck")
+        for month in range(1, 11):
+            spend(cat("Groceries"), "100.00", f"2026-{month:02d}-10")
+        spend(cat("Credits & Rewards"), "-25.00", "2026-03-12")  # before the bank's history
+        for month in range(6, 11):
+            make_transaction(db, checking, amount="-2000.00", category=paycheck,
+                             date=f"2026-{month:02d}-15")  # fmt: skip
+        page = client.get("/trends").text
+        grid = section(page, "trends-grid-card")
+        assert shown(row(grid, "grid-income-total")) == (
+            "All income $10,000 $2,000 — — — — — $2,000 $2,000 $2,000 $2,000 $2,000 $0"
+        )
+        assert text_of(row(grid, "grid-net")) == (
+            "Net income − spending +$9,500 +$1,900 — — — — — +$1,900 +$1,900 +$1,900 +$1,900 "
+            "+$1,900 $0"
+        )
+        assert re.findall(r'<tr id="grid-income-(\d+)"', grid) == [str(paycheck.id)]
+        assert text_of(row(grid, "grid-spending")).startswith("All spending $1,000 $100 $100")
+        text = tiles(page)
+        assert "Net in Oct 2026 +$1,900 average +$1,900 over 4 complete months" in text
+        assert "Spent in Oct 2026 $100" in text
+        note = re.search(r'<p[^>]*id="trends-income-start"[^>]*>(.*?)</p>', page, re.S)
+        assert note and text_of(note.group(1)) == (
+            "Your bank history starts on Jun 15, 2026, so income and net start in Jun 2026 (a "
+            "partial month): earlier months have no income data."
+        )
+        card = section(page, "trends-income-card")
+        assert card.index('id="trends-income-start"') < card.index('id="trends-income-chart')
+        described = text_of(card)
+        assert "May 2026 no income data $100.00 no income data" in described
+        assert "Jun 2026 $2,000.00 $100.00 +$1,900.00" in described
+        config = income_chart(page)
+        net, income, _spent = config["data"]["datasets"]
+        assert income["data"][:6] == [None] * 5 + ["2000.00"]
+        assert net["data"][:6] == [None] * 5 + ["1900.00"]
+        assert csp_problems(page, rendered=True) == []
+
+    def test_income_waits_for_the_bank_history(self, client, db, card_credits, checking):
+        """A bank account is linked but none of its transactions has arrived: no month has
+        income data yet, so the tiles and the grid show "—" and the note says so."""
+        page = client.get("/trends").text
+        text = tiles(page)
+        assert "Income in Oct 2026 — no bank history for this month yet" in text
+        assert "Net in Oct 2026 — income − all spending" in text
+        note = re.search(r'<p[^>]*id="trends-income-start"[^>]*>(.*?)</p>', page, re.S)
+        assert note and text_of(note.group(1)) == (
+            "Income and net start when your bank account’s transactions arrive."
+        )
+        grid = section(page, "trends-grid-card")
+        assert shown(row(grid, "grid-income-total")).startswith("All income — — —")
+        assert csp_problems(page, rendered=True) == []
+
+    def test_no_income_note_when_the_bank_history_covers_every_month(self, client, earnings):
+        assert 'id="trends-income-start"' not in client.get("/trends").text
 
     def test_the_first_month_of_history_shows_this_months_income(self, client, db, checking):
         paycheck = income_category(db, "Paycheck")

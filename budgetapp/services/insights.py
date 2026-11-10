@@ -33,6 +33,9 @@ starts in is partial. Averages count only complete months.
 Hidden categories are listed (marked) because their spending counts in every total.
 With ``income=True`` (the switch on, INC-4) Trends also carries income per income category per
 month (``spending.monthly_income``: the same months, basis and pending setting) and the net.
+Paychecks arrive in bank accounts, so once one exists income is known only from the first day of
+the bank history (:func:`bank_history_start`): months before it have no income or net (``None``,
+not zero) and its first month is partial, like the spending history's.
 
 **The switch** (:func:`income_switch`, :func:`set_show_income`, INC-2): ``app_settings.
 show_income``, on by default; it is offered once any money is booked to an income category.
@@ -209,6 +212,20 @@ def has_bank_account(session: Session) -> bool:
     counts). Without one, the only income can be card credits (Credits & Rewards): with only
     the card linked, Net is close to minus all spending, and the pages say why."""
     return bool(accounts.bank_accounts(session, include_hidden=True))
+
+
+def bank_history_start(session: Session) -> dt.date | None:
+    """The first day any bank account has a transaction (by purchase date, as Trends counts;
+    hidden accounts included), ``None`` before one arrives. Income before it isn't known:
+    paychecks arrive in bank accounts, and a bank's history can start later than the card's (a
+    bank that sends less history, or older Amex CSV files imported)."""
+    query = (
+        select(func.min(basis_date(BASIS_SPEND_DATE)))
+        .select_from(v_allocations)
+        .join(Account, Account.id == v_allocations.c.account_id)
+        .where(Account.type == accounts.BANK)
+    )
+    return session.scalar(query)
 
 
 # --------------------------------------------------------------------------- accounts
@@ -613,13 +630,15 @@ class CategoryTrend:
 @dataclass(frozen=True, slots=True)
 class IncomeLine:
     """Income over the months of :class:`Trends` (``amounts[i]`` is ``months[i]``; ``None``
-    before the history): one income category, or all income (``category=None``). ``average``
+    where income isn't known: before the history, or before the bank history,
+    :attr:`TrendsIncome.starts`): one income category, or all income (``category=None``).
+    ``total`` adds up the months that have income data (``None`` when none has); ``average``
     counts complete months only, like spending's."""
 
     category: CategoryRef | None
     amounts: tuple[Decimal | None, ...]
     counts: tuple[int, ...]
-    total: Decimal
+    total: Decimal | None
     average: Decimal | None
 
 
@@ -628,21 +647,30 @@ class TrendsIncome:
     """Income and net per calendar month next to the spending of :class:`Trends` (INC-4): the
     same months, purchase-date basis and pending setting (``spending.monthly_income``).
 
-    ``categories``: every income category with money in range, largest total first (Credits &
-    Rewards is one of them, its own line); ``totals``: all income; ``net[i]`` is
-    ``totals.amounts[i]`` minus the month's spending (``None`` before the history), positive
-    when money was kept. ``change`` is the income of :attr:`Trends.compare` against the month
-    before (``None`` without a comparison). ``cards_only``: no bank account exists
-    (:func:`has_bank_account`), so the income can only be card credits.
+    ``categories``: every income category with money in the months that have income data,
+    largest total first (Credits & Rewards is one of them, its own line); ``totals``: all
+    income; ``net[i]`` is ``totals.amounts[i]`` minus the month's spending (``None`` where income
+    isn't known), positive when money was kept. ``change`` is the income of
+    :attr:`Trends.compare` against the month before (``None`` without a comparison, or when
+    either month has no income data). ``complete_months`` counts the complete months income
+    covers (the averages' months). ``cards_only``: no bank account exists
+    (:func:`has_bank_account`), so the income can only be card credits, known for the whole
+    history. Otherwise income is known from ``starts``, the bank history's first day
+    (:func:`bank_history_start`; ``None`` before any bank transaction arrives); ``partial``:
+    because of that, some month in range has no income data, or only part of it, though it has
+    spending data.
     """
 
     categories: tuple[IncomeLine, ...]
     totals: IncomeLine
     net: tuple[Decimal | None, ...]
-    net_total: Decimal
+    net_total: Decimal | None
     net_average: Decimal | None
     change: Change | None
+    complete_months: int = 0
     cards_only: bool = False
+    starts: dt.date | None = None
+    partial: bool = False
 
     @property
     def category_ids(self) -> tuple[int, ...]:
@@ -942,14 +970,20 @@ def trends(
         months_income = spending.monthly_income(
             session, all_months[0].start, all_months[-1].end, include_pending=include_pending
         )
+        # Card credits are known for the whole history; paychecks only from the first day of
+        # the bank history, so once a bank account exists income months count from there.
+        banked = has_bank_account(session)
+        starts = bank_history_start(session) if banked else None
+        income_statuses = [_status(m.month, today, starts) for m in data] if banked else statuses
         earned = _trends_income(
             months_income,
-            statuses,
+            income_statuses,
             shown,
-            complete,
             compare_index,
             totals.amounts,
-            cards_only=not has_bank_account(session),
+            cards_only=not banked,
+            starts=starts,
+            partial=any(income_statuses[i] != statuses[i] for i in shown),
         )
 
     return Trends(
@@ -980,15 +1014,17 @@ def _trends_income(
     data: Sequence[spending.MonthIncome],
     statuses: Sequence[str],
     shown: range,
-    complete: Sequence[int],
     compare_index: int | None,
     spent: Sequence[Decimal | None],
     *,
     cards_only: bool,
+    starts: dt.date | None,
+    partial: bool,
 ) -> TrendsIncome:
     """:class:`TrendsIncome` from :func:`spending.monthly_income` of the same months as the
-    spending (``data[i]`` and ``statuses[i]`` are the month before the range when ``i`` is 0;
-    ``shown`` the months in range; ``spent`` the spending totals of the ``shown`` months)."""
+    spending (``data[i]`` is the month before the range when ``i`` is 0; ``shown`` the months in
+    range; ``spent`` the spending totals of the ``shown`` months). ``statuses[i]`` is month
+    ``i``'s status for income: the spending's, or counted from the bank history's first day."""
 
     def amount(month_index: int, category_id: int | None) -> Decimal | None:
         if statuses[month_index] == BEFORE:
@@ -996,9 +1032,11 @@ def _trends_income(
         month = data[month_index]
         return month.total if category_id is None else month.amount_for(category_id)
 
+    covered = [i for i in shown if statuses[i] != BEFORE]
+    complete = [i for i in shown if statuses[i] == COMPLETE]
     refs: dict[int, CategoryRef] = {}
     totals_by_id: dict[int, Decimal] = {}
-    for i in shown:
+    for i in covered:
         for row in data[i].categories:
             refs.setdefault(
                 row.category_id,
@@ -1006,20 +1044,21 @@ def _trends_income(
             )
             totals_by_id[row.category_id] = totals_by_id.get(row.category_id, ZERO) + row.amount
 
+    def count(month_index: int, category_id: int | None) -> int:
+        rows = data[month_index].categories if statuses[month_index] != BEFORE else ()
+        if category_id is None:
+            return sum(r.transaction_count for r in rows)
+        return next((r.transaction_count for r in rows if r.category_id == category_id), 0)
+
     def line(category: CategoryRef | None) -> IncomeLine:
         cid = category.id if category is not None else None
         amounts = tuple(amount(i, cid) for i in shown)
-        counts = tuple(
-            sum(r.transaction_count for r in data[i].categories)
-            if cid is None
-            else next((r.transaction_count for r in data[i].categories if r.category_id == cid), 0)
-            for i in shown
-        )
+        counts = tuple(count(i, cid) for i in shown)
         return IncomeLine(
             category=category,
             amounts=amounts,
             counts=counts,
-            total=to_money(sum((a or ZERO for a in amounts), ZERO)),
+            total=to_money(sum((a or ZERO for a in amounts), ZERO)) if covered else None,
             average=_average(amount(i, cid) or ZERO for i in complete),
         )
 
@@ -1034,14 +1073,17 @@ def _trends_income(
         categories=tuple(line(ref) for ref in ordered),
         totals=totals,
         net=net,
-        net_total=to_money(sum((n or ZERO for n in net), ZERO)),
+        net_total=to_money(sum((n or ZERO for n in net), ZERO)) if covered else None,
         net_average=_average(net[position[i]] or ZERO for i in complete),
         change=(
             change(amount(compare_index, None), amount(compare_index - 1, None))
             if compare_index is not None
             else None
         ),
+        complete_months=len(complete),
         cards_only=cards_only,
+        starts=starts,
+        partial=partial,
     )
 
 

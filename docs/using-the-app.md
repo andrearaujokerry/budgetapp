@@ -206,6 +206,11 @@ note says so), with the same pending setting as budgets.
   income** and **Net** (income minus spending). Each income amount opens that month's income in
   Transactions (money in shows as negative amounts there). A single category's view stays
   spending only; with the switch on, it says that income and net show with **All categories**.
+  Once a bank account is linked, income counts from the day its history starts, since that is
+  where your paychecks arrive. If that is later than your card's history (a bank that sends
+  less history, or older Amex statements you imported), the months before it show "—" for
+  income and net rather than a loss, its first month is partial, the averages count only the
+  months it covers, and a note above **Income and spending** says when it starts.
 
 ## Recurring
 
