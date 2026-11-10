@@ -143,9 +143,12 @@ Rules:
   raises `KeychainApprovalNeeded`: sync and backup notify once a day (de-duplicated with a
   marker file, since the database password may be the item that failed) with the exact fix —
   `./run doctor --env production` in Terminal — and exit 75; the web app stays up and shows
-  a page with the same instruction. Run interactively, `doctor` reads every item of both
-  environments so the user can click *Always Allow* (needed after each `brew upgrade` of
-  Python).
+  a page with the same instruction. The Connection page is the exception for the
+  link-in-progress marker, which every production view reads and which can outlive its link:
+  when only the marker can't be read, linking another bank is paused with that instruction
+  (`linking.link_blocks`) and Reconnect, Renew consent and Add accounts keep working. Run
+  interactively, `doctor` reads every item of both environments, the marker too, so the user
+  can click *Always Allow* (needed after each `brew upgrade` of Python).
 - A missing item (`MissingSecretError`) names the command that saves it
   (`secrets.missing_secret_fix`): `./run setup --keys-only` for the Plaid keys, `./run setup` for
   a database password (it creates the roles and their passwords), `./run doctor` otherwise. The
@@ -912,7 +915,8 @@ sync_item(item_id, trigger):
      class, set item status 'error'
   release the sync lock, then alerts.evaluate_after_sync in its own transaction (after success,
      not_ready and every failure; ALR-2 once a day); an INTERNAL exception is then re-raised
-     (non-zero exit)
+     (sync_all, the sync command's loop, logs its traceback, reports it as that Item's
+     "failed (INTERNAL)" line, syncs the other Items and exits 1)
 ```
 
 - **Schedule:** the launchd sync agent runs at 00:15, 06:15, 12:15 and 18:15

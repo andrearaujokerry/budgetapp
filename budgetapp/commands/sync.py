@@ -298,7 +298,7 @@ def sync_command(args: argparse.Namespace, rt: Runtime) -> int:
     except secrets.MissingSecretError as exc:
         return missing_secret(rt, exc, unattended)
     except Exception:
-        # sync_item already recorded it (INTERNAL on the Item, the run, the alert hook).
+        # Outside any one Item's sync: sync_all reports those as that Item's "failed (INTERNAL)".
         log.exception("The sync failed")
         rt.out("error: the sync failed unexpectedly; the details are in the sync log.")
         return EXIT_FAILED

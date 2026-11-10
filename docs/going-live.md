@@ -212,6 +212,9 @@ expires after 4 hours). The banner names the others when they apply: a token wai
 recovery file (store it with `./run setup --env production --access-token`, then re-attach), a
 token in Keychain whose connection this database doesn't show (re-attach it first, so the app
 knows which bank it is), or all 10 connections used.
+If it says macOS Keychain needs your approval (usually after a `brew upgrade` of Python), run
+`./run doctor --env production` in Terminal and click **Always Allow**; **Reconnect**,
+**Renew consent** and **Add accounts** keep working meanwhile.
 
 ### Keep a copy of each access token (recommended)
 

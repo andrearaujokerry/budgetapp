@@ -9,6 +9,8 @@ import threading
 import pytest
 from sqlalchemy import select
 
+from budgetapp import db as app_db
+from budgetapp import secrets as app_secrets
 from budgetapp.models import SyncRun
 from budgetapp.services import background, sync
 from budgetapp.services.background import BackgroundJobs, run_steps
@@ -218,9 +220,11 @@ def test_sync_all_syncs_every_item_or_only_the_due_ones(
         )
 
 
-def test_sync_all_finishes_the_other_items_before_re_raising(
+def test_sync_all_reports_an_unexpected_error_as_that_items_outcome(
     db, session_factory, fake_plaid, secrets, settings, notifier, at_now, monkeypatch
 ):
+    """Final review 3 ops-6: the other Items still sync, and the failed one is in the result as
+    INTERNAL (sync_item has recorded it) instead of an exception that hides the others."""
     first = Linked(db, session_factory, fake_plaid, secrets, settings, notifier, item_id="first")
     second = Linked(db, session_factory, fake_plaid, secrets, settings, notifier, item_id="second")
     real = sync.sync_item
@@ -233,7 +237,50 @@ def test_sync_all_finishes_the_other_items_before_re_raising(
         return real(*args, **kwargs)
 
     monkeypatch.setattr(sync, "sync_item", flaky)
-    with pytest.raises(RuntimeError):
+    result = sync.sync_all(
+        session_factory,
+        fake_plaid,
+        secrets,
+        settings,
+        trigger="cli",
+        notifier=notifier,
+        sleep=no_sleep,
+    )
+    assert calls == [first.item.id, second.item.id]
+    assert [(o.item_id, o.status, o.error_code) for o in result.outcomes] == [
+        (first.item.id, "error", "INTERNAL"),
+        (second.item.id, "success", None),
+    ]
+    assert result.outcomes[0].internal_error and result.outcomes[0].trigger == "cli"
+    assert not result.ok
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        app_db.DatabaseUnavailable("not ready"),
+        app_db.SchemaMismatch("0002_seed_defaults", "0003_f1_verification_fixes"),
+        app_secrets.KeychainApprovalNeeded("plaid.access_token.sandbox.first", -25308),
+        app_secrets.MissingSecretError("plaid.secret.sandbox"),
+    ],
+    ids=["database", "schema", "keychain", "missing-key"],
+)
+def test_sync_all_stops_for_what_every_item_would_hit(
+    db, session_factory, fake_plaid, secrets, settings, notifier, at_now, monkeypatch, error
+):
+    """A database that isn't ready, a schema mismatch, Keychain approval or a missing key stops
+    the run, and the command says what to do ("try later", or the command that saves the key):
+    no other Item could sync either."""
+    Linked(db, session_factory, fake_plaid, secrets, settings, notifier, item_id="first")
+    Linked(db, session_factory, fake_plaid, secrets, settings, notifier, item_id="second")
+    calls: list[int] = []
+
+    def stuck(*args, **kwargs):
+        calls.append(args[4])
+        raise error
+
+    monkeypatch.setattr(sync, "sync_item", stuck)
+    with pytest.raises(type(error)):
         sync.sync_all(
             session_factory,
             fake_plaid,
@@ -243,7 +290,7 @@ def test_sync_all_finishes_the_other_items_before_re_raising(
             notifier=notifier,
             sleep=no_sleep,
         )
-    assert calls == [first.item.id, second.item.id]
+    assert len(calls) == 1
 
 
 def test_sync_all_reports_failures(linked, fake_plaid):

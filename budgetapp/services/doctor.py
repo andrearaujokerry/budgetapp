@@ -845,6 +845,9 @@ def _keychain_items(ctx: DoctorContext) -> list[_Item]:
         _Item(
             secrets.db_password_key("budgetapp_live"), "production", "production database password"
         ),
+        # Every production Connection page reads it, and it can outlive its link: Always Allow
+        # must cover it too (final review 3 ops-1). Absent unless a link is open.
+        _Item(secrets.link_in_progress_key(), "production", "Plaid link-in-progress marker"),
     ]
     return items
 
@@ -1046,6 +1049,8 @@ def check_keychain_items(ctx: DoctorContext) -> Iterable[Check]:
             problems.append(
                 Check(section, WARN, f"The {item.label} is missing", fix="./run sandbox-link")
             )
+        elif item.account == secrets.link_in_progress_key():
+            continue  # there only while a production link is open
         else:
             needed = env == "production" and linked and mine
             problems.append(
@@ -1439,6 +1444,34 @@ def check_repository(ctx: DoctorContext) -> Iterable[Check]:
 # --------------------------------------------------------------------------- Plaid connection
 
 
+def _failed_sync_fix(ctx: DoctorContext, code: str | None) -> str:
+    """The fix for a connection whose last sync failed with ``code`` (final review 3 ops-5): Sync
+    now only for failures that clear up by themselves; the others need a step of the owner's
+    first, the same one the Connection page and the alerts give (``sync.describe_error``)."""
+    sync_now = "then Connection page → Sync now"
+    production = ctx.settings.is_production
+    if code == "INVALID_API_KEYS":  # Plaid refused the client ID or secret
+        return f"./run setup --keys-only, {sync_now}"
+    if code == "INVALID_ACCESS_TOKEN":  # the other environment's or another team's keys
+        secret = "Production" if production else "Sandbox"
+        return (
+            f"./run setup --keys-only with the client ID and {secret} secret of the Plaid team "
+            f"that linked it, {sync_now}"
+        )
+    if code == "ACCESS_TOKEN_MISSING":
+        if not production:
+            return "./run sandbox-link makes a new test connection"
+        return f"Re-enter its saved token: ./run setup --env production --access-token, {sync_now}"
+    if code == "KEYCHAIN_APPROVAL_NEEDED":
+        return f"Run ./run doctor in Terminal and click Always Allow when macOS asks, {sync_now}"
+    if code == "ITEM_NOT_FOUND":  # not fixable by update mode (RESEARCH T2.4)
+        return (
+            "None in the app: Plaid removed this connection, so Reconnect can't repair it and it "
+            "can't sync again; the data already here stays (docs/reconnecting.md)"
+        )
+    return "Connection page → Sync now; see the log if it repeats"
+
+
 def check_connection(ctx: DoctorContext) -> Iterable[Check]:
     section = "Plaid connection"
     reachable, _ = ctx.database()
@@ -1470,9 +1503,7 @@ def check_connection(ctx: DoctorContext) -> Iterable[Check]:
                 section,
                 WARN,
                 f"The last sync of {name} failed ({item.error_code})",
-                fix="./run setup --keys-only, then Connection page → Sync now"
-                if item.error_code == "INVALID_API_KEYS"  # Plaid refused the client ID or secret
-                else "Connection page → Sync now; see the log if it repeats",
+                fix=_failed_sync_fix(ctx, item.error_code),
             )
         if due is None:
             yield Check(section, INFO, f"{name} consent has no end date (Plaid reports none)")
