@@ -1223,21 +1223,23 @@ def test_an_expired_exchange_says_plainly_that_the_outcome_is_unknown(
 
 
 def test_production_links_any_institution(db, session_factory, production, prod_plaid, secrets):
-    """BANK-1: the v1 "only American Express" refusal is gone: a first link of Chase is
+    """BANK-1: the v1 "only American Express" refusal is gone: a first link of Houndstooth Bank is
     exchanged like any other, and its marker is cleared."""
     attempt = linking.new_link_token(db, prod_plaid, production, store=secrets).attempt
     db.commit()
-    other = prod_plaid.add_item(item_id="chase", institution_id="ins_3", institution_name="Chase")
+    other = prod_plaid.add_item(
+        item_id="houndstooth", institution_id="ins_109512", institution_name="Houndstooth Bank"
+    )
     result = linking.exchange(
         session_factory,
         prod_plaid,
         secrets,
         production,
         prod_plaid.public_token_for(other),
-        {"institution": {"institution_id": "ins_3", "name": "Chase"}},
+        {"institution": {"institution_id": "ins_109512", "name": "Houndstooth Bank"}},
         attempt=attempt,
     )
-    assert (result.plaid_item_id, result.institution_name) == ("chase", "Chase")
+    assert (result.plaid_item_id, result.institution_name) == ("houndstooth", "Houndstooth Bank")
     assert len(prod_plaid.calls_to("exchange_public_token")) == 1
     assert app_secrets.get_link_in_progress(store=secrets) is None
 
@@ -1489,7 +1491,9 @@ def test_an_item_saved_without_an_institution_id_is_matched_by_name(db):
     tartan_bank(db, institution_id=None)
     meta = LinkMetadata.from_json(link_meta(TARTAN["institution"], ("Checking", "0009")))
     assert "already linked" in linking.duplicate_problem(db, meta)
-    other = LinkMetadata.from_json(link_meta({"institution_id": "ins_3", "name": "Chase"}))
+    other = LinkMetadata.from_json(
+        link_meta({"institution_id": "ins_109512", "name": "Houndstooth Bank"})
+    )
     assert linking.duplicate_problem(db, other) is None
 
 

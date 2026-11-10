@@ -1296,17 +1296,19 @@ class TestConnection:
             last_sync_success_at=NOW - dt.timedelta(hours=50),
         )
         make_account(db, amex)
-        chase = make_item(
+        houndstooth = make_item(
             db,
-            institution_name="Chase",
-            institution_id="ins_3",
+            institution_name="Houndstooth Bank",
+            institution_id="ins_109512",
             liabilities_status="ok",
             consent_expires_at=None,
             last_sync_success_at=NOW - dt.timedelta(hours=1),
         )
-        make_account(db, chase, name="Freedom", mask="5678")
+        make_account(db, houndstooth, name="Cash Rewards", mask="5678")
         checks = dr.run(doctor.check_connection)
-        assert all(("American Express" in c.title) != ("Chase" in c.title) for c in checks)
+        assert all(
+            ("American Express" in c.title) != ("Houndstooth Bank" in c.title) for c in checks
+        )
         by_title = {c.title: c for c in checks}
         details = by_title[
             "American Express doesn't share statement details (no statement balance or due date)"
@@ -1316,23 +1318,29 @@ class TestConnection:
             "Connection page → Grant access to statement details on American Express"
         )
         assert by_title["No successful sync of American Express for 2 days"].status == WARN
-        assert by_title["Statement details of Chase (balance, due date) are synced"].status == PASS
+        assert (
+            by_title["Statement details of Houndstooth Bank (balance, due date) are synced"].status
+            == PASS
+        )
 
     def test_two_logins_at_one_bank_are_told_apart(self, dr, db, freeze_today):
         freeze_today(now=NOW)
-        for name, mask, status in (("Sapphire", "1234", "healthy"), ("Freedom", "5678", None)):
+        for name, mask, status in (
+            ("Travel Rewards", "1234", "healthy"),
+            ("Cash Rewards", "5678", None),
+        ):
             values = {"status": "needs_reconnect", "error_code": "ITEM_LOGIN_REQUIRED"}
             item = make_item(
                 db,
-                institution_name="Chase",
-                institution_id="ins_3",
+                institution_name="Houndstooth Bank",
+                institution_id="ins_109512",
                 liabilities_status="ok",
                 **({} if status else values),
             )
             make_account(db, item, name=name, mask=mask)
         (check,) = [c for c in dr.run(doctor.check_connection) if c.status == FAIL]
-        assert check.title == "Chase (Freedom ··5678) needs you to reconnect"
-        assert check.fix == "Connection page → Reconnect on Chase (Freedom ··5678)"
+        assert check.title == "Houndstooth Bank (Cash Rewards ··5678) needs you to reconnect"
+        assert check.fix == "Connection page → Reconnect on Houndstooth Bank (Cash Rewards ··5678)"
 
     def test_rejected_plaid_keys_point_to_setup(self, dr, db, freeze_today):
         """Final review ops-4: the fix said to click Sync now, which can't help."""

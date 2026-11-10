@@ -121,20 +121,20 @@ Since wave 3 a connection's consent can have no due date (a bank whose consent d
 `consent_due_at`, `consent_days_left` are `None` and `consent_warning` is false), so read the
 properties above rather than comparing `consent_days_left` yourself. `display_name` is the
 institution's name, or, when another connection has the same one (a second login at a bank, or
-Sandbox test Items at one test bank), a label that tells them apart: "Chase (Freedom ··5678)".
+Sandbox test Items at one test bank), a label that tells them apart: "Houndstooth Bank (Cash Rewards ··5678)".
 
 Notices (between the top bar and the page, only rendered when there is one):
 
 - `#reconnect-banner` (tone `over`, role alert, **Reconnect** → `/connection`) when
   `conn.needs_reconnect` and `conn.state != "not_linked"`, naming the connections:
-  "Tartan Bank needs attention. Syncing it is paused…" / "Citibank and Chase need attention.
+  "Tartan Bank needs attention. Syncing it is paused…" / "Windowpane Bank and Houndstooth Bank need attention.
   Syncing them is paused…"
 - `#consent-banner` when `conn.consent_items` isn't empty, also below the reconnect banner (a
   reconnect at one bank renews nothing at another). One connection: days < 0 → `over` "Your
   American Express consent has expired" ("…it lapsed on Oct 25, 2026"); days = 0 → `over`
   "expires today"; else `warn` "Renew your Tartan Bank connection by Nov 20, 2026 (23 days left)."
   Several: one title naming them by state, "Your American Express consent has expired. Renew your
-  Tartan Bank and Citibank connections by Nov 20, 2026 (23 days left)." (the earliest date). Only
+  Tartan Bank and Windowpane Bank connections by Nov 20, 2026 (23 days left)." (the earliest date). Only
   American Express's banner says it asks "every 12 months". Action **Renew now** →
   `/connection`. A connection that needs reconnecting is never in `consent_items`: its one Plaid
   update-mode session fixes both.

@@ -1486,8 +1486,8 @@ def check_connection(ctx: DoctorContext) -> Iterable[Check]:
         yield Check(section, INFO, f"Nothing is linked in {ctx.settings.env} yet")
         return
     for item in status.items:
-        # Every line names its connection (with several, "Chase (Freedom ··5678)" tells two
-        # logins at one bank apart), and each fix names the button on that connection.
+        # Every line names its connection (with several, "Houndstooth Bank (Cash Rewards ··5678)"
+        # tells two logins at one bank apart), and each fix names the button on that connection.
         name = item.display_name or "The connection"
         due = item.consent_due_at.astimezone().date() if item.consent_due_at else None
         if item.item_status == "needs_reconnect":

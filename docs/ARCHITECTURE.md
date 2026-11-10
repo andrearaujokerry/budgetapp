@@ -907,7 +907,7 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   while the v1 token waits to move (`movable`, section 3), that is the v1 name, with the item the
   next sync moves it to.
   Connections at the same institution (a second login, or Sandbox test Items at one test bank)
-  are told apart everywhere by a label from their first account, "Chase (Freedom ··5678)"
+  are told apart everywhere by a label from their first account, "Houndstooth Bank (Cash Rewards ··5678)"
   (`status.connection_labels`).
 - Link's `onExit` (Link closed without linking) clears its own attempt's marker. The
   `CLOSE_OAUTH` and `FAIL_OAUTH` events are logged as "not linked" but never clear it: the bank's

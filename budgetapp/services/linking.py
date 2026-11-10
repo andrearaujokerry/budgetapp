@@ -1844,12 +1844,13 @@ class ItemView:
     @property
     def name(self) -> str:
         """The connection's title: the institution, or with another login at the same bank
-        "Chase (Freedom ··5678)"."""
+        "Houndstooth Bank (Cash Rewards ··5678)"."""
         return self.status.display_name or "Bank connection"
 
     @property
     def institution(self) -> str:
-        """The institution itself, for sentences about the bank ("Not reported by Chase")."""
+        """The institution itself, for sentences about the bank ("Not reported by Houndstooth
+        Bank")."""
         return self.institution_name or "Bank connection"
 
 

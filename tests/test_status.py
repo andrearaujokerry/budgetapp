@@ -79,10 +79,10 @@ def test_the_year_estimate_is_for_american_express_only(db):
     set_app_settings(db, consent_reminder_days=30)
     old = NOW - dt.timedelta(days=400)
     bank = make_item(
-        db, institution_id="ins_3", institution_name="Tartan Bank", last_consented_at=old
+        db, institution_id="ins_109511", institution_name="Tartan Bank", last_consented_at=old
     )
     (state,) = connection_status(db, now=NOW).items
-    assert state.item_id == bank.id and state.institution_id == "ins_3"
+    assert state.item_id == bank.id and state.institution_id == "ins_109511"
     assert state.consent_due_at is None and state.consent_days_left is None
     assert not state.consent_warning and not state.consent_expired
     assert not state.consent_estimated
@@ -124,14 +124,19 @@ def test_the_banners_name_each_institution_and_the_first_consent_due(db):
     )
     make_item(
         db,
-        institution_id="ins_5",
-        institution_name="Citibank",
+        institution_id="ins_135858",
+        institution_name="Windowpane Bank",
         status="needs_reconnect",
         error_code="ITEM_LOGIN_REQUIRED",
     )
-    make_item(db, institution_id="ins_6", institution_name="Chase", status="needs_reconnect")
+    make_item(
+        db,
+        institution_id="ins_109512",
+        institution_name="Houndstooth Bank",
+        status="needs_reconnect",
+    )
     status = connection_status(db, now=NOW)
-    assert status.reconnect_names == ("Citibank", "Chase")
+    assert status.reconnect_names == ("Windowpane Bank", "Houndstooth Bank")
     assert status.consent_item.item_id == tartan.id
 
 
@@ -164,15 +169,15 @@ def test_another_banks_reconnect_never_hides_a_consent_that_is_due(db):
         error_code="ITEM_LOGIN_REQUIRED",
         consent_expires_at=NOW - dt.timedelta(days=1),  # renewed by its own reconnect
     )
-    citi = make_item(
+    windowpane = make_item(
         db,
-        institution_id="ins_5",
-        institution_name="Citibank",
+        institution_id="ins_135858",
+        institution_name="Windowpane Bank",
         consent_expires_at=NOW - dt.timedelta(days=2),
     )
     status = connection_status(db, now=NOW)
-    assert [i.item_id for i in status.consent_items] == [citi.id, amex.id]
-    assert status.consent_item.item_id == citi.id
+    assert [i.item_id for i in status.consent_items] == [windowpane.id, amex.id]
+    assert status.consent_item.item_id == windowpane.id
     assert status.needs_reconnect and status.syncable
 
 
@@ -188,7 +193,7 @@ def test_syncable_means_some_connection_can_sync(db):
         consent_expires_at=NOW - dt.timedelta(days=1),
     )
     assert not connection_status(db, now=NOW).syncable
-    make_item(db, institution_id="ins_5", institution_name="Citibank")
+    make_item(db, institution_id="ins_135858", institution_name="Windowpane Bank")
     assert connection_status(db, now=NOW).syncable
 
 
@@ -197,14 +202,14 @@ def test_two_logins_at_one_bank_get_labels_from_their_first_account(db):
     a connection tells them apart. A name of its own keeps no label."""
     from tests.factories import make_account
 
-    mine = make_item(db, institution_id="ins_3", institution_name="Chase")
-    make_account(db, mine, name="Sapphire Preferred", mask="1234")
-    theirs = make_item(db, institution_id="ins_3", institution_name="CHASE")
-    make_account(db, theirs, name="Freedom Unlimited", mask="5678")
+    mine = make_item(db, institution_id="ins_109512", institution_name="Houndstooth Bank")
+    make_account(db, mine, name="Travel Rewards", mask="1234")
+    theirs = make_item(db, institution_id="ins_109512", institution_name="HOUNDSTOOTH BANK")
+    make_account(db, theirs, name="Cash Rewards", mask="5678")
     tartan = make_item(db, institution_id="ins_109511", institution_name="Tartan Bank")
     by_id = {s.item_id: s for s in connection_status(db, now=NOW).items}
-    assert by_id[mine.id].name == "Chase (Sapphire Preferred ··1234)"
-    assert by_id[theirs.id].name == "CHASE (Freedom Unlimited ··5678)"  # the same bank
+    assert by_id[mine.id].name == "Houndstooth Bank (Travel Rewards ··1234)"
+    assert by_id[theirs.id].name == "HOUNDSTOOTH BANK (Cash Rewards ··5678)"  # the same bank
     assert by_id[tartan.id].label is None and by_id[tartan.id].name == "Tartan Bank"
 
 

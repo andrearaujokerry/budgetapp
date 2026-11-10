@@ -1988,7 +1988,7 @@ def test_error_help_names_the_institution():
     login = sync.describe_error("ITEM_LOGIN_REQUIRED", institution="Tartan Bank")
     assert login.startswith("Tartan Bank needs you to sign in again through Plaid")
     assert sync.describe_error("INSTITUTION_DOWN").startswith("The bank isn't answering Plaid")
-    assert "Amex" not in sync.describe_error("ACCESS_NOT_GRANTED", institution="Chase")
+    assert "Amex" not in sync.describe_error("ACCESS_NOT_GRANTED", institution="Houndstooth Bank")
 
 
 def test_a_re_issued_bank_account_is_called_an_account(db):

@@ -882,19 +882,23 @@ def test_an_exit_report_of_another_attempt_leaves_the_marker(prod_client, secret
 def test_the_exchange_endpoint_links_another_bank_in_production(prod_client, prod_plaid, secrets):
     """BANK-1: the v1 "not American Express" refusal is gone."""
     attempt = prod_client.post("/connection/link-token", json={"mode": "new"}).json()["attempt"]
-    chase = prod_plaid.add_item(item_id="chase", institution_id="ins_3", institution_name="Chase")
+    houndstooth = prod_plaid.add_item(
+        item_id="houndstooth", institution_id="ins_109512", institution_name="Houndstooth Bank"
+    )
     response = prod_client.post(
         "/connection/exchange",
         json={
-            "public_token": prod_plaid.public_token_for(chase),
-            "metadata": {"institution": {"institution_id": "ins_3", "name": "Chase"}},
+            "public_token": prod_plaid.public_token_for(houndstooth),
+            "metadata": {
+                "institution": {"institution_id": "ins_109512", "name": "Houndstooth Bank"}
+            },
             "attempt": attempt,
         },
     )
     assert response.status_code == 200
     assert len(prod_plaid.calls_to("exchange_public_token")) == 1
     assert app_secrets.get_link_in_progress(store=secrets) is None
-    assert "Chase is linked." in flashed(response)[0]["text"]
+    assert "Houndstooth Bank is linked." in flashed(response)[0]["text"]
 
 
 def test_a_parked_token_never_comes_back_in_the_exchange_answer(prod_client, prod_plaid, secrets):

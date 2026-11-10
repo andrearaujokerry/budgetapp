@@ -865,11 +865,13 @@ def test_until_the_upgrade_moves_it_the_keychain_item_line_names_the_v1_item(
 
 
 def test_two_logins_at_one_bank_have_their_own_titles(db, client):
-    first = make_item(db, institution_name="Chase", institution_id="ins_3")
-    make_account(db, first, name="Sapphire Preferred", mask="1234")
-    second = make_item(db, institution_name="Chase", institution_id="ins_3")
-    make_account(db, second, name="Freedom Unlimited", mask="5678")
+    first = make_item(db, institution_name="Houndstooth Bank", institution_id="ins_109512")
+    make_account(db, first, name="Travel Rewards", mask="1234")
+    second = make_item(db, institution_name="Houndstooth Bank", institution_id="ins_109512")
+    make_account(db, second, name="Cash Rewards", mask="5678")
     html = main(page(client))
-    assert f'id="item-{first.id}-title">Chase (Sapphire Preferred ··1234)</h2>' in html
-    assert f'id="item-{second.id}-title">Chase (Freedom Unlimited ··5678)</h2>' in html
-    assert "Plaid's last update from Chase" in text(html)  # sentences name the bank itself
+    assert f'id="item-{first.id}-title">Houndstooth Bank (Travel Rewards ··1234)</h2>' in html
+    assert f'id="item-{second.id}-title">Houndstooth Bank (Cash Rewards ··5678)</h2>' in html
+    assert "Plaid's last update from Houndstooth Bank" in text(
+        html
+    )  # sentences name the bank itself

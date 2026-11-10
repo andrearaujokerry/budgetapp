@@ -408,6 +408,43 @@ def test_no_secrets_in_the_docs(path: Path) -> None:
     assert "PGPASSWORD" not in text
 
 
+#: Large US banks and card issuers. The repo is public, so examples, fixtures, comments and the demo
+#: use Plaid's fictional Sandbox banks (Tartan Bank, Houndstooth Bank, Windowpane Bank, First
+#: Gingham Credit Union, First Platypus Bank) or the demo's Harbor Bank: a real bank in an example
+#: could read as one the owner uses (final review security-4). American Express is the app's own.
+REAL_BANKS = re.compile(
+    r"\b(?:Chase|JPMorgan|Citibank|Citi|Capital One|Wells Fargo|Bank of America|U\.S\. Bank|PNC|"
+    r"Truist|TD Bank|Navy Federal|Schwab|Discover Card|Synchrony|Barclays|Ally Bank|USAA|"
+    r"Goldman Sachs|Apple Card|HSBC|Santander|Citizens Bank|Fifth Third|KeyBank|Huntington|"
+    r"Regions Bank|BMO|SoFi)\b",
+    re.IGNORECASE,
+)
+#: Plaid's own list, quoted where the guides explain why a login is never linked twice.
+PLAID_QUOTE = "Plaid names Chase, PNC, Navy Federal and Schwab"
+EXAMPLE_FILES = (".py", ".html", ".md", ".js", ".css", ".txt", ".toml")
+
+
+def test_examples_name_no_real_bank() -> None:
+    """No file in the repo names a real bank or card issuer, except Plaid's quoted list."""
+    roots = (REPO / "budgetapp", REPO / "docs", REPO / "tests", README)
+    paths = [p for root in roots for p in ([root] if root.is_file() else root.rglob("*"))]
+    found = []
+    for path in paths:
+        if (
+            not path.is_file()
+            or path.suffix not in EXAMPLE_FILES
+            or path == Path(__file__)
+            or "vendor" in path.parts
+            or "__pycache__" in path.parts
+        ):
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            match = REAL_BANKS.search(line)
+            if match and PLAID_QUOTE not in line:
+                found.append(f"{_id(path)}:{number}: {match.group(0)}")
+    assert not found, found
+
+
 # --------------------------------------------------------------------------- facts from the code
 
 

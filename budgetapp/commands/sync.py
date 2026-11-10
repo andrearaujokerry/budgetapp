@@ -121,8 +121,8 @@ class Runtime:
 
     def item_names(self) -> dict[int, str]:
         """Every Item's database id → a short name, in id order. Two logins at one bank (or
-        Sandbox test Items at one test bank) are told apart as everywhere else: "Chase (Freedom
-        ··5678)" (``status.connection_labels``)."""
+        Sandbox test Items at one test bank) are told apart as everywhere else: "Houndstooth
+        Bank (Cash Rewards ··5678)" (``status.connection_labels``)."""
         with self.session_factory() as s:
             items = list(s.scalars(select(PlaidItem).order_by(PlaidItem.id)))
             labels = status_service.connection_labels(s, items)

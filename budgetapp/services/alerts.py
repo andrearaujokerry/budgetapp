@@ -282,8 +282,8 @@ def _age_text(delta: dt.timedelta) -> str:
 
 def _institution(state: status.ItemStatus) -> str:
     """The connection's name to start an alert ("Tartan Bank sync failed", BANK-7); with another
-    login at the same bank, the label that tells them apart ("Chase (Freedom ··5678) sync
-    failed")."""
+    login at the same bank, the label that tells them apart ("Houndstooth Bank (Cash Rewards
+    ··5678) sync failed")."""
     return state.display_name or DEFAULT_INSTITUTION
 
 

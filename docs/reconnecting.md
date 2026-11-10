@@ -23,7 +23,7 @@ bank locked the sign-in, you withdrew the app's access at your bank, or the cons
 - the top bar says **Reconnect needed**, and its tooltip names the bank;
 - every page shows "*Bank* needs attention. Syncing it is paused until you sign in again through
   Plaid. Your existing data is safe." (with several banks: "*Bank* and *bank* need attention.");
-  two logins at the same bank are told apart by their first account, as in "Chase (Freedom
+  two logins at the same bank are told apart by their first account, as in "Houndstooth Bank (Cash Rewards
   ··5678)";
 - a Mac notification, if sync problem alerts are on ([Alerts and notifications](alerts.md));
 - `./run doctor --env production` reports "*Bank* needs you to reconnect";

@@ -8,8 +8,8 @@ T2.5). Any other bank without a date from Plaid has no consent due date (``conse
 ``None``, no warning). A warning starts ``app_settings.consent_reminder_days`` before.
 
 Connections at the same institution (a different login at a bank already linked, BANK-3, or
-Sandbox test Items at one test bank) get a ``label`` that tells them apart, "Chase (Freedom
-··5678)", used wherever a connection is named.
+Sandbox test Items at one test bank) get a ``label`` that tells them apart, "Houndstooth Bank
+(Cash Rewards ··5678)", used wherever a connection is named.
 """
 
 from __future__ import annotations
@@ -75,13 +75,15 @@ class ItemStatus:
     liabilities_status: str | None
     #: whether the connection has a credit card (Liabilities apply only then; BANK-7)
     has_cards: bool = True
-    #: set when another connection has the same institution name: "Chase (Freedom ··5678)"
+    #: set when another connection has the same institution name: "Houndstooth Bank (Cash
+    #: Rewards ··5678)"
     label: str | None = None
 
     @property
     def display_name(self) -> str | None:
         """The name that tells this connection apart ("Tartan Bank", or with another login at the
-        same bank "Chase (Freedom ··5678)"); ``None`` for a connection saved without a name."""
+        same bank "Houndstooth Bank (Cash Rewards ··5678)"); ``None`` for a connection saved
+        without a name."""
         return self.label or self.institution_name
 
     @property
@@ -213,9 +215,10 @@ def _normal(name: str | None) -> str:
 
 def connection_labels(session: Session, items: Sequence[PlaidItem]) -> dict[int, str]:
     """Labels that tell connections at the same institution apart (``items``: every Item, oldest
-    first): "Chase (Freedom ··5678)", from each connection's first visible account, or "Chase
-    (login 2)" when that doesn't tell them apart (a hidden account's name never shows up on every
-    page through a label). A connection with a name of its own gets none."""
+    first): "Houndstooth Bank (Cash Rewards ··5678)", from each connection's first visible
+    account, or "Houndstooth Bank (login 2)" when that doesn't tell them apart (a hidden account's
+    name never shows up on every page through a label). A connection with a name of its own gets
+    none."""
     groups: dict[str, list[PlaidItem]] = {}
     for item in items:
         groups.setdefault(_normal(item.institution_name), []).append(item)

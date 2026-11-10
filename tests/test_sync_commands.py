@@ -178,19 +178,19 @@ def test_two_logins_at_one_bank_are_told_apart(db, make_rt, out, fake_plaid, sec
     from tests.factories import make_account
 
     ids = []
-    for item_id, card, mask in (("one", "Sapphire", "1234"), ("two", "Freedom", "5678")):
+    for item_id, card, mask in (("one", "Travel Rewards", "1234"), ("two", "Cash Rewards", "5678")):
         _, item = link(
             db,
             fake_plaid,
             secrets,
             settings,
             item_id=item_id,
-            institution_name="Chase",
-            institution_id="ins_3",
+            institution_name="Houndstooth Bank",
+            institution_id="ins_109512",
         )
         make_account(db, item, name=card, mask=mask)
         ids.append(item.id)
-    names = ["Chase (Sapphire ··1234)", "Chase (Freedom ··5678)"]
+    names = ["Houndstooth Bank (Travel Rewards ··1234)", "Houndstooth Bank (Cash Rewards ··5678)"]
     assert make_rt().item_names() == dict(zip(ids, names, strict=True))
     assert sync_cmd.sync_command(args(), make_rt()) == 0
     assert [line.split(":")[0] for line in out] == names

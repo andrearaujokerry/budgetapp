@@ -464,7 +464,7 @@ def test_two_items_show_the_worst(probe_client, db, at_now):
 
 
 def test_the_reconnect_banner_names_the_banks_that_need_it(probe_client, db, at_now):
-    for name, inst in (("Citibank", "ins_5"), ("Chase", "ins_3")):
+    for name, inst in (("Windowpane Bank", "ins_135858"), ("Houndstooth Bank", "ins_109512")):
         make_item(
             db,
             institution_name=name,
@@ -480,7 +480,7 @@ def test_the_reconnect_banner_names_the_banks_that_need_it(probe_client, db, at_
         html,
         re.S,
     ).group(0)
-    assert "Citibank and Chase need attention." in banner
+    assert "Windowpane Bank and Houndstooth Bank need attention." in banner
     assert "Syncing them is paused until you sign in again through Plaid." in banner
     assert "American Express" not in banner
 
@@ -496,12 +496,14 @@ def test_a_bank_consent_banner_names_the_bank_without_amex_wording(probe_client,
     assert 'id="consent-banner"' not in html and "Renew access" not in html
     make_item(
         db,
-        institution_name="Capital One",
-        institution_id="ins_9",
+        institution_name="First Gingham Credit Union",
+        institution_id="ins_109509",
         consent_expires_at=NOW + dt.timedelta(days=6),
     )
     html = probe_client.get("/_probe/page").text
-    assert "Renew your Capital One connection by" in html and "(6 days left)." in html
+    assert (
+        "Renew your First Gingham Credit Union connection by" in html and "(6 days left)." in html
+    )
     assert "12 months" not in html
 
 
@@ -560,7 +562,10 @@ def test_an_expired_consent_elsewhere_is_still_announced(probe_client, db, at_no
 def test_several_due_consents_are_named_together(probe_client, db, at_now):
     set_app_settings(db, consent_reminder_days=30)
     make_item(db, consent_expires_at=NOW - dt.timedelta(days=1))  # American Express, lapsed
-    for name, inst, days in (("Tartan Bank", "ins_109511", 12), ("Citibank", "ins_5", 20)):
+    for name, inst, days in (
+        ("Tartan Bank", "ins_109511", 12),
+        ("Windowpane Bank", "ins_135858", 20),
+    ):
         make_item(
             db,
             institution_name=name,
@@ -574,7 +579,7 @@ def test_several_due_consents_are_named_together(probe_client, db, at_now):
     assert banner == "over"
     due = date_long((NOW + dt.timedelta(days=12)).astimezone().date())
     assert (
-        "Your American Express consent has expired. Renew your Tartan Bank and Citibank "
+        "Your American Express consent has expired. Renew your Tartan Bank and Windowpane Bank "
         f"connections by {due} (12 days left)."
     ) in notices(html)
     assert "Amex asks you to renew access every 12 months." in notices(html)
@@ -605,26 +610,26 @@ def test_an_unnamed_connection_reads_as_a_sentence(probe_client, db, at_now):
 
 def test_two_logins_at_one_bank_are_told_apart(probe_client, db, at_now):
     """UX review: BANK-3's "a different login at a bank I've already linked": the pill's tooltip
-    and the banner say which Chase login needs the reconnect."""
+    and the banner say which Houndstooth Bank login needs the reconnect."""
     from tests.factories import make_account
 
-    mine = make_item(db, institution_name="Chase", institution_id="ins_3")
-    make_account(db, mine, name="Sapphire Preferred", mask="1234")
+    mine = make_item(db, institution_name="Houndstooth Bank", institution_id="ins_109512")
+    make_account(db, mine, name="Travel Rewards", mask="1234")
     theirs = make_item(
         db,
-        institution_name="Chase",
-        institution_id="ins_3",
+        institution_name="Houndstooth Bank",
+        institution_id="ins_109512",
         status="needs_reconnect",
         error_code="ITEM_LOGIN_REQUIRED",
     )
-    make_account(db, theirs, name="Freedom Unlimited", mask="5678")
+    make_account(db, theirs, name="Cash Rewards", mask="5678")
     html = probe_client.get("/_probe/page").text
     tooltip = re.search(r'class="pill pill--\w+" href="/connection" data-tooltip="([^"]*)"', html)
     assert html_lib.unescape(tooltip.group(1)) == (
-        "Chase (Freedom Unlimited ··5678): reconnect needed · "
-        "Chase (Sapphire Preferred ··1234): connected"
+        "Houndstooth Bank (Cash Rewards ··5678): reconnect needed · "
+        "Houndstooth Bank (Travel Rewards ··1234): connected"
     )
-    assert "Chase (Freedom Unlimited ··5678) needs attention." in notices(html)
+    assert "Houndstooth Bank (Cash Rewards ··5678) needs attention." in notices(html)
 
 
 def test_htmx_gets_the_partial_with_an_out_of_band_toast(probe_client, db, at_now):

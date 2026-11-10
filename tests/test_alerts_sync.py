@@ -382,18 +382,18 @@ def test_a_connection_without_a_name_stays_neutral(db, notifier):
 def test_a_bank_reconnect_alert_blames_no_consent_and_names_the_login(db, notifier):
     """UX review: at a bank, ITEM_LOGIN_REQUIRED often follows a password change (only American
     Express's text blames the consent), and two logins at one bank are told apart."""
-    for name, mask in (("Sapphire Preferred", "1234"), ("Freedom Unlimited", "5678")):
-        chase = make_item(
+    for name, mask in (("Travel Rewards", "1234"), ("Cash Rewards", "5678")):
+        houndstooth = make_item(
             db,
-            institution_id="ins_3",
-            institution_name="Chase",
+            institution_id="ins_109512",
+            institution_name="Houndstooth Bank",
             last_sync_success_at=NOW - 2 * HOUR,
         )
-        make_account(db, chase, name=name, mask=mask)
-    evaluate(db, notifier, fail(chase, "ITEM_LOGIN_REQUIRED", reconnect=True))
-    assert notifier.titles == ["Reconnect Chase (Freedom Unlimited ··5678)"]
+        make_account(db, houndstooth, name=name, mask=mask)
+    evaluate(db, notifier, fail(houndstooth, "ITEM_LOGIN_REQUIRED", reconnect=True))
+    assert notifier.titles == ["Reconnect Houndstooth Bank (Cash Rewards ··5678)"]
     message = notifier.sent[0].message
-    assert message.startswith("Chase (Freedom Unlimited ··5678) needs you to sign in again")
+    assert message.startswith("Houndstooth Bank (Cash Rewards ··5678) needs you to sign in again")
     assert "password change" in message and "the consent expired or was revoked" not in message
 
 
