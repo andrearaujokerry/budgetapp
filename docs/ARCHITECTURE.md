@@ -157,7 +157,10 @@ Rules:
   is harmless; a token nobody can find is an orphan). If the Keychain write fails after a
   successful exchange, the token goes to a 0600 recovery file under `state/` and the app stops
   with instructions; so does a token whose Item id can't be part of a Keychain name (the name is
-  worked out inside the same guard). `./run setup --env production --access-token` re-enters a
+  worked out inside the same guard). An id may be any printable ASCII without spaces, up to 256
+  characters (Plaid doesn't document its ids' characters): the environment comes before the id,
+  so no id names another environment's item, the v1 name, an index or the marker, and ids never
+  reach a path, a shell or a URL. `./run setup --env production --access-token` re-enters a
   saved token of any connection (via `getpass`): `/item/get` verifies it and names its Item, and
   it is saved under that Item's key. The user guide (`docs/going-live.md`) suggests keeping a
   copy of each in the user's password manager.

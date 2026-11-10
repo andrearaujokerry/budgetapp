@@ -952,7 +952,7 @@ def test_an_item_id_no_keychain_name_can_hold_is_answered_with_its_recovery_file
     prod_client, prod_plaid, secrets
 ):
     """Final review (security-1): it used to be a bare 500 with the token in no file."""
-    fake_item = prod_plaid.add_item(item_id="item.with.dot")
+    fake_item = prod_plaid.add_item(item_id="item with a space")
     response = prod_client.post(
         "/connection/exchange",
         json={"public_token": prod_plaid.public_token_for(fake_item), "metadata": AMEX},

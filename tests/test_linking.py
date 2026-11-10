@@ -1110,7 +1110,30 @@ def test_a_token_parked_in_a_recovery_file_frees_its_link_marker(
         assert linking.link_blocks(db, production, store=secrets) == ()
 
 
-@pytest.mark.parametrize("odd", ["item.with.dot", "a b"])
+def test_an_item_id_of_other_printable_characters_links_like_any_other(
+    db, session_factory, production, prod_plaid, secrets
+):
+    """Final review (security-1): such an id is stored under its own Keychain name, so the
+    connection works (no recovery file that setup --access-token would refuse)."""
+    fake_item = prod_plaid.add_item(
+        item_id="Ed6bjNrD.LJfGvZW=wnkQ", institution_id="ins_109511", institution_name="Tartan Bank"
+    )
+    result = linking.exchange(
+        session_factory,
+        prod_plaid,
+        secrets,
+        production,
+        prod_plaid.public_token_for(fake_item),
+        TARTAN,
+    )
+    assert result.created and result.plaid_item_id == "Ed6bjNrD.LJfGvZW=wnkQ"
+    assert secrets.values[prod_key("Ed6bjNrD.LJfGvZW=wnkQ")] == fake_item.access_token
+    assert app_secrets.unsaved_production_tokens(production) == []
+    (view,) = linking.connection_overview(db, production, store=secrets).items
+    assert view.keychain_item == prod_key("Ed6bjNrD.LJfGvZW=wnkQ")
+
+
+@pytest.mark.parametrize("odd", ["a b", "x" * 257])
 def test_an_item_id_no_keychain_name_can_hold_ends_in_a_recovery_file(
     db, session_factory, production, prod_plaid, secrets, odd
 ):

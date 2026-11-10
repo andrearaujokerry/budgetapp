@@ -68,7 +68,12 @@ LEGACY_PRODUCTION_TOKEN = "plaid.access_token.production"
 SANDBOX_ITEM_INDEX = "plaid.item_ids.sandbox"
 PRODUCTION_ITEM_INDEX = "plaid.item_ids.production"
 LINK_TOKEN_LIFETIME = timedelta(hours=4)
-_ITEM_ID = re.compile(r"[A-Za-z0-9_-]+")
+#: A Plaid item id that can be part of a Keychain name: printable ASCII without spaces, at most
+#: 256 characters. Plaid's ids seen so far are letters and digits, but nothing documents their
+#: characters. ``plaid.access_token.<env>.<id>`` stays unambiguous: the environment comes before
+#: the id, so no id names another environment's item, the v1 name, an index or the marker. Ids
+#: never reach a path (recovery file names are sanitized), a shell or a URL.
+_ITEM_ID = re.compile(r"[!-~]{1,256}")
 
 #: Keychain status codes that mean "the Keychain wants the user to approve access":
 #: -25293 errSecAuthFailed (python binary changed, e.g. after `brew upgrade`), -25308
@@ -858,7 +863,8 @@ def write_access_token_recovery_file(
 ) -> Path:
     """Write a token that could not be saved to Keychain to a 0600 file with instructions
     (under ``<state_dir or settings.state_dir>/recovery``), one file per Item and attempt:
-    ``access-token-<env>-<item id>-<UTC stamp>.txt``."""
+    ``access-token-<env>-<item id>-<UTC stamp>.txt``. The name keeps at most 64 characters of
+    the id (file names are limited); the file itself holds all of it."""
     stamp = clock.now().strftime("%Y%m%dT%H%M%SZ")
     content = (
         "Budget Tracker could not save this Plaid access token to the macOS Keychain.\n"
@@ -872,7 +878,7 @@ def write_access_token_recovery_file(
     )
     return write_recovery_file(
         state_dir or settings.state_dir,
-        f"access-token-{settings.plaid_env}-{item_id}-{stamp}",
+        f"access-token-{settings.plaid_env}-{str(item_id)[:64]}-{stamp}",
         content,
     )
 

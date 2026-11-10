@@ -75,9 +75,12 @@ class TestStores:
         assert sec.access_token_key("sandbox", "abc") == "plaid.access_token.sandbox.abc"
         assert sec.item_index_key("production") == PRODUCTION_ITEM_INDEX
         assert sec.item_index_key("sandbox") == SANDBOX_ITEM_INDEX
-        for bad in ("", "a.b", "../x", None):
+        for bad in ("", "a b", "tab\tid", "ünï", "x" * 257, None):
             with pytest.raises(ValueError):
                 sec.access_token_key("production", bad)
+        # Plaid doesn't document which characters its item ids use (security-1): any printable
+        # ASCII without spaces is a name, and it stays unambiguous (the environment comes first).
+        assert sec.access_token_key("production", "a.b=c") == "plaid.access_token.production.a.b=c"
         assert sec.db_password_key("budgetapp_live") == "db.password.budgetapp_live"
         with pytest.raises(ValueError):
             sec.db_password_key("postgres")
@@ -138,7 +141,21 @@ class TestAccessTokens:
         with pytest.raises(TokenNotSavedError):
             sec.store_access_token(prod, "item-1", PROD_TOKEN)
 
-    @pytest.mark.parametrize("item_id", ["item.with.dot", "abc=", "a b", "a/b"])
+    @pytest.mark.parametrize("item_id", ["item.with.dot", "abc=", "a/b", "x" * 256])
+    def test_an_item_id_of_other_printable_characters_gets_its_own_keychain_item(
+        self, prod, secrets, item_id
+    ):
+        """Final review (security-1): Plaid doesn't document the characters of its item ids, so
+        any printable ASCII without spaces (up to 256) names a Keychain item, which setup
+        --access-token and Re-attach can use too. The environment comes before the id, so the
+        name can't be another environment's item, the v1 name or the index."""
+        sec.store_access_token(prod, item_id, PROD_TOKEN)
+        key = sec.production_access_token_key(item_id)
+        assert key == f"plaid.access_token.production.{item_id}"
+        assert secrets.values[key] == PROD_TOKEN and sec.production_item_ids() == [item_id]
+        assert not sec.is_sandbox_account(key) and sec.unsaved_production_tokens(prod) == []
+
+    @pytest.mark.parametrize("item_id", ["a b", "tab\tid", "ünï", "x" * 257])
     def test_an_item_id_no_keychain_name_can_hold_still_keeps_the_token(
         self, prod, secrets, item_id
     ):
