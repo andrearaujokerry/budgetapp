@@ -593,7 +593,13 @@ payment from checking that Plaid codes this way is never spending and never coun
 charges twice (one coded `TRANSFER_OUT_*` lands in Transfers, not spending either, but rules
 apply to it; which code Plaid gives such a payment is unverified; a payment to a card the app
 doesn't have is a card payment too, so that card's spending counts nowhere, and the guides say to
-link every card paid from checking); any other loan payment is
+link every card paid from checking). One that Plaid gives a spending code
+(`LOAN_PAYMENTS_OTHER_PAYMENT` → Other, a merchant's code, or no code at all → Uncategorized) is
+spending, and counts the card's charges a second time until the owner files it in Card Payments
+(on the row, then a rule from it), so going-live's checklist has the owner check the payment's
+**Counts as** after the first bank sync. The app doesn't guess such a payment from its text:
+RESEARCH has no verified bank-side description, and a pattern loose enough for every bank's
+wording could also match ordinary spending (final review money-2). Any other loan payment is
 spending (the car, mortgage, student loan, personal loan and buy-now-pay-later codes keep their
 card category, Transportation, Home, Education, Utilities & Bills and Shopping; `LOAN_PAYMENTS`
 and its other codes → Other); and money a lender deposits (`LOAN_DISBURSEMENTS` codes) → Transfers,

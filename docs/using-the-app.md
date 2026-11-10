@@ -34,9 +34,11 @@ The same rules apply on every page and in every alert:
   Rewards") never count as spending.
 - **Bank accounts count the same way.** Rent, debit-card purchases, loan payments (a car,
   mortgage or student loan) and ATM withdrawals ("Cash & ATM") from checking are spending. Paying
-  your card from checking is a card payment when Plaid marks it as one (else usually a transfer),
-  so the money counts once, as the card's charges, when that card is linked too: a payment to a
-  card the app doesn't have is still a card payment, so that card's spending counts nowhere. What
+  your card from checking is a card payment when Plaid marks it as one, so the money counts once,
+  as the card's charges, when that card is linked too: a payment to a card the app doesn't have
+  is still a card payment, so that card's spending counts nowhere. Plaid's category for that
+  payment isn't guaranteed: if Plaid files one as spending, the card's charges count twice until
+  you set it to Card Payments, so check its **Counts as** once after linking. What
   Plaid files as a transfer ("Transfers") is neither spending nor income: moving money between
   your own accounts and money a lender puts in your account, but also payments to and from other
   people (Zelle, Venmo, wires, check deposits) until a rule of yours moves them. Paychecks,

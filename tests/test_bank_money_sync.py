@@ -21,6 +21,7 @@ from budgetapp.config import load_settings
 from budgetapp.models import Category, Transaction
 from budgetapp.periods import month_of
 from budgetapp.services import alerts, sync
+from budgetapp.services import transactions as txns
 from budgetapp.services.events import SyncOutcome
 from budgetapp.services.spending import period_income, period_spending
 from tests.bank_factories import BANK_INSTITUTION_ID, BANK_NAME
@@ -490,3 +491,52 @@ def test_payments_to_people_are_transfers_until_a_rule_moves_them(bank, db):
     month = month_of(day)
     assert period_spending(db, month).total == Decimal("300.00")  # only what the rule moved
     assert period_income(db, month).total == Decimal("0.00")
+
+
+def test_the_owner_files_a_miscoded_card_payment_from_checking_once(bank, db, notifier):
+    """Final review money-2, the remedy going-live's checklist gives: a payment to the card that
+    Plaid codes as spending (here LOAN_PAYMENTS_OTHER_PAYMENT, which maps to Other) counts the
+    card's charges a second time; set to Card Payments and turned into a rule with "Always
+    categorize like this", it and every later payment are card payments, so the card's charges
+    count once and no payment sets off a large-charge alert."""
+    set_app_settings(db, large_charge_threshold=Decimal("1000.00"))
+    card = make_account(db)
+    day = today() - dt.timedelta(days=12)
+    shopping, card_payments = get_category(db, "Shopping"), get_category(db, "Card Payments")
+    make_transaction(db, card, amount="1500.00", date=day, name="BEST BUY", category=shopping)
+    make_transaction(
+        db,
+        card,
+        amount="-1500.00",
+        date=day,
+        name="PAYMENT RECEIVED - THANK YOU",
+        category=card_payments,
+        category_source="system",
+    )
+    db.commit()
+    assert bank.sync().initial_history_load
+    payment = {"name": "AMEX EPAYMENT ACH PMT", "pfc_primary": "LOAN_PAYMENTS",
+               "pfc_detailed": "LOAN_PAYMENTS_OTHER_PAYMENT"}  # fmt: skip
+    bank.add(transaction_id="pmt-1", amount="1500.00", date=day, **payment)
+    assert bank.sync().status == "success"
+    assert bank.category("pmt-1") == ("Other", "plaid")  # spending: counted twice
+    month = month_of(day)
+    assert period_spending(db, month).total == Decimal("3000.00")
+    first = bank.row("pmt-1")
+    txns.update(db, first.id, category_id=card_payments.id)
+    draft = txns.one_click_draft(db, first.id)
+    assert not draft.is_payment  # an ordinary rule: rules apply to this row
+    txns.create_one_click_rule(
+        db,
+        first.id,
+        merchant_pattern=draft.merchant_pattern,
+        category_id=draft.category_id,
+        apply_to_past=True,
+    )
+    db.commit()
+    assert period_spending(db, month).total == Decimal("1500.00")  # the purchase, once
+    notifier.sent.clear()
+    bank.add(transaction_id="pmt-2", amount="1180.00", date=today(), **payment)
+    assert bank.sync().status == "success"
+    assert bank.category("pmt-2") == ("Card Payments", "rule")
+    assert [t for t in notifier.titles if t.startswith("$")] == []

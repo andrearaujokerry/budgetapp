@@ -285,6 +285,12 @@ Check how its money is filed. Each transaction's details say how it counts (**Co
   rent apart from what you buy for your home).
 - **A large-charge alert amount now covers spending from checking too**, so rent above it alerts
   every month.
+- **The payment to your card from checking must count as a card payment**, or that card's
+  charges count twice. Open one (filter Transactions by your checking account and search for the
+  card company's name): **Counts as** should say **"A card payment, not spending"**. If it says
+  Spending, Plaid filed it under another category: set its category to Card Payments, then use
+  **Always categorize like this** on it with **Also apply to past transactions**, so every
+  payment follows (otherwise each one also sets off a large-charge alert).
 - **Transfers aren't only between your own accounts.** Plaid also files payments to people (Zelle,
   Venmo, Cash App), wires, and check or cash deposits as transfers, and a transfer counts as
   neither spending nor income. Filter Transactions by the Transfers category and make a rule for
