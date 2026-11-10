@@ -1452,6 +1452,91 @@ def test_an_item_saved_without_an_institution_id_is_matched_by_name(db):
     assert linking.duplicate_problem(db, other) is None
 
 
+@pytest.mark.parametrize("position", [19, 20, 24])
+def test_a_different_login_picking_more_accounts_than_are_checked_is_refused(
+    db, session_factory, production, prod_plaid, secrets, position
+):
+    """Final review (security-2a): Link's metadata keeps the first 20 picked accounts, and an
+    account already linked further down the list was never compared, so the same login was
+    exchanged again as a new Item. More picked accounts than are checked now refuse the link."""
+    tartan_bank(db, accounts=(("Everyday Checking", "0101"),))
+    picked = [(f"Savings {n}", f"9{n:03d}") for n in range(25)]
+    picked[position] = ("Everyday Checking", "0101")
+    meta = link_meta(TARTAN["institution"], *picked)
+    again = prod_plaid.add_item(
+        item_id="item-again", institution_id="ins_109511", institution_name="Tartan Bank"
+    )
+    with pytest.raises(LinkRefused, match="not exchanged"):
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(again),
+            meta,
+            different_login=True,
+        )
+    assert prod_plaid.calls_to("exchange_public_token") == []
+    assert len(items(db)) == 1
+    assert LinkMetadata.from_json(meta).accounts_truncated
+    twenty = link_meta(TARTAN["institution"], *picked[:20])
+    assert not LinkMetadata.from_json(twenty).accounts_truncated
+
+
+def test_a_connection_saved_without_its_bank_refuses_new_links_until_a_sync_names_it(
+    db, session_factory, production, prod_plaid, secrets
+):
+    """Final review (security-2b): a first link whose metadata names no institution (fine while
+    nothing is linked) and whose /item/get failed right after linking was saved with neither the
+    bank's id nor its name, so no later link matched it and the same bank was exchanged again."""
+    first = prod_plaid.add_item(
+        item_id="item-1",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking()],
+    )
+    prod_plaid.queue_error("get_item", prod_plaid.plaid_error("INTERNAL_SERVER_ERROR"))
+    linking.exchange(
+        session_factory,
+        prod_plaid,
+        secrets,
+        production,
+        prod_plaid.public_token_for(first),
+        {"institution": None},
+    )
+    (row,) = items(db)
+    assert (row.institution_id, row.institution_name) == (None, None)
+    again = prod_plaid.add_item(
+        item_id="item-2",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking("acc-2")],
+    )
+    for different_login in (False, True):
+        with pytest.raises(LinkRefused, match="saved without the name of its bank"):
+            linking.exchange(
+                session_factory,
+                prod_plaid,
+                secrets,
+                production,
+                prod_plaid.public_token_for(again),
+                link_meta(TARTAN["institution"], ("Checking", "0001")),
+                different_login=different_login,
+            )
+    assert len(prod_plaid.calls_to("exchange_public_token")) == 1
+    assert sync_service.refresh_item(session_factory, prod_plaid, first.access_token, row.id)
+    with pytest.raises(LinkRefused, match="Tartan Bank is already linked"):
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(again),
+            link_meta(TARTAN["institution"], ("Checking", "0001")),
+        )
+    assert len(prod_plaid.calls_to("exchange_public_token")) == 1
+
+
 def test_another_bank_is_never_a_duplicate(db, session_factory, sandbox, fake_plaid, secrets):
     make_item(db)  # American Express
     tartan = fake_plaid.add_item(

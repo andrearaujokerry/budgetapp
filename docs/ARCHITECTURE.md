@@ -819,14 +819,16 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   checkbox in the confirm dialog, sent as `different_login`). Even then the link is refused when
   any picked account's name and mask match an account already linked at that institution. Masks
   are compared with masks only, never with account numbers (the app has none). With connections
-  in place, metadata without the institution's id (or, with the choice, without accounts) is
-  refused too: Plaid's `onSuccess` names an institution with both its id and its name, and every
-  Item the app saves has the id. The Sandbox applies the same check to Link; its test Items made
-  without Link don't. Whether a public token that is never exchanged counts toward the 10 is not
-  documented; the app treats the exchange as the step that creates the Item. The refusal can't
-  undo what happened in Plaid's window: at OAuth banks that don't allow duplicates, signing in to
-  the same login again already sends the first Item to `ITEM_LOGIN_REQUIRED` (RESEARCH T1), which
-  Reconnect repairs.
+  in place, metadata without the institution's id (or, with the choice, without accounts, or with
+  more picked accounts than the 20 the app reads) is refused too: Plaid's `onSuccess` names an
+  institution with both its id and its name. A connection saved with neither (a first link whose
+  metadata named no institution while `/item/get` failed right after linking) could be any bank,
+  so every new link is refused until a sync or Reconnect has asked `/item/get` which it is. The
+  Sandbox applies the same check to Link; its test Items made without Link don't. Whether a
+  public token that is never exchanged counts toward the 10 is not documented; the app treats the
+  exchange as the step that creates the Item. The refusal can't undo what happened in Plaid's
+  window: at OAuth banks that don't allow duplicates, signing in to the same login again already
+  sends the first Item to `ITEM_LOGIN_REQUIRED` (RESEARCH T1), which Reconnect repairs.
 - **Re-attach.** A token in Keychain whose Item row is missing (lost or restored database, or a
   crash between the Keychain write and the commit), and a v1 token the app can't place, are
   re-attached per token: `/item/get` names the Item, its row is rebuilt from `/item/get` and

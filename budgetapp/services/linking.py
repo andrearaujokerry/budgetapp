@@ -153,14 +153,22 @@ class LinkAccount:
     subtype: str | None = None
 
 
+#: The most picked accounts kept from Link's metadata (untrusted JSON from the browser). A link
+#: that sent more can't be checked account by account (BANK-3), so it isn't checked in part.
+LINK_ACCOUNTS_LIMIT = 20
+
+
 @dataclass(frozen=True, slots=True)
 class LinkMetadata:
-    """The parts of Link's ``onSuccess`` metadata the app uses (nothing else is kept)."""
+    """The parts of Link's ``onSuccess`` metadata the app uses (nothing else is kept).
+    ``accounts_truncated``: Link sent more picked accounts than :data:`LINK_ACCOUNTS_LIMIT`, and
+    only the first ones were kept."""
 
     institution_id: str | None = None
     institution_name: str | None = None
     accounts: tuple[LinkAccount, ...] = ()
     link_session_id: str | None = None
+    accounts_truncated: bool = False
 
     @classmethod
     def from_json(cls, data: Any) -> LinkMetadata:
@@ -188,8 +196,9 @@ class LinkMetadata:
         return cls(
             institution_id=text(institution.get("institution_id")),
             institution_name=text(institution.get("name")),
-            accounts=tuple(accounts[:20]),
+            accounts=tuple(accounts[:LINK_ACCOUNTS_LIMIT]),
             link_session_id=text(data.get("link_session_id")),
+            accounts_truncated=len(accounts) > LINK_ACCOUNTS_LIMIT,
         )
 
 
@@ -659,10 +668,14 @@ def duplicate_problem(
       already linked at that institution (the same login again). Masks are compared with masks
       only, never with account numbers (the app never has those).
     * With connections in place, Link metadata without the institution's id (or, with the
-      choice, without the picked accounts) can't be checked, so it is refused too (fail safe).
-      Plaid's ``onSuccess`` names the institution with both its id and its name (RESEARCH T2:
-      ``institution: {name, institution_id} | null``); every Item this app saves has the id, so a
-      name alone would match none of them."""
+      choice, without the picked accounts, or with more of them than :data:`LINK_ACCOUNTS_LIMIT`)
+      can't be checked, so it is refused too (fail safe). Plaid's ``onSuccess`` names the
+      institution with both its id and its name (RESEARCH T2: ``institution: {name,
+      institution_id} | null``), and Items get the id from it or from ``/item/get``, so a name
+      alone would match none of them.
+    * A connection saved with neither the institution's id nor its name (a first link whose
+      metadata named none, while ``/item/get`` failed right after linking) could be any bank:
+      every new link is refused until a sync or Reconnect has asked ``/item/get`` which it is."""
     items = list(session.scalars(select(PlaidItem).order_by(PlaidItem.id)))
     if not items:
         return None
@@ -671,6 +684,13 @@ def duplicate_problem(
             "Plaid didn't say which bank you picked, so the app can't check that you haven't "
             "linked it already. This new link was not completed (its token was not exchanged); "
             "try again."
+        )
+    if any(not i.institution_id and not i.institution_name for i in items):
+        return (
+            "A connection here was saved without the name of its bank, so the app can't check "
+            "that this isn't the same bank and login again. This new link was not completed (its "
+            "token was not exchanged). Sync now (or Reconnect it, if it needs that) asks Plaid "
+            "which bank it is; then link again."
         )
     same = [i for i in items if _same_institution(i, meta)]
     if not same:
@@ -704,6 +724,14 @@ def duplicate_problem(
                     "first one. This new link was not completed (its token was not exchanged). "
                     "To add accounts to that login, use Add accounts on its connection."
                 )
+    if meta.accounts_truncated:
+        return (
+            f"You picked more than {LINK_ACCOUNTS_LIMIT} accounts at {name}, more than the app "
+            "checks against the accounts already linked there, so it can't tell that this login "
+            "isn't linked already. This new link was not completed (its token was not "
+            f"exchanged). Link again with at most {LINK_ACCOUNTS_LIMIT}; Add accounts on the new "
+            "connection adds the others."
+        )
     return None
 
 
