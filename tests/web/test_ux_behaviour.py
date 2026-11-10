@@ -247,3 +247,24 @@ def test_names_wrap_on_phones_instead_of_being_cut():
     assert ".rules-table .table__primary" in rules and ".rules-table .table__secondary" in rules
     assert "white-space: normal" in categories and "white-space: normal" in rules
     assert re.search(r"\.table-wrap > \.rules-table \{\s*min-width: 0;", rules)
+
+
+def declarations(css: str, selector: str) -> list[str]:
+    """The declarations of every rule in ``css`` whose selector list names ``selector``."""
+    return [body for sel, body in css_rules(css) if selector in (s.strip() for s in sel.split(","))]
+
+
+def test_the_trends_grid_keeps_names_inside_their_sticky_column_on_phones():
+    """ux-1: the months of Trends' Every month grid scroll under its sticky first column. On a
+    phone that column is 8.5rem wide, so a long category badge ends in an ellipsis inside the
+    cell's padding (it is as wide as the cell's content at most, never a fixed width), the Net
+    row's note takes a line of its own, and the cell clips anything else: nothing it holds
+    prints over the amounts at rest or while they scroll under it."""
+    css = source("css/pages/trends.css")
+    phones = narrow_rules(css)
+    names = declarations(phones, ".trends-grid .trends-grid__name")
+    assert any("overflow: hidden" in body for body in names)
+    assert any("display: block" in body for body in declarations(phones, ".trends-grid__note"))
+    badges = [body for sel, body in css_rules(css) if ".trends-grid__name .cat" in sel]
+    assert not any(re.search(r"max-width:\s*[\d.]+(?:rem|px)", body) for body in badges)
+    assert any("max-width: 100%" in body for body in declarations(source("css/app.css"), ".cat"))
