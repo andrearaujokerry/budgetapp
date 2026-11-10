@@ -623,8 +623,10 @@ exception: rules never apply to a bank row Plaid codes
 rows, where step 0 shields payments, could otherwise match the payment's ACH text on checking and
 count the card's charges twice; the row keeps its bank mapping, and a category set on the row
 itself still wins. The refund rule applies as on cards. Plaid's `transaction_code` is mostly
-empty for US banks, so bank rows are classified by the PFC and the text. Anything not on a bank
-account (a card, the manual CSV account, an account Plaid hasn't typed yet) is a card.
+empty for US banks, so bank rows are classified by the PFC; the text counts only through the
+owner's rules (no built-in text test, unlike step 0 on cards: final review money-2). Anything
+not on a bank account (a card, the manual CSV account, an account Plaid hasn't typed yet) is a
+card.
 Re-applying rules (CAT-4) follows the same rules for bank rows. The categories (Paycheck,
 Interest, Other Income, Transfers, Cash & ATM) and the mappings come from migration
 `0005_bank_categories`, which only adds: a category whose name is taken keeps its kind, and a
