@@ -1331,6 +1331,65 @@ class TestConnection:
         assert check.title == "The last sync of American Express failed (INVALID_API_KEYS)"
         assert check.fix.startswith("./run setup --keys-only")
 
+    @pytest.mark.parametrize(
+        ("code", "fix"),
+        [
+            (
+                "ACCESS_TOKEN_MISSING",
+                "Re-enter its saved token: ./run setup --env production --access-token, then "
+                "Connection page → Sync now",
+            ),
+            (
+                "KEYCHAIN_APPROVAL_NEEDED",
+                "Run ./run doctor in Terminal and click Always Allow when macOS asks, then "
+                "Connection page → Sync now",
+            ),
+            (
+                "INVALID_ACCESS_TOKEN",
+                "./run setup --keys-only with the client ID and Production secret of the Plaid "
+                "team that linked it, then Connection page → Sync now",
+            ),
+            (
+                "ITEM_NOT_FOUND",
+                "None in the app: Plaid removed this connection, so Reconnect can't repair it and "
+                "it can't sync again; the data already here stays (docs/reconnecting.md)",
+            ),
+            ("INSTITUTION_DOWN", "Connection page → Sync now; see the log if it repeats"),
+            ("INTERNAL", "Connection page → Sync now; see the log if it repeats"),
+        ],
+        ids=["missing-token", "keychain", "token-refused", "removed", "bank-down", "internal"],
+    )
+    def test_the_fix_of_a_failed_sync_depends_on_its_code(self, prod, db, freeze_today, code, fix):
+        """Final review 3 ops-5: every failed sync was sent to Sync now, which can't bring back a
+        missing token, approve Keychain access, correct the keys or restore a connection Plaid
+        removed (and for a missing token the Keychain section said otherwise for the same bank).
+        Sync now stays the fix for failures that clear up by themselves."""
+        freeze_today(now=NOW)
+        bank = make_item(
+            db,
+            institution_id="ins_109511",
+            institution_name="Tartan Bank",
+            consented_products=["transactions"],
+            liabilities_status=None,
+            status="error",
+            error_code=code,
+        )
+        make_bank_account(db, bank, name="Checking")
+        (check,) = [c for c in prod.run(doctor.check_connection) if c.status == WARN]
+        assert check.title == f"The last sync of Tartan Bank failed ({code})"
+        assert check.fix == fix
+
+    def test_in_the_sandbox_the_fixes_name_its_commands(self, dr, db, freeze_today):
+        freeze_today(now=NOW)
+        for code in ("ACCESS_TOKEN_MISSING", "INVALID_ACCESS_TOKEN"):
+            make_item(db, status="error", error_code=code, liabilities_status="ok")
+        fixes = [c.fix for c in dr.run(doctor.check_connection) if c.status == WARN]
+        assert fixes == [
+            "./run sandbox-link makes a new test connection",
+            "./run setup --keys-only with the client ID and Sandbox secret of the Plaid team "
+            "that linked it, then Connection page → Sync now",
+        ]
+
 
 # =========================================================================== the command
 
