@@ -152,6 +152,20 @@ def test_the_sandbox_names_a_test_bank_that_isnt_linked_yet(db, client):
         assert "unless you tick" not in tools
 
 
+def test_the_different_login_choice_is_named_by_its_label_alone(client):
+    """ux-7: the dialog's decision point is read as "A different login at a bank I've already
+    linked", checkbox; its help is read once, as the description, not inside the name too."""
+    html = page(client)
+    control = re.search(r'<input id="link-different-login"[^>]*>', html).group(0)
+    assert 'aria-labelledby="link-different-login-label"' in control
+    assert 'aria-describedby="link-different-login-help"' in control
+    name = re.search(r'<span id="link-different-login-label">(.*?)</span>', html).group(1)
+    assert text(name) == "A different login at a bank I've already linked"
+    help_text = re.search(r'<span class="check__help" id="link-different-login-help">(.*?)</span>',
+                          html).group(1)  # fmt: skip
+    assert text(help_text).startswith("For example someone else's login at the same bank.")
+
+
 def test_production_shows_the_checklist_and_confirms_the_one_time_link(prod_client):
     response = prod_client.get("/connection")
     html = main(page(prod_client))

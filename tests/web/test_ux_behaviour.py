@@ -268,3 +268,26 @@ def test_the_trends_grid_keeps_names_inside_their_sticky_column_on_phones():
     badges = [body for sel, body in css_rules(css) if ".trends-grid__name .cat" in sel]
     assert not any(re.search(r"max-width:\s*[\d.]+(?:rem|px)", body) for body in badges)
     assert any("max-width: 100%" in body for body in declarations(source("css/app.css"), ".cat"))
+
+
+# --------------------------------------------------------------------------- forms.html
+
+
+def test_a_checkbox_with_help_is_named_by_its_label_alone():
+    """ux-7: the <label> of a checkbox or switch wraps its help too (one click target, the
+    layout Settings and the dialogs use), so without more the help would be read twice: as part
+    of the name and again as the description. aria-labelledby names the control by its label
+    text alone; aria-describedby reads the help once, as its description."""
+    from budgetapp.web.templating import templates
+
+    source = '{% import "components/forms.html" as form %}'
+    for macro in ("checkbox_field", "switch_field"):
+        call = f'{{{{ form.{macro}("x", "Also apply", help="Edits stay.", id="t") }}}}'
+        html = templates.env.from_string(source + call).render()
+        control = re.search(r"<input[^>]*>", html).group(0)
+        assert 'aria-labelledby="t-label"' in control and 'aria-describedby="t-help"' in control
+        assert re.search(r'<span id="t-label">Also apply</span>', html), html
+        assert '<span class="check__help" id="t-help">Edits stay.</span>' in html
+        assert html.index("</label>") > html.index('id="t-help"')  # still one click target
+    plain = templates.env.from_string(source + '{{ form.checkbox_field("x", "Also", id="t") }}')
+    assert "aria-labelledby" not in plain.render() and "aria-describedby" not in plain.render()
