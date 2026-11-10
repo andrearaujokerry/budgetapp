@@ -54,11 +54,12 @@ Details:
   six hours.
 - **Large charges** are checked for new spending from a sync that is strictly over your amount
   (a charge in a spending category, on a card or from a bank account, such as rent or an ATM
-  withdrawal; paying your card from checking, moving money between your own accounts and income
-  never count), dated at most 7 days before the previous successful sync (so the first sync after
-  a break, such as a trip with the Mac off or a reconnect fixed late, still announces the break's
-  charges), and not while Plaid sends your history right after linking. Each charge is announced
-  once: a pending charge that posts isn't announced a second time. A pending charge at or under
+  withdrawal; paying your card from checking, transfers, also the payments to people that Plaid
+  files as transfers (a Zelle payment, a wire), and income never count), dated at most 7 days
+  before the previous successful sync (so the first sync after a break, such as a trip with the
+  Mac off or a reconnect fixed late, still announces the break's charges), and not while Plaid
+  sends your history right after linking. Each charge is announced once: a pending charge that
+  posts isn't announced a second time. A pending charge at or under
   your amount that goes above it (a tip or hotel incidentals added when it posts, or Plaid
   raising the pending amount) is announced once, when it goes above. CSV imports never raise
   one.

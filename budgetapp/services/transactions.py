@@ -19,7 +19,8 @@
 * Accounts (W3-PLAN MON-4): the filter lists every account, cards and bank accounts, named by
   :func:`account_label` (institution, name and last digits), and so do the details and the
   export. A row in a ``transfer`` category is a card payment (Card Payments) or a transfer
-  between your own accounts: muted, never spending, never split.
+  (Plaid files moves between your own accounts and payments to or from other people alike as
+  transfers, W3-PLAN C3): muted, never spending, never split.
 """
 
 from __future__ import annotations
@@ -895,7 +896,7 @@ class TransactionRow:
     @property
     def transfer_label(self) -> str:
         """The badge of a row in a ``transfer`` category: a card payment, else a transfer
-        between your own accounts (MON-1)."""
+        (MON-1)."""
         return "Payment" if self.category.is_card_payments else "Transfer"
 
     @property
@@ -1403,8 +1404,8 @@ def validate_splits(
             )
         else:
             message = (
-                "A transfer between your accounts can't be split. If this isn't a transfer, "
-                "change its category first."
+                "A transfer can't be split. If this one is really spending (a payment to "
+                "someone, say), change its category first."
             )
         raise TransactionEditError({"parts": message})
     if len(parts) < 2:

@@ -285,6 +285,14 @@ Check how its money is filed. Each transaction's details say how it counts (**Co
   rent apart from what you buy for your home).
 - **A large-charge alert amount now covers spending from checking too**, so rent above it alerts
   every month.
+- **Transfers aren't only between your own accounts.** Plaid also files payments to people (Zelle,
+  Venmo, Cash App), wires, and check or cash deposits as transfers, and a transfer counts as
+  neither spending nor income. Filter Transactions by the Transfers category and make a rule for
+  each kind that is really spending or income (for example a description containing ZELLE PAYMENT
+  TO and the person's name, with the category that payment belongs in).
+- **Link every card you pay from checking.** A payment from checking to a card the app doesn't
+  have is filed as a card payment too, so that card's spending counts nowhere. If you'd rather not
+  link the card, set each payment's category yourself (rules don't change card payments).
 - **Paychecks, interest and other money in** show as income on the Dashboard and Trends
   ([Using the app](using-the-app.md#dashboard)).
 

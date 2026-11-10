@@ -690,8 +690,14 @@ def doc_section(path: Path, heading: str) -> str:
 
 
 #: What going-live's checklist after the first bank sync must tell the owner, per final-review
-#: finding: what changes for budgets and alerts (reqs-2).
+#: finding: what changes for budgets and alerts (reqs-2); that Transfers also holds payments to
+#: and from other people, and that a card paid from checking must be linked (money-1).
 AFTER_THE_FIRST_BANK_SYNC = {
+    "money-1": (
+        "payments to people (Zelle, Venmo, Cash App), wires, and check or cash deposits",
+        "Link every card you pay from checking.",
+        "rules don't change card payments",
+    ),
     "reqs-2": (
         "Your overall target and every budget, annual and rollover ones included",
         "a car loan in Transportation and a student loan in Education",

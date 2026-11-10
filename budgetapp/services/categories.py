@@ -87,7 +87,10 @@ KIND_LABELS: dict[str, str] = {
 KIND_HELP: dict[str, str] = {
     "expense": "Counts toward budgets and spending totals. Refunds in it reduce its spending.",
     "income": "Not spending: paychecks, interest, cash back and other money coming in.",
-    "transfer": "Not spending: paying a card and moving money between your accounts.",
+    "transfer": (
+        "Not spending or income: card payments, money moved between your accounts and anything "
+        "else Plaid files as a transfer."
+    ),
 }
 #: The theme-aware palette slots (``components/README.md`` §3.3) and the neutral grey.
 PALETTE: tuple[str, ...] = tuple(f"cat-{n}" for n in range(1, 17))

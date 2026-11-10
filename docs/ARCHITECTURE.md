@@ -302,7 +302,7 @@ nulling `item_id`.
 | column | type | notes |
 | --- | --- | --- |
 | name | text not null | unique on `lower(name)` |
-| kind | text not null default 'expense' | `expense` (spending) \| `income` (paychecks, interest, other income, credits/rewards: not spending) \| `transfer` (card payments, transfers between your own accounts: not spending) |
+| kind | text not null default 'expense' | `expense` (spending) \| `income` (paychecks, interest, other income, credits/rewards: not spending) \| `transfer` (card payments, and what Plaid codes as a transfer on a bank account: moves between your own accounts, also payments to and from other people; neither spending nor income) |
 | system_key | text unique, null | `uncategorized` (always `expense`), `card_payments` (always `transfer`) — cannot be merged away, hidden or change kind (CHECK) |
 | is_hidden | bool not null default false | hidden from pickers and budget lists; transactions still count |
 | color | text | palette slot `cat-1` … `cat-16` (theme-aware; the seeded categories use these), `other` (neutral grey), or a custom `#rrggbb` |
@@ -507,8 +507,9 @@ period". It reads `app_settings`: the date basis (posting date in statement mode
 `spend_date = COALESCE(authorized_date, date)` in calendar mode) and
 `include_pending_in_budgets`, and sums `v_allocations.amount` over allocations whose category
 `kind = 'expense'`, per category. Charges add; refunds (negative amounts in an expense
-category) subtract from it (TXN-3). Card payments and transfers between your own accounts
-(`kind = 'transfer'`) and income (`kind = 'income'`) never count. Every account counts the same:
+category) subtract from it (TXN-3). Card payments and transfers (`kind = 'transfer'`: moves
+between your own accounts and whatever else Plaid codes as a transfer, payments to other people
+included) and income (`kind = 'income'`) never count. Every account counts the same:
 rent, debit purchases and ATM withdrawals from checking are spending like card charges. The
 Budgets page, every "this period" widget on the dashboard,
 and the budget alerts all call it. `spending.periods_spending(session, periods)` is the same
@@ -535,8 +536,9 @@ exactly what they did before.
 
 **Net = income − spending**, where spending is `period_spending`'s total (every expense
 category, annual-budget ones included) or the month's `monthly_spending` total. Transfers (kind
-`transfer`: card payments from either side, moves between own accounts) are neither, so for any
-period `spending − income + transfers` is the plain sum of every counted row's amount
+`transfer`: card payments from either side, and Plaid's transfers, between own accounts or to
+and from other people) are neither, so for any period `spending − income + transfers` is the
+plain sum of every counted row's amount
 (`tests/test_spending.py` checks this in both modes, pending on and off). Credits & Rewards is
 income kind, so Amex statement credits are income and stay their own line wherever income is
 broken down (Trends' Every month table).
@@ -580,12 +582,18 @@ For a new transaction:
 in from savings or a deposit that reads like a payment is not forced into Card Payments. Step 3
 tries the `|bank` mappings first (section 5): `INCOME_SALARY` (and PFC v1's `INCOME_WAGES`) →
 Paycheck; `INCOME_INTEREST_EARNED` and `INCOME_DIVIDENDS` → Interest; every other `INCOME` code
-→ Other Income; `TRANSFER_IN` and `TRANSFER_OUT` codes → Transfers, except
-`TRANSFER_OUT_WITHDRAWAL` (ATM and cash) → Cash & ATM (spending);
+→ Other Income; `TRANSFER_IN` and `TRANSFER_OUT` codes → Transfers (Plaid's taxonomy uses them
+for moves between the owner's accounts and also for payments to and from other people, apps and
+wires and for check and cash deposits, so Transfers holds both, neither spending nor income,
+until a rule moves one; the pages and guides say so, and going-live has the owner look through
+Transfers after the first bank sync), except `TRANSFER_OUT_WITHDRAWAL` (ATM and cash) → Cash &
+ATM (spending);
 `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, positive on the bank side, → Card Payments, so a card
 payment from checking that Plaid codes this way is never spending and never counts the card's
 charges twice (one coded `TRANSFER_OUT_*` lands in Transfers, not spending either, but rules
-apply to it; which code Plaid gives such a payment is unverified); any other loan payment is
+apply to it; which code Plaid gives such a payment is unverified; a payment to a card the app
+doesn't have is a card payment too, so that card's spending counts nowhere, and the guides say to
+link every card paid from checking); any other loan payment is
 spending (the car, mortgage, student loan, personal loan and buy-now-pay-later codes keep their
 card category, Transportation, Home, Education, Utilities & Bills and Shopping; `LOAN_PAYMENTS`
 and its other codes → Other); and money a lender deposits (`LOAN_DISBURSEMENTS` codes) → Transfers,

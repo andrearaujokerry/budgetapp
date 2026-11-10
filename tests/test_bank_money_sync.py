@@ -22,7 +22,7 @@ from budgetapp.models import Category, Transaction
 from budgetapp.periods import month_of
 from budgetapp.services import alerts, sync
 from budgetapp.services.events import SyncOutcome
-from budgetapp.services.spending import period_spending
+from budgetapp.services.spending import period_income, period_spending
 from tests.bank_factories import BANK_INSTITUTION_ID, BANK_NAME
 from tests.factories import (
     get_category,
@@ -455,3 +455,38 @@ def test_the_first_bank_sync_checks_budgets_but_announces_no_large_charge(bank, 
     assert "Home: over budget" in notifier.titles
     assert "Over your overall budget" in notifier.titles
     assert not [t for t in notifier.titles if t.startswith("$")]  # no large charge, not even rent
+
+
+def test_payments_to_people_are_transfers_until_a_rule_moves_them(bank, db):
+    """Final review money-1 (W3-PLAN C3), as using-the-app and going-live now say: Plaid's
+    TRANSFER_* codes also cover payments to and from other people, apps and wires, so those rows
+    land in Transfers, neither spending nor income, until a rule of the owner's moves them."""
+    make_rule(db, get_category(db, "Services"), description_pattern="ZELLE PAYMENT TO JORDAN")
+    db.commit()
+    day = today() - dt.timedelta(days=2)
+    apps = "TRANSFER_OUT_TRANSFER_OUT_FROM_APPS"
+    rows = {
+        "zelle": ("300.00", "ZELLE PAYMENT TO JORDAN LEE", "TRANSFER_OUT", apps),
+        "venmo": ("45.00", "VENMO PAYMENT 1023", "TRANSFER_OUT", apps),
+        "wire": ("900.00", "OUTGOING WIRE BAY BUILDERS", "TRANSFER_OUT", "TRANSFER_OUT_WIRE"),
+        "check": ("-500.00", "MOBILE CHECK DEPOSIT", "TRANSFER_IN", "TRANSFER_IN_DEPOSIT"),
+    }
+    for key, (amount, name, primary, detailed) in rows.items():
+        bank.add(
+            transaction_id=key,
+            amount=amount,
+            date=day,
+            name=name,
+            pfc_primary=primary,
+            pfc_detailed=detailed,
+        )
+    assert bank.sync().status == "success"
+    assert {key: bank.category(key) for key in rows} == {
+        "zelle": ("Services", "rule"),
+        "venmo": ("Transfers", "plaid"),
+        "wire": ("Transfers", "plaid"),
+        "check": ("Transfers", "plaid"),
+    }
+    month = month_of(day)
+    assert period_spending(db, month).total == Decimal("300.00")  # only what the rule moved
+    assert period_income(db, month).total == Decimal("0.00")
