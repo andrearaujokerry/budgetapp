@@ -96,7 +96,7 @@
 {%- else %} Type this statement's Previous Balance to see the app's New Balance.{% endif %}
 {%- if detail.pending.count %} {{ detail.pending.count|pluralize("pending charge") }} ({{ detail.pending.total|money }}) dated in this period {{ "isn't" if detail.pending.count == 1 else "aren't" }} counted until {{ "it posts" if detail.pending.count == 1 else "they post" }}.{% endif %}</p>
 {% endset %}
-{% call ui.card("Summary", subtitle="Laid out like the box at the top of your Amex statement.", flush=true, footer=footer, id="summary") %}
+{% call ui.card("Summary", subtitle="Laid out like the summary box at the top of your card statement.", flush=true, footer=footer, id="summary") %}
 <div class="table-wrap">
 <table class="table table--compact stmt-box">
 <thead><tr>
@@ -123,10 +123,10 @@
 {%- if cycle.is_estimate_open %}
 {% set edit_subtitle %}Its statement isn't issued yet.{% endset %}
 {% call ui.card("Your statement", subtitle=edit_subtitle, id="edit", class="no-print") %}
-<p class="stmt-later">You can type this statement's numbers once it closes, around {{ cycle.closing_date|date_long }} (the date is an estimate). If Amex closes it on another day, add the statement by the date printed on it on the <a href="/statements?account={{ account.id }}#add-statement">Statements page</a>.</p>
+<p class="stmt-later">You can type this statement's numbers once it closes, around {{ cycle.closing_date|date_long }} (the date is an estimate). If the card company closes it on another day, add the statement by the date printed on it on the <a href="/statements?account={{ account.id }}#add-statement">Statements page</a>.</p>
 {% endcall %}
 {%- else %}
-{% set edit_subtitle %}Type the numbers from the summary box of your Amex statement (PDF). Leave a box empty if you don't have that number.{% endset %}
+{% set edit_subtitle %}Type the numbers from the summary box of your card statement (PDF). Leave a box empty if you don't have that number.{% endset %}
 {% call ui.card("Your statement", subtitle=edit_subtitle, id="edit", class="no-print") %}
 <form class="form" method="post" action="{{ url }}">
 <div class="form-row">
@@ -139,7 +139,7 @@
 {%- for name, label in reported_fields %}
 {%- if name == "previous_balance" %}{% set help = "A credit balance (CR) is negative." %}
 {%- elif name == "payments_credits" %}{% set help = "As printed, with or without the minus." %}
-{%- elif name == "new_balance" and cycle.reported.new_balance_source == "liabilities" %}{% set help = "From Amex through Plaid." %}
+{%- elif name == "new_balance" and cycle.reported.new_balance_source == "liabilities" %}{% set help = "From the card company through Plaid." %}
 {%- else %}{% set help = none %}{% endif %}
 {#- No "0.00" placeholder: an empty box means "not typed", never $0.00. -#}
 {{ form.money_field(name, label, value=form_values.get(name), placeholder="", allow_negative=name in ["previous_balance", "payments_credits", "new_balance"], error=errors.get(name), help=help, id="f-" ~ name|replace("_", "-")) }}

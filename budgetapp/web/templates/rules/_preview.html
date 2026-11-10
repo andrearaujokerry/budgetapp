@@ -2,7 +2,7 @@
     (routes/rules._preview_state): blank, invalid (with the messages) or ready. -#}
 {%- import "components/ui.html" as ui -%}
 {%- if pv.state == "blank" %}
-{{ ui.empty_state("Nothing to match yet", "Fill in a merchant, a description, an amount or a card: the past transactions the rule matches show up here.", icon="search", compact=true) }}
+{{ ui.empty_state("Nothing to match yet", "Fill in a merchant, a description, an amount or an account: the past transactions the rule matches show up here.", icon="search", compact=true) }}
 {%- elif pv.state == "invalid" %}
 {{ ui.empty_state("Fix the form to see the preview", none, icon="alert", compact=true, tone="warn") }}
 <ul class="preview-errors">

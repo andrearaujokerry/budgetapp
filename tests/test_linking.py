@@ -22,7 +22,9 @@ from budgetapp.models import Account, PlaidItem, TransactionTombstone
 from budgetapp.plaid_gateway import PlaidError
 from budgetapp.services import linking, reconcile, userstate
 from budgetapp.services import status as status_service
+from budgetapp.services import sync as sync_service
 from budgetapp.services.linking import LinkFailed, LinkMetadata, LinkRefused
+from tests.bank_factories import make_bank_account
 from tests.factories import (
     get_category,
     make_account,
@@ -35,6 +37,13 @@ from tests.fake_plaid import FakePlaidGateway
 
 NOW = dt.datetime(2026, 10, 20, 15, 0, tzinfo=dt.UTC)
 AMEX = {"institution": {"institution_id": "ins_10", "name": "American Express"}}
+TARTAN = {"institution": {"institution_id": "ins_109511", "name": "Tartan Bank"}}
+LEGACY = app_secrets.LEGACY_PRODUCTION_TOKEN
+
+
+def prod_key(item_id: str) -> str:
+    """Where a production Item's token lives (C6)."""
+    return app_secrets.production_access_token_key(item_id)
 
 
 @pytest.fixture(autouse=True)
@@ -97,20 +106,27 @@ def test_a_production_link_token_sets_the_link_in_progress_marker(
     assert len(prod_plaid.calls_to("create_link_token")) == 1
 
 
-def test_production_never_offers_a_second_link(db, production, prod_plaid, secrets):
-    make_item(db)
-    with pytest.raises(LinkRefused, match="already linked"):
-        linking.new_link_token(db, prod_plaid, production, store=secrets)
-    assert prod_plaid.calls_to("create_link_token") == []
-    assert app_secrets.get_link_in_progress(store=secrets) is None
+def test_production_offers_another_link_while_connections_exist(
+    db, production, prod_plaid, secrets
+):
+    """BANK-1: any bank can be linked, so connections that exist never block a new link (the
+    duplicate check happens when Plaid's window closes, before the exchange)."""
+    amex = make_item(db, plaid_item_id="item-amex")
+    app_secrets.store_access_token(production, "item-amex", "access-production-a", store=secrets)
+    link = linking.new_link_token(db, prod_plaid, production, store=secrets)
+    assert link.attempt and len(prod_plaid.calls_to("create_link_token")) == 1
+    assert linking.connections_used(db, production, store=secrets) == 1
+    assert amex.id
 
 
-@pytest.mark.parametrize("trace", ["token", "marker", "recovery file"])
+@pytest.mark.parametrize("trace", ["v1 token", "orphan", "marker", "recovery file"])
 def test_production_refuses_while_any_trace_of_a_link_exists(
     db, production, prod_plaid, secrets, trace
 ):
-    if trace == "token":
-        secrets.set(app_secrets.PRODUCTION_ACCESS_TOKEN, "access-production-existing")
+    if trace == "v1 token":  # a v1 token and no Item row: whose is it? Re-attach first
+        secrets.set(LEGACY, "access-production-existing")
+    elif trace == "orphan":  # a token of its own whose Item row is gone
+        app_secrets.store_access_token(production, "lost", "access-production-l", store=secrets)
     elif trace == "marker":
         app_secrets.set_link_in_progress(store=secrets)
     else:
@@ -312,7 +328,9 @@ def test_a_public_token_used_twice_is_refused_by_plaid(
     public = fake_plaid.public_token_for(fake_item)
     linking.exchange(session_factory, fake_plaid, secrets, sandbox, public, AMEX)
     with pytest.raises(LinkFailed, match="Nothing was saved"):
-        linking.exchange(session_factory, fake_plaid, secrets, sandbox, public, AMEX)
+        linking.exchange(
+            session_factory, fake_plaid, secrets, sandbox, public, AMEX, duplicate_check=False
+        )
 
 
 def test_saving_the_same_item_twice_completes_the_existing_row(db, session_factory):
@@ -323,13 +341,15 @@ def test_saving_the_same_item_twice_completes_the_existing_row(db, session_facto
     assert len(items(db)) == 1
 
 
-def test_production_never_exchanges_while_an_item_exists(
+def test_production_never_exchanges_a_bank_that_is_already_linked(
     db, session_factory, production, prod_plaid, secrets
 ):
+    """BANK-3: the same institution again is refused before the exchange (nothing is used),
+    and this attempt's marker is cleared."""
     attempt = linking.new_link_token(db, prod_plaid, production, store=secrets).attempt
-    make_item(db, institution_id="ins_10")  # e.g. restored meanwhile
+    make_item(db, institution_id="ins_10")  # e.g. linked in another tab meanwhile
     fake_item = prod_plaid.add_item(item_id="second")
-    with pytest.raises(LinkRefused, match="already linked"):
+    with pytest.raises(LinkRefused, match="American Express is already linked"):
         linking.exchange(
             session_factory,
             prod_plaid,
@@ -359,21 +379,25 @@ def test_a_production_link_stores_the_one_token_and_clears_the_marker(
         attempt=attempt,
     )
     assert result.plaid_item_id == "the-amex"
-    assert secrets.values[app_secrets.PRODUCTION_ACCESS_TOKEN] == fake_item.access_token
+    assert secrets.values[prod_key("the-amex")] == fake_item.access_token  # C6: its own key
+    assert LEGACY not in secrets.values
+    assert app_secrets.production_item_ids(store=secrets) == ["the-amex"]
     assert app_secrets.get_link_in_progress(store=secrets) is None
-    assert app_secrets.production_link_blockers(production, store=secrets)  # never a second link
+    assert linking.link_blocks(db, production, store=secrets) == ()  # another bank may follow
+    assert linking.connections_used(db, production, store=secrets) == 1
 
 
 def test_a_different_production_token_is_never_replaced(
     db, session_factory, production, prod_plaid, secrets
 ):
-    """The backstop behind the pre-exchange checks: a token that reached Keychain while the
-    exchange ran (say ./run setup --access-token in Terminal) is kept, the new one is parked."""
+    """The backstop behind the pre-exchange checks: a token that reached this Item's Keychain key
+    while the exchange ran (say ./run setup --access-token in Terminal) is kept, the new one is
+    parked."""
     fake_item = prod_plaid.add_item(item_id="new")
     real = prod_plaid.exchange_public_token
 
     def exchange_while_setup_runs(public_token):
-        secrets.set(app_secrets.PRODUCTION_ACCESS_TOKEN, "access-production-older")
+        secrets.set(prod_key("new"), "access-production-older")
         return real(public_token)
 
     prod_plaid.exchange_public_token = exchange_while_setup_runs  # type: ignore[method-assign]
@@ -386,7 +410,7 @@ def test_a_different_production_token_is_never_replaced(
             prod_plaid.public_token_for(fake_item),
             AMEX,
         )
-    assert secrets.values[app_secrets.PRODUCTION_ACCESS_TOKEN] == "access-production-older"
+    assert secrets.values[prod_key("new")] == "access-production-older"
     assert items(db) == []
     assert app_secrets.unsaved_production_tokens(production)  # the new token is in a recovery file
 
@@ -578,6 +602,7 @@ def linked_item(db, fake_plaid, secrets, settings, **values):
 
 def test_update_mode_tokens_reuse_the_items_access_token(db, fake_plaid, secrets, settings):
     fake_item, item = linked_item(db, fake_plaid, secrets, settings)
+    make_account(db, item)  # a card: statement details apply
     linking.update_link_token(db, fake_plaid, item, store=secrets, settings=settings)
     linking.update_link_token(
         db, fake_plaid, item.id, add_liabilities=True, store=secrets, settings=settings
@@ -611,7 +636,7 @@ def test_completing_update_mode_marks_the_item_healthy_and_reads_consent(
         session_factory, fake_plaid, secrets, settings, item.id, metadata={"link_session_id": "s"}
     )
     assert result == linking.UpdateResult(
-        item.id, "healthy", dt.datetime(2027, 10, 20, tzinfo=dt.UTC), True
+        item.id, "healthy", dt.datetime(2027, 10, 20, tzinfo=dt.UTC), True, "American Express"
     )
     db.expire_all()
     row = db.get(PlaidItem, item.id)
@@ -634,37 +659,55 @@ def test_orphaned_sandbox_items_are_recreated_from_plaid(
     fake_item = fake_plaid.add_item(item_id="orphan")
     app_secrets.store_access_token(settings, "orphan", fake_item.access_token, store=secrets)
     assert linking.orphaned_sandbox_items(db, store=secrets) == ["orphan"]
-    (result,) = linking.recover_orphaned_items(session_factory, fake_plaid, secrets, settings)
+    (result,) = linking.recover_orphaned_items(
+        session_factory, fake_plaid, secrets, settings
+    ).results
     assert (result.plaid_item_id, result.account_count, result.institution_name) == (
         "orphan",
         1,
         "American Express",
     )
     assert linking.orphaned_sandbox_items(db, store=secrets) == []
-    assert linking.recover_orphaned_items(session_factory, fake_plaid, secrets, settings) == []
+    assert (
+        linking.recover_orphaned_items(session_factory, fake_plaid, secrets, settings)
+        == linking.ReattachOutcome()
+    )
 
 
-def test_production_re_attaches_the_saved_token_never_a_new_link(
+def test_production_re_attaches_the_saved_v1_token_never_a_new_link(
     db, session_factory, production, prod_plaid, secrets
 ):
+    """A lost database with the v1 token in Keychain: /item/get names the Item, its row is
+    rebuilt and the token moves to the Item's own key (C6)."""
     fake_item = prod_plaid.add_item(item_id="restored")
-    secrets.set(app_secrets.PRODUCTION_ACCESS_TOKEN, fake_item.access_token)
+    secrets.set(LEGACY, fake_item.access_token)
     assert linking.reattach_available(db, production, store=secrets)
-    (result,) = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    (result,) = linking.recover_orphaned_items(
+        session_factory, prod_plaid, secrets, production
+    ).results
     assert result.plaid_item_id == "restored" and result.created
+    assert secrets.values[prod_key("restored")] == fake_item.access_token
+    assert LEGACY not in secrets.values
     assert not linking.reattach_available(db, production, store=secrets)
     assert prod_plaid.calls_to("create_link_token") == []
     assert prod_plaid.calls_to("exchange_public_token") == []
-    assert linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production) == []
+    assert (
+        linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+        == linking.ReattachOutcome()
+    )
 
 
 def test_re_attaching_a_token_plaid_rejects_changes_nothing(
     db, session_factory, production, prod_plaid, secrets
 ):
-    secrets.set(app_secrets.PRODUCTION_ACCESS_TOKEN, "access-production-dead")
-    with pytest.raises(LinkFailed, match="INVALID_ACCESS_TOKEN"):
-        linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
-    assert items(db) == []
+    secrets.set(LEGACY, "access-production-dead")
+    outcome = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    assert (outcome.results, outcome.removed) == ((), ())
+    assert outcome.problems == (
+        "Plaid didn't recognise a saved connection (INVALID_ACCESS_TOKEN), so it wasn't "
+        "re-attached.",
+    )
+    assert items(db) == [] and secrets.values[LEGACY] == "access-production-dead"
 
 
 # --------------------------------------------------------------------------- Sandbox test Items
@@ -702,20 +745,22 @@ def test_sandbox_test_items_are_refused_in_production(
 # --------------------------------------------------------------------------- pre-flight
 
 
-def test_preflight_finds_american_express_with_liabilities(fake_plaid, production):
+def test_preflight_checks_that_plaid_answers_without_singling_out_a_bank(fake_plaid, production):
+    """BANK-2: the checklist and the live check are no longer about American Express."""
     result = linking.preflight(fake_plaid, production)
-    assert [c.key for c in result.checklist] == ["use_case", "amex_oauth"]
+    assert [c.key for c in result.checklist] == ["use_case", "oauth"]
     assert all(c.href.startswith("https://dashboard.plaid.com/") for c in result.checklist)
-    assert result.institution.status == "ok" and result.institution.oauth is True
+    assert "American Express" not in " ".join(c.label + c.detail for c in result.checklist)
+    assert "no action is needed" in result.checklist[1].detail
+    assert result.institution.status == "ok"
+    assert "Production keys" in result.institution.message
     assert fake_plaid.calls_to("search_institutions") == [
-        {"query": "American Express", "products": ("liabilities",)}
+        {"query": "Bank", "products": ("transactions",)}
     ]
 
 
-def test_preflight_reports_a_missing_institution_or_a_failed_search(fake_plaid, production):
-    fake_plaid.institutions = [
-        i for i in fake_plaid.institutions if i["institution_id"] != "ins_10"
-    ]
+def test_preflight_reports_an_empty_answer_or_a_failed_search(fake_plaid, production):
+    fake_plaid.institutions = []
     assert linking.preflight(fake_plaid, production).institution.status == "missing"
     fake_plaid.queue_error("search_institutions", fake_plaid.transport_error())
     failed = linking.preflight(fake_plaid, production).institution
@@ -789,9 +834,10 @@ def test_the_overview_before_a_production_link(db, production, secrets):
     blocked = linking.connection_overview(db, production, store=secrets)
     assert not blocked.can_link and len(blocked.link_blockers) == 1
     app_secrets.clear_link_in_progress(store=secrets)
-    secrets.set(app_secrets.PRODUCTION_ACCESS_TOKEN, "access-production-kept")
+    secrets.set(LEGACY, "access-production-kept")
     reattach = linking.connection_overview(db, production, store=secrets)
     assert reattach.reattach_available and not reattach.can_link
+    assert reattach.connections_used == 1 and reattach.connections_left == 9
 
 
 def test_the_overview_of_a_linked_item(db, settings, secrets):
@@ -851,16 +897,20 @@ def test_a_late_exit_of_an_older_attempt_leaves_the_newer_marker(
     assert linking.link_exited(db, production, store=secrets, event="EXIT", attempt=second)
 
 
-@pytest.mark.parametrize("trace", ["keychain token", "recovery file"])
+@pytest.mark.parametrize("trace", ["keychain token", "v1 token", "recovery file"])
 def test_exchange_is_refused_before_plaid_while_any_trace_of_a_connection_exists(
     db, session_factory, production, prod_plaid, secrets, trace
 ):
     """A production token in Keychain without an Item row (a crash between the Keychain write and
-    the commit, or a restored database), or one waiting in a recovery file, IS a connection:
-    exchanging another public token would use a second of the 10."""
+    the commit, or a restored database), or one waiting in a recovery file, IS a connection the
+    database doesn't show: its bank is unknown, so another link could duplicate it. Re-attach or
+    store it first."""
     if trace == "keychain token":
-        secrets.set(app_secrets.PRODUCTION_ACCESS_TOKEN, "access-production-orphan")
-        expected = "Keychain already holds"
+        app_secrets.store_access_token(production, "orphan", "access-production-o", store=secrets)
+        expected = "doesn't show"
+    elif trace == "v1 token":
+        secrets.set(LEGACY, "access-production-orphan")
+        expected = "doesn't show"
     else:
         app_secrets.write_access_token_recovery_file(production, "item-x", "access-production-x")
         expected = "recovery file"
@@ -876,7 +926,7 @@ def test_exchange_is_refused_before_plaid_while_any_trace_of_a_connection_exists
         )
     assert prod_plaid.calls_to("exchange_public_token") == []
     assert items(db) == []
-    if trace == "keychain token":
+    if trace != "recovery file":
         assert app_secrets.unsaved_production_tokens(production) == []
 
 
@@ -971,9 +1021,9 @@ def test_a_crash_before_the_item_commit_never_lets_a_second_exchange_through(
             prod_plaid.public_token_for(item_b),
             AMEX,
         )
-    assert secrets.values[app_secrets.PRODUCTION_ACCESS_TOKEN] == item_b.access_token
+    assert secrets.values[prod_key("item-b")] == item_b.access_token
     assert items(db) == []
-    with pytest.raises(LinkRefused, match="Keychain already holds"):
+    with pytest.raises(LinkRefused, match="doesn't show"):
         linking.exchange(
             session_factory,
             prod_plaid,
@@ -993,9 +1043,7 @@ def test_a_token_nothing_could_save_is_handed_back_once_and_never_in_the_message
     the caller shows it once. The marker stays, so linking stays paused meanwhile."""
     fake_item = prod_plaid.add_item(item_id="amex")
     attempt = linking.new_link_token(db, prod_plaid, production, store=secrets).attempt
-    secrets.fail_on[("set", app_secrets.PRODUCTION_ACCESS_TOKEN)] = app_secrets.SecretStoreError(
-        "locked"
-    )
+    secrets.fail_on[("set", prod_key("amex"))] = app_secrets.SecretStoreError("locked")
 
     def unwritable(*_args, **_kwargs):
         raise OSError("read-only")
@@ -1017,6 +1065,101 @@ def test_a_token_nothing_could_save_is_handed_back_once_and_never_in_the_message
     assert "password manager" in message and "--access-token" in message
     assert "show it to the user" not in message  # no developer instructions for the user
     assert app_secrets.get_link_in_progress(store=secrets) is not None
+    assert items(db) == []
+
+
+@pytest.mark.parametrize("failure", ["keychain refuses", "another token is saved there"])
+def test_a_token_parked_in_a_recovery_file_frees_its_link_marker(
+    db, session_factory, production, prod_plaid, secrets, failure
+):
+    """Final review (ops-4): the unsaved recovery file keeps new links away by itself, so the
+    attempt's marker goes. It used to stay for 4 hours, so after the owner stored the token and
+    re-attached it, the page still said a link "may still be in progress"."""
+    attempt = linking.new_link_token(db, prod_plaid, production, store=secrets).attempt
+    db.commit()
+    tartan = prod_plaid.add_item(
+        item_id="item-tartan",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking()],
+    )
+    if failure == "keychain refuses":
+        secrets.fail_on[("set", prod_key("item-tartan"))] = app_secrets.SecretStoreError("no")
+    else:
+        secrets.values[prod_key("item-tartan")] = "access-production-older"
+    with pytest.raises(LinkFailed):
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(tartan),
+            link_meta(TARTAN["institution"], ("Checking", "0001")),
+            attempt=attempt,
+        )
+    assert app_secrets.get_link_in_progress(store=secrets) is None
+    (reason,) = linking.link_blocks(db, production, store=secrets)
+    assert "recovery file" in reason and "may still be in progress" not in reason
+    if failure == "keychain refuses":  # ./run setup --env production --access-token, Re-attach
+        del secrets.fail_on[("set", prod_key("item-tartan"))]
+        app_secrets.store_access_token(
+            production, "item-tartan", tartan.access_token, store=secrets
+        )
+        assert app_secrets.mark_recovery_saved(production, tartan.access_token)
+        linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+        assert linking.link_blocks(db, production, store=secrets) == ()
+
+
+def test_an_item_id_of_other_printable_characters_links_like_any_other(
+    db, session_factory, production, prod_plaid, secrets
+):
+    """Final review (security-1): such an id is stored under its own Keychain name, so the
+    connection works (no recovery file that setup --access-token would refuse)."""
+    fake_item = prod_plaid.add_item(
+        item_id="Ed6bjNrD.LJfGvZW=wnkQ", institution_id="ins_109511", institution_name="Tartan Bank"
+    )
+    result = linking.exchange(
+        session_factory,
+        prod_plaid,
+        secrets,
+        production,
+        prod_plaid.public_token_for(fake_item),
+        TARTAN,
+    )
+    assert result.created and result.plaid_item_id == "Ed6bjNrD.LJfGvZW=wnkQ"
+    assert secrets.values[prod_key("Ed6bjNrD.LJfGvZW=wnkQ")] == fake_item.access_token
+    assert app_secrets.unsaved_production_tokens(production) == []
+    (view,) = linking.connection_overview(db, production, store=secrets).items
+    assert view.keychain_item == prod_key("Ed6bjNrD.LJfGvZW=wnkQ")
+
+
+@pytest.mark.parametrize("odd", ["a b", "x" * 257])
+def test_an_item_id_no_keychain_name_can_hold_ends_in_a_recovery_file(
+    db, session_factory, production, prod_plaid, secrets, odd
+):
+    """Final review (security-1): after the exchange (a Trial connection is used) such an Item id
+    escaped as a bare ValueError, leaving the token nowhere and nothing to count or block on."""
+    attempt = linking.new_link_token(db, prod_plaid, production, store=secrets).attempt
+    db.commit()
+    fake_item = prod_plaid.add_item(
+        item_id=odd, institution_id="ins_109511", institution_name="Tartan Bank"
+    )
+    with pytest.raises(LinkFailed) as info:
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(fake_item),
+            TARTAN,
+            attempt=attempt,
+        )
+    (path,) = app_secrets.unsaved_production_tokens(production)
+    assert str(path) in str(info.value) and fake_item.access_token not in str(info.value)
+    assert fake_item.access_token in path.read_text()
+    assert len(prod_plaid.calls_to("exchange_public_token")) == 1
+    assert linking.connections_used(db, production, store=secrets) == 1
+    assert any(str(path) in reason for reason in linking.link_blocks(db, production, store=secrets))
     assert items(db) == []
 
 
@@ -1079,28 +1222,26 @@ def test_an_expired_exchange_says_plainly_that_the_outcome_is_unknown(
     assert app_secrets.get_link_in_progress(store=secrets) is not None
 
 
-def test_production_refuses_an_institution_that_isnt_american_express(
-    db, session_factory, production, prod_plaid, secrets
-):
-    """A mis-pick in Link's search would spend the one connection on another bank and then
-    block Amex for good: not exchanged, and this attempt's marker is cleared."""
+def test_production_links_any_institution(db, session_factory, production, prod_plaid, secrets):
+    """BANK-1: the v1 "only American Express" refusal is gone: a first link of Houndstooth Bank is
+    exchanged like any other, and its marker is cleared."""
     attempt = linking.new_link_token(db, prod_plaid, production, store=secrets).attempt
     db.commit()
-    other = prod_plaid.add_item(item_id="chase", institution_id="ins_3", institution_name="Chase")
-    with pytest.raises(LinkRefused, match="You picked Chase in Plaid, not American Express"):
-        linking.exchange(
-            session_factory,
-            prod_plaid,
-            secrets,
-            production,
-            prod_plaid.public_token_for(other),
-            {"institution": {"institution_id": "ins_3", "name": "Chase"}},
-            attempt=attempt,
-        )
-    assert prod_plaid.calls_to("exchange_public_token") == []
-    assert items(db) == []
+    other = prod_plaid.add_item(
+        item_id="houndstooth", institution_id="ins_109512", institution_name="Houndstooth Bank"
+    )
+    result = linking.exchange(
+        session_factory,
+        prod_plaid,
+        secrets,
+        production,
+        prod_plaid.public_token_for(other),
+        {"institution": {"institution_id": "ins_109512", "name": "Houndstooth Bank"}},
+        attempt=attempt,
+    )
+    assert (result.plaid_item_id, result.institution_name) == ("houndstooth", "Houndstooth Bank")
+    assert len(prod_plaid.calls_to("exchange_public_token")) == 1
     assert app_secrets.get_link_in_progress(store=secrets) is None
-    assert linking.new_link_token(db, prod_plaid, production, store=secrets).attempt
 
 
 @pytest.mark.parametrize(
@@ -1114,10 +1255,10 @@ def test_production_refuses_an_institution_that_isnt_american_express(
     ],
     ids=["ins_10", "another-amex-entry", "amex-name", "no-name", "no-institution"],
 )
-def test_american_express_and_unknown_institutions_are_exchanged(
+def test_a_first_link_is_exchanged_whatever_link_says_about_its_bank(
     db, session_factory, production, prod_plaid, secrets, institution
 ):
-    """Plaid's id is read from Link's metadata (RESEARCH): only a clear mismatch is refused."""
+    """With nothing linked there is nothing to duplicate: partial metadata is fine."""
     fake_item = prod_plaid.add_item(item_id="amex")
     result = linking.exchange(
         session_factory,
@@ -1132,7 +1273,7 @@ def test_american_express_and_unknown_institutions_are_exchanged(
 
 def test_link_blocks_explain_a_paused_link_in_local_time(db, production, prod_plaid, secrets):
     linking.new_link_token(db, prod_plaid, production, store=secrets)
-    (text,) = linking.link_blocks(production, store=secrets)
+    (text,) = linking.link_blocks(db, production, store=secrets)
     started = NOW.astimezone().strftime("%-I:%M %p")
     unlocks = (NOW + app_secrets.LINK_TOKEN_LIFETIME).astimezone().strftime("%-I:%M %p")
     assert f"started at {started}" in text and f"linking unlocks at {unlocks}" in text
@@ -1154,7 +1295,7 @@ def test_a_second_re_attach_while_the_first_runs_is_refused(
     """A double click on "Re-attach existing connection": the second request is refused instead of
     inserting the same Item (a unique-key error, the 500 page)."""
     fake_item = prod_plaid.add_item(item_id="restored")
-    secrets.set(app_secrets.PRODUCTION_ACCESS_TOKEN, fake_item.access_token)
+    secrets.set(LEGACY, fake_item.access_token)
     real = prod_plaid.get_accounts
     nested: dict[str, BaseException] = {}
 
@@ -1167,7 +1308,9 @@ def test_a_second_re_attach_while_the_first_runs_is_refused(
         return real(token)
 
     prod_plaid.get_accounts = get_accounts  # type: ignore[method-assign]
-    (result,) = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    (result,) = linking.recover_orphaned_items(
+        session_factory, prod_plaid, secrets, production
+    ).results
     assert isinstance(nested["refused"], linking.LinkBusy) and result.created
     assert [i.plaid_item_id for i in items(db)] == ["restored"]
 
@@ -1178,7 +1321,7 @@ def test_re_attach_keeps_plaids_creation_date_for_the_consent_estimate(
     """Amex may leave consent_expiration_time empty; the estimate is a year after the last
     consent, so a re-attached Item must not restart it from today (/item/get's created_at)."""
     fake_item = prod_plaid.add_item(item_id="old-amex", consent_expiration_time=None)
-    secrets.set(app_secrets.PRODUCTION_ACCESS_TOKEN, fake_item.access_token)
+    secrets.set(LEGACY, fake_item.access_token)
     created = NOW - dt.timedelta(days=330)
     real = prod_plaid.get_item
 
@@ -1188,9 +1331,847 @@ def test_re_attach_keeps_plaids_creation_date_for_the_consent_estimate(
         return body
 
     prod_plaid.get_item = get_item  # type: ignore[method-assign]
-    (result,) = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    (result,) = linking.recover_orphaned_items(
+        session_factory, prod_plaid, secrets, production
+    ).results
     db.expire_all()
     item = db.get(PlaidItem, result.item_id)
     assert item.consent_expires_at is None
     assert item.linked_at == created and item.last_consented_at == created
     assert status_service.consent_due_at(item) == created + dt.timedelta(days=365)
+
+
+# --------------------------------------------------------------------------- wave 3: any bank
+# BANK-1 (any institution, the 10 Items), BANK-3 (duplicates refused before the exchange), BANK-4
+# (Keychain per Item, re-attach per token, the v1 token), BANK-5 (Add accounts), BANK-8 (CSV).
+
+
+def checking(account_id: str = "acc-chk", *, name: str = "Checking", mask: str = "0001"):
+    from tests.factories import plaid_account
+
+    return plaid_account(
+        account_id=account_id,
+        name=name,
+        official_name=None,
+        mask=mask,
+        type="depository",
+        subtype="checking",
+        current="900.00",
+        available="850.00",
+    )
+
+
+def tartan_bank(db, *, accounts=(("Checking", "0001"),), **values):
+    """A Tartan Bank connection in the database with its checking accounts."""
+    values.setdefault("institution_id", "ins_109511")
+    values.setdefault("institution_name", "Tartan Bank")
+    item = make_item(db, **values)
+    for name, mask in accounts:
+        make_bank_account(db, item, name=name, mask=mask)
+    return item
+
+
+def link_meta(institution: dict | None, *accounts: tuple[str, str]) -> dict:
+    return {
+        "institution": institution,
+        "accounts": [
+            {"id": f"x-{n}", "name": name, "mask": mask, "type": "depository"}
+            for n, (name, mask) in enumerate(accounts)
+        ],
+    }
+
+
+@pytest.mark.parametrize("env", ["sandbox", "production"])
+def test_a_bank_already_linked_is_refused_before_the_exchange(
+    db, session_factory, sandbox, production, fake_plaid, prod_plaid, secrets, env
+):
+    """BANK-3: same institution_id → refused before exchanging, pointing to Add accounts and
+    Reconnect; nothing reaches Plaid's exchange, in the Sandbox too (BANK-9 rehearses it)."""
+    settings, plaid = (sandbox, fake_plaid) if env == "sandbox" else (production, prod_plaid)
+    tartan_bank(db)
+    again = plaid.add_item(
+        item_id="tartan-again", institution_id="ins_109511", institution_name="Tartan Bank"
+    )
+    with pytest.raises(LinkRefused) as info:
+        linking.exchange(
+            session_factory,
+            plaid,
+            secrets,
+            settings,
+            plaid.public_token_for(again),
+            link_meta(TARTAN["institution"], ("Checking", "0001")),
+        )
+    message = str(info.value)
+    assert "Tartan Bank is already linked" in message and "not exchanged" in message
+    assert "Add accounts" in message and "Reconnect" in message
+    assert plaid.calls_to("exchange_public_token") == []
+    assert len(items(db)) == 1
+
+
+def test_a_different_login_at_a_linked_bank_is_exchanged(
+    db, session_factory, production, prod_plaid, secrets
+):
+    """The confirm dialog's "a different login at a bank I've already linked": accepted when no
+    picked account has the name and mask of one already linked there."""
+    attempt = linking.new_link_token(db, prod_plaid, production, store=secrets).attempt
+    tartan_bank(db, accounts=(("Checking", "0001"),))
+    other = prod_plaid.add_item(
+        item_id="tartan-joint",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking(mask="0777", name="Joint Checking")],
+    )
+    result = linking.exchange(
+        session_factory,
+        prod_plaid,
+        secrets,
+        production,
+        prod_plaid.public_token_for(other),
+        link_meta(TARTAN["institution"], ("Joint Checking", "0777"), ("Checking", "0002")),
+        attempt=attempt,
+        different_login=True,
+    )
+    assert result.plaid_item_id == "tartan-joint" and len(items(db)) == 2
+    assert secrets.values[prod_key("tartan-joint")] == other.access_token
+
+
+@pytest.mark.parametrize(
+    "picked",
+    [("Checking", "0001"), ("  checking ", "0001")],
+    ids=["same", "same-name-other-case"],
+)
+def test_a_different_login_with_an_account_already_linked_is_refused(
+    db, session_factory, production, prod_plaid, secrets, picked
+):
+    """Even with the choice, the same name and mask at that bank is the same login again."""
+    tartan_bank(db, accounts=(("Checking", "0001"),))
+    again = prod_plaid.add_item(
+        item_id="tartan-2", institution_id="ins_109511", institution_name="Tartan Bank"
+    )
+    with pytest.raises(LinkRefused, match="is already linked at Tartan Bank") as info:
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(again),
+            link_meta(TARTAN["institution"], ("Savings", "0009"), picked),
+            different_login=True,
+        )
+    assert "Checking ··0001" in str(info.value)
+    assert prod_plaid.calls_to("exchange_public_token") == []
+
+
+def test_masks_are_compared_with_masks_only(db, sandbox, fake_plaid, secrets, session_factory):
+    """The same name with another mask is another account (masks never meet account numbers:
+    the app has none)."""
+    tartan_bank(db, accounts=(("Checking", "0001"),))
+    meta = LinkMetadata.from_json(link_meta(TARTAN["institution"], ("Checking", "1000")))
+    assert linking.duplicate_problem(db, meta, different_login=True) is None
+    assert linking.duplicate_problem(db, meta) is not None
+
+
+@pytest.mark.parametrize(
+    ("metadata", "words"),
+    [
+        (link_meta(None, ("Checking", "0001")), "didn't say which bank"),
+        ({"institution": TARTAN["institution"], "accounts": []}, "didn't list the accounts"),
+        (link_meta({"name": "Tartan Bank"}, ("Savings", "0002")), "didn't say which bank"),
+        (link_meta({"institution_id": "", "name": "Tartan Bank"}), "didn't say which bank"),
+    ],
+    ids=["no-institution", "no-accounts", "name-without-id", "empty-id"],
+)
+def test_metadata_that_cant_be_checked_is_refused_once_something_is_linked(db, metadata, words):
+    tartan_bank(db)
+    meta = LinkMetadata.from_json(metadata)
+    assert words in linking.duplicate_problem(db, meta, different_login=True)
+
+
+def test_an_item_saved_without_an_institution_id_is_matched_by_name(db):
+    tartan_bank(db, institution_id=None)
+    meta = LinkMetadata.from_json(link_meta(TARTAN["institution"], ("Checking", "0009")))
+    assert "already linked" in linking.duplicate_problem(db, meta)
+    other = LinkMetadata.from_json(
+        link_meta({"institution_id": "ins_109512", "name": "Houndstooth Bank"})
+    )
+    assert linking.duplicate_problem(db, other) is None
+
+
+@pytest.mark.parametrize("different_login", [False, True])
+def test_linking_a_bank_plaid_removed_again_is_refused_in_words_that_say_why(
+    db, session_factory, production, prod_plaid, secrets, different_login
+):
+    """Final review (ops-3, security-3): Plaid answers ITEM_NOT_FOUND for a connection it removed,
+    which update mode can't repair (RESEARCH T2.4). Linking that login again is still refused
+    (removing a connection isn't in this version, W3-PLAN §0), but the refusal no longer sends the
+    owner to Reconnect or Add accounts."""
+    tartan_bank(db, status="error", error_code="ITEM_NOT_FOUND")
+    again = prod_plaid.add_item(
+        item_id="tartan-again",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking()],
+    )
+    with pytest.raises(LinkRefused) as info:
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(again),
+            link_meta(TARTAN["institution"], ("Checking", "0001")),
+            different_login=different_login,
+        )
+    message = str(info.value)
+    assert "Plaid no longer has your Tartan Bank connection" in message
+    assert "can't repair it" in message and "not exchanged" in message
+    assert "use Reconnect" not in message and "use Add accounts" not in message
+    assert prod_plaid.calls_to("exchange_public_token") == []
+
+
+def test_a_removed_login_beside_a_live_one_at_that_bank(db):
+    """The live connection's buttons still help; the same login as the removed one doesn't."""
+    tartan_bank(db, plaid_item_id="tartan-gone", status="error", error_code="ITEM_NOT_FOUND")
+    tartan_bank(db, plaid_item_id="tartan-live", accounts=(("Joint Checking", "0777"),))
+    meta = LinkMetadata.from_json(link_meta(TARTAN["institution"], ("Checking", "0001")))
+    assert "use Add accounts on its connection" in linking.duplicate_problem(db, meta)
+    removed = linking.duplicate_problem(db, meta, different_login=True)
+    assert "Plaid no longer has your Tartan Bank connection" in removed
+    joint = LinkMetadata.from_json(link_meta(TARTAN["institution"], ("Joint Checking", "0777")))
+    assert "same login linked again" in linking.duplicate_problem(db, joint, different_login=True)
+
+
+@pytest.mark.parametrize("position", [19, 20, 24])
+def test_a_different_login_picking_more_accounts_than_are_checked_is_refused(
+    db, session_factory, production, prod_plaid, secrets, position
+):
+    """Final review (security-2a): Link's metadata keeps the first 20 picked accounts, and an
+    account already linked further down the list was never compared, so the same login was
+    exchanged again as a new Item. More picked accounts than are checked now refuse the link."""
+    tartan_bank(db, accounts=(("Everyday Checking", "0101"),))
+    picked = [(f"Savings {n}", f"9{n:03d}") for n in range(25)]
+    picked[position] = ("Everyday Checking", "0101")
+    meta = link_meta(TARTAN["institution"], *picked)
+    again = prod_plaid.add_item(
+        item_id="item-again", institution_id="ins_109511", institution_name="Tartan Bank"
+    )
+    with pytest.raises(LinkRefused, match="not exchanged"):
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(again),
+            meta,
+            different_login=True,
+        )
+    assert prod_plaid.calls_to("exchange_public_token") == []
+    assert len(items(db)) == 1
+    assert LinkMetadata.from_json(meta).accounts_truncated
+    twenty = link_meta(TARTAN["institution"], *picked[:20])
+    assert not LinkMetadata.from_json(twenty).accounts_truncated
+
+
+def test_a_connection_saved_without_its_bank_refuses_new_links_until_a_sync_names_it(
+    db, session_factory, production, prod_plaid, secrets
+):
+    """Final review (security-2b): a first link whose metadata names no institution (fine while
+    nothing is linked) and whose /item/get failed right after linking was saved with neither the
+    bank's id nor its name, so no later link matched it and the same bank was exchanged again."""
+    first = prod_plaid.add_item(
+        item_id="item-1",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking()],
+    )
+    prod_plaid.queue_error("get_item", prod_plaid.plaid_error("INTERNAL_SERVER_ERROR"))
+    linking.exchange(
+        session_factory,
+        prod_plaid,
+        secrets,
+        production,
+        prod_plaid.public_token_for(first),
+        {"institution": None},
+    )
+    (row,) = items(db)
+    assert (row.institution_id, row.institution_name) == (None, None)
+    again = prod_plaid.add_item(
+        item_id="item-2",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking("acc-2")],
+    )
+    for different_login in (False, True):
+        with pytest.raises(LinkRefused, match="saved without the name of its bank"):
+            linking.exchange(
+                session_factory,
+                prod_plaid,
+                secrets,
+                production,
+                prod_plaid.public_token_for(again),
+                link_meta(TARTAN["institution"], ("Checking", "0001")),
+                different_login=different_login,
+            )
+    assert len(prod_plaid.calls_to("exchange_public_token")) == 1
+    assert sync_service.refresh_item(session_factory, prod_plaid, first.access_token, row.id)
+    with pytest.raises(LinkRefused, match="Tartan Bank is already linked"):
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(again),
+            link_meta(TARTAN["institution"], ("Checking", "0001")),
+        )
+    assert len(prod_plaid.calls_to("exchange_public_token")) == 1
+
+
+def test_another_bank_is_never_a_duplicate(db, session_factory, sandbox, fake_plaid, secrets):
+    make_item(db)  # American Express
+    tartan = fake_plaid.add_item(
+        item_id="tartan",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking()],
+    )
+    result = linking.exchange(
+        session_factory,
+        fake_plaid,
+        secrets,
+        sandbox,
+        fake_plaid.public_token_for(tartan),
+        link_meta(TARTAN["institution"], ("Checking", "0001")),
+    )
+    assert result.institution_name == "Tartan Bank" and len(items(db)) == 2
+
+
+def test_sandbox_test_items_may_share_a_test_bank_but_production_always_checks(
+    db, session_factory, sandbox, production, fake_plaid, prod_plaid, secrets
+):
+    for user in ("custom", "bank"):
+        username, password = linking.sandbox_credentials(user, NOW.date())
+        linking.sandbox_create_item(
+            session_factory, fake_plaid, secrets, sandbox, username=username, password=password
+        )
+    assert [i.institution_id for i in items(db)] == ["ins_109508", "ins_109508"]
+    fake_item = prod_plaid.add_item(item_id="x")
+    with pytest.raises(ValueError, match="always check"):
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(fake_item),
+            AMEX,
+            duplicate_check=False,
+        )
+    assert prod_plaid.calls_to("exchange_public_token") == []
+
+
+def test_the_bank_test_user_has_checking_savings_and_a_card():
+    config = linking.bank_user_config(NOW.date())
+    kinds = [(a["type"], a["subtype"]) for a in config["override_accounts"]]
+    assert kinds == [
+        ("depository", "checking"),
+        ("depository", "savings"),
+        ("credit", "credit card"),
+    ]
+    only = linking.bank_user_config(NOW.date(), bank_only=True)
+    assert [a["type"] for a in only["override_accounts"]] == ["depository", "depository"]
+    paychecks = [
+        t["amount"]
+        for t in config["override_accounts"][0]["transactions"]
+        if "PAYROLL" in t["description"]
+    ]
+    assert paychecks == [Decimal("-2100.00")] * 2  # money in is negative (Plaid's sign)
+    assert linking.sandbox_credentials("bank", NOW.date())[0] == "user_custom"
+
+
+# --------------------------------------------------------------------------- the 10 connections
+
+
+def test_the_app_counts_every_production_item_it_knows(db, production, secrets):
+    """BANK-1: rows, Keychain's index (a lost database keeps it) and recovery files all count;
+    a v1 token with nothing else known counts as one."""
+    assert linking.connections_used(db, production, store=secrets) == 0
+    secrets.set(LEGACY, "access-production-v1")
+    assert linking.connections_used(db, production, store=secrets) == 1
+    secrets.delete(LEGACY)
+    make_item(db, plaid_item_id="a")
+    app_secrets.store_access_token(production, "a", "access-production-a", store=secrets)
+    app_secrets.store_access_token(production, "b", "access-production-b", store=secrets)
+    app_secrets.write_access_token_recovery_file(production, "c", "access-production-c")
+    assert linking.connections_used(db, production, store=secrets) == 3
+
+
+def test_ten_items_end_new_links(db, session_factory, production, prod_plaid, secrets):
+    for n in range(10):
+        make_item(db, plaid_item_id=f"item-{n}", institution_id=f"ins_{100 + n}")
+        app_secrets.store_access_token(
+            production, f"item-{n}", f"access-production-{n}", store=secrets
+        )
+    (reason,) = linking.link_blocks(db, production, store=secrets)
+    assert reason.startswith("All 10 of your Plaid connections are used")
+    with pytest.raises(LinkRefused, match="All 10"):
+        linking.new_link_token(db, prod_plaid, production, store=secrets)
+    assert prod_plaid.calls_to("create_link_token") == []
+    fresh = prod_plaid.add_item(item_id="eleventh", institution_id="ins_999")
+    with pytest.raises(LinkRefused, match="All 10"):
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(fresh),
+            {"institution": {"institution_id": "ins_999", "name": "Other Bank"}},
+        )
+    assert prod_plaid.calls_to("exchange_public_token") == []
+    overview = linking.connection_overview(db, production, store=secrets)
+    assert not overview.can_link and overview.connections_left == 0
+
+
+# --------------------------------------------------------------------------- the v1 token (C6)
+
+
+def test_a_link_first_moves_the_v1_token_of_the_one_item(db, production, prod_plaid, secrets):
+    """The owner's live upgrade: one Amex Item, its token under the v1 name. The page shows Link
+    (nothing to re-attach); clicking it moves the token, then issues the link token."""
+    make_item(db, plaid_item_id="item-amex")
+    secrets.set(LEGACY, "access-production-v1")
+    overview = linking.connection_overview(db, production, store=secrets)
+    assert overview.can_link and not overview.reattach_available
+    linking.new_link_token(db, prod_plaid, production, store=secrets)
+    assert secrets.values[prod_key("item-amex")] == "access-production-v1"
+    assert LEGACY not in secrets.values
+
+
+def test_until_the_v1_token_moves_the_overview_names_its_v1_keychain_item(db, production, secrets):
+    """Final review (ops-7, reqs-1): right after the upgrade the Amex token keeps its v1 name
+    until the first sync (or link) moves it, which can wait for the next 6-hourly run; the
+    Keychain item line named the Item's own item, which Keychain didn't hold yet."""
+    make_item(db, plaid_item_id="item-amex")
+    secrets.set(LEGACY, "access-production-v1")
+    (view,) = linking.connection_overview(db, production, store=secrets).items
+    assert view.keychain_item == LEGACY and prod_key("item-amex") not in secrets.values
+    assert view.keychain_moves_to == prod_key("item-amex")
+    secrets.fail_on[("set", prod_key("item-amex"))] = app_secrets.SecretStoreError("locked")
+    assert sync_service.migrate_legacy_token(db, production, secrets).status == "kept"
+    (view,) = linking.connection_overview(db, production, store=secrets).items
+    assert view.keychain_item == LEGACY  # still where the token is
+    del secrets.fail_on[("set", prod_key("item-amex"))]
+    assert sync_service.migrate_legacy_token(db, production, secrets).status == "moved"
+    (view,) = linking.connection_overview(db, production, store=secrets).items
+    assert (view.keychain_item, view.keychain_moves_to) == (prod_key("item-amex"), None)
+
+
+def test_a_v1_token_that_cannot_be_moved_pauses_linking(db, production, prod_plaid, secrets):
+    """Otherwise the second Item would leave the first without a token it can find."""
+    make_item(db, plaid_item_id="item-amex")
+    secrets.set(LEGACY, "access-production-v1")
+    secrets.fail_on[("set", prod_key("item-amex"))] = app_secrets.SecretStoreError("locked")
+    with pytest.raises(LinkRefused, match="./run doctor --env production"):
+        linking.new_link_token(db, prod_plaid, production, store=secrets)
+    assert prod_plaid.calls_to("create_link_token") == []
+    assert secrets.values[LEGACY] == "access-production-v1"
+
+
+def test_re_attach_asks_plaid_whose_v1_token_it_is(
+    db, session_factory, production, prod_plaid, secrets
+):
+    """Two Items and the v1 token: /item/get names its Item, and the token moves to that Item's
+    key; no row is added and no link is made."""
+    amex = prod_plaid.add_item(item_id="item-amex")
+    make_item(db, plaid_item_id="item-amex")
+    tartan_bank(db, plaid_item_id="item-tartan")
+    app_secrets.store_access_token(
+        production, "item-tartan", "access-production-tartan", store=secrets
+    )
+    secrets.set(LEGACY, amex.access_token)
+    assert linking.reattach_available(db, production, store=secrets)
+    (result,) = linking.recover_orphaned_items(
+        session_factory, prod_plaid, secrets, production
+    ).results
+    assert (result.plaid_item_id, result.created) == ("item-amex", False)
+    assert secrets.values[prod_key("item-amex")] == amex.access_token
+    assert LEGACY not in secrets.values and len(items(db)) == 2
+    assert prod_plaid.calls_to("exchange_public_token") == []
+
+
+def test_a_v1_token_beside_another_items_own_token_is_re_attached_not_moved(
+    db, session_factory, production, prod_plaid, secrets
+):
+    """A lost database: Tartan Bank was re-attached first, while the v1 Amex token (whose Item row
+    was lost too) is still under the v1 name. The one Item has its own token, so the v1 token
+    can't be its: it is never moved there; Re-attach asks Plaid and restores American Express."""
+    amex = prod_plaid.add_item(item_id="item-amex")
+    tartan = prod_plaid.add_item(
+        item_id="item-tartan",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking()],
+    )
+    tartan_bank(db, plaid_item_id="item-tartan")
+    app_secrets.store_access_token(production, "item-tartan", tartan.access_token, store=secrets)
+    secrets.set(LEGACY, amex.access_token)
+    assert linking.legacy_unplaced(db, store=secrets)
+    assert linking.reattach_available(db, production, store=secrets)
+    assert "re-attach it first" in " ".join(linking.link_blocks(db, production, store=secrets))
+    assert sync_service.migrate_legacy_token(db, production, secrets).status == "kept"
+    assert (
+        secrets.values[prod_key("item-tartan")] == tartan.access_token
+    )  # Tartan Bank's token untouched
+    (result,) = linking.recover_orphaned_items(
+        session_factory, prod_plaid, secrets, production
+    ).results
+    assert (result.plaid_item_id, result.created) == ("item-amex", True)
+    assert secrets.values[prod_key("item-amex")] == amex.access_token
+    assert LEGACY not in secrets.values and not linking.legacy_unplaced(db, store=secrets)
+
+
+def test_each_orphaned_token_is_re_attached_to_its_own_item(
+    db, session_factory, production, prod_plaid, secrets
+):
+    """BANK-4: a lost database; Keychain still has two Items' tokens. Re-attach rebuilds both,
+    each with its own token."""
+    amex = prod_plaid.add_item(item_id="item-amex")
+    tartan = prod_plaid.add_item(
+        item_id="item-tartan",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking()],
+    )
+    for fake in (amex, tartan):
+        app_secrets.store_access_token(production, fake.item_id, fake.access_token, store=secrets)
+    assert linking.orphaned_production_items(db, production, store=secrets) == [
+        "item-amex",
+        "item-tartan",
+    ]
+    assert not linking.connection_overview(db, production, store=secrets).can_link
+    results = linking.recover_orphaned_items(
+        session_factory, prod_plaid, secrets, production
+    ).results
+    assert [(r.plaid_item_id, r.institution_name) for r in results] == [
+        ("item-amex", "American Express"),
+        ("item-tartan", "Tartan Bank"),
+    ]
+    assert linking.orphaned_production_items(db, production, store=secrets) == []
+    assert [c["access_token"] for c in prod_plaid.calls_to("get_item")] == [
+        amex.access_token,
+        tartan.access_token,
+    ]
+
+
+DEAD_TOKEN = "access-production-of-an-item-plaid-removed"
+
+
+def saved_tokens(production, prod_plaid, secrets, order):
+    """A restored database without three connections whose tokens Keychain still holds; Plaid
+    removed "item-dead" (deleted in Plaid Portal, say), so /item/get answers ITEM_NOT_FOUND for
+    it (RESEARCH T2.4b), every time."""
+    amex = prod_plaid.add_item(item_id="item-amex")
+    alive = prod_plaid.add_item(
+        item_id="item-alive",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking()],
+    )
+    tokens = {"item-amex": amex.access_token, "item-alive": alive.access_token}
+    tokens["item-dead"] = DEAD_TOKEN
+    for item_id in order:
+        app_secrets.store_access_token(production, item_id, tokens[item_id], store=secrets)
+    real = prod_plaid.get_item
+
+    def get_item(token: str):
+        if token == DEAD_TOKEN:
+            raise prod_plaid.plaid_error("ITEM_NOT_FOUND")
+        return real(token)
+
+    prod_plaid.get_item = get_item  # type: ignore[method-assign]
+
+
+@pytest.mark.parametrize(
+    "order",
+    [("item-amex", "item-dead", "item-alive"), ("item-amex", "item-alive", "item-dead")],
+    ids=["dead-in-between", "dead-last"],
+)
+def test_re_attach_leaves_out_a_connection_plaid_removed_and_re_attaches_the_rest(
+    db, session_factory, production, prod_plaid, secrets, order
+):
+    """Final review (ops-2): Re-attach stopped at the first token Plaid didn't accept, said
+    "Nothing was changed" though earlier ones were re-attached, never got to later ones, and the
+    dead token kept blocking every new link for good. Each token is handled on its own now; one
+    Plaid removed is noted and left out, never deleted, and still counts toward the 10."""
+    saved_tokens(production, prod_plaid, secrets, order)
+    outcome = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    assert sorted(r.plaid_item_id for r in outcome.results) == ["item-alive", "item-amex"]
+    assert all(r.created for r in outcome.results)
+    assert (outcome.removed, outcome.problems) == (("item-dead",), ())
+    assert sorted(i.plaid_item_id for i in items(db)) == ["item-alive", "item-amex"]
+    assert app_secrets.removed_production_items(production) == {"item-dead"}
+    assert secrets.values[prod_key("item-dead")] == DEAD_TOKEN
+    assert linking.orphaned_production_items(db, production, store=secrets) == []
+    assert not linking.reattach_available(db, production, store=secrets)
+    assert linking.link_blocks(db, production, store=secrets) == ()
+    assert linking.connections_used(db, production, store=secrets) == 3
+    nothing = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    assert nothing == linking.ReattachOutcome()
+
+
+def test_re_attach_reports_a_token_plaid_couldnt_check_and_re_attaches_the_others(
+    db, session_factory, production, prod_plaid, secrets
+):
+    """Final review (ops-2): any other failure (here Plaid can't be reached for the second
+    token) is reported for that token, which waits for the next try; the first one stays
+    re-attached and is reported as such."""
+    saved_tokens(production, prod_plaid, secrets, ("item-amex", "item-alive"))
+    flaky = prod_plaid.get_item
+    calls = {"n": 0}
+
+    def get_item(token: str):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise prod_plaid.transport_error()
+        return flaky(token)
+
+    prod_plaid.get_item = get_item  # type: ignore[method-assign]
+    outcome = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    assert [r.plaid_item_id for r in outcome.results] == ["item-amex"]
+    assert outcome.removed == ()
+    assert outcome.problems == (
+        "Plaid couldn't be reached, so a saved connection wasn't re-attached. Try again in a "
+        "moment.",
+    )
+    assert linking.orphaned_production_items(db, production, store=secrets) == ["item-alive"]
+    assert app_secrets.removed_production_items(production) == set()
+    again = linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+    assert [r.plaid_item_id for r in again.results] == ["item-alive"]
+    assert linking.link_blocks(db, production, store=secrets) == ()
+
+
+# --------------------------------------------------------------------------- update mode (BANK-5)
+
+
+def test_add_accounts_is_update_mode_with_account_selection(db, fake_plaid, secrets, settings):
+    fake_item, item = linked_item(db, fake_plaid, secrets, settings)
+    linking.update_link_token(
+        db, fake_plaid, item.id, add_accounts=True, store=secrets, settings=settings
+    )
+    assert fake_plaid.calls_to("create_link_token") == [
+        {
+            "access_token": fake_item.access_token,
+            "additional_consented_products": (),
+            "account_selection": True,
+        }
+    ]
+    with pytest.raises(ValueError):
+        linking.update_link_token(
+            db,
+            fake_plaid,
+            item.id,
+            add_accounts=True,
+            add_liabilities=True,
+            store=secrets,
+            settings=settings,
+        )
+
+
+def test_statement_details_are_offered_to_card_connections_only(db, fake_plaid, secrets, settings):
+    """BANK-5: "Grant access to statement details" is for card connections only."""
+    _fake, item = linked_item(db, fake_plaid, secrets, settings, institution_name="Tartan Bank")
+    make_bank_account(db, item)
+    with pytest.raises(LinkRefused, match="Tartan Bank has none"):
+        linking.update_link_token(
+            db, fake_plaid, item, add_liabilities=True, store=secrets, settings=settings
+        )
+    assert fake_plaid.calls_to("create_link_token") == []
+
+
+def test_update_mode_on_the_v1_item_uses_and_moves_its_token(db, production, prod_plaid, secrets):
+    fake_item = prod_plaid.add_item(item_id="item-amex")
+    item = make_item(db, plaid_item_id="item-amex")
+    secrets.set(LEGACY, fake_item.access_token)
+    linking.update_link_token(db, prod_plaid, item, store=secrets, settings=production)
+    assert prod_plaid.calls_to("create_link_token")[0]["access_token"] == fake_item.access_token
+    assert secrets.values[prod_key("item-amex")] == fake_item.access_token
+
+
+# --------------------------------------------------------------------------- CSV history (BANK-8)
+
+
+def test_csv_history_moves_only_onto_an_amex_card(db, attach_calls):
+    manual = make_account(db, manual=True)
+    other_card = make_account(db, tartan_bank(db, accounts=()), name="Tartan Cash Card")
+    assert linking.attach_choice(db) is None  # no American Express card: nothing to offer
+    with pytest.raises(LinkRefused, match="only onto a linked American Express card"):
+        linking.attach_manual(db, manual.id, other_card.id)
+    amex_card = make_account(db)
+    choice = linking.attach_choice(db)
+    assert [o.id for o in choice.linked] == [amex_card.id] and choice.automatic
+    assert linking.attach_manual(db, manual.id, amex_card.id).moved_transactions == 3
+
+
+def test_linking_a_bank_leaves_the_csv_history_alone(
+    db, session_factory, fake_plaid, secrets, sandbox, attach_calls
+):
+    make_account(db, manual=True)
+    tartan = fake_plaid.add_item(
+        item_id="tartan",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking()],
+    )
+    result = linking.exchange(
+        session_factory,
+        fake_plaid,
+        secrets,
+        sandbox,
+        fake_plaid.public_token_for(tartan),
+        link_meta(TARTAN["institution"], ("Checking", "0001")),
+    )
+    assert attach_calls == [] and result.attached is None and not result.attach_needed
+
+
+# --------------------------------------------------------------------------- the overview (BANK-5)
+
+
+def test_the_overview_shows_each_connection_with_its_kind_of_accounts(db, production, secrets):
+    amex = make_item(db, plaid_item_id="item-amex")
+    make_account(db, amex)
+    tartan = tartan_bank(db, plaid_item_id="item-tartan", consented_products=["transactions"])
+    for item_id in ("item-amex", "item-tartan"):
+        app_secrets.store_access_token(
+            production, item_id, f"access-production-{item_id}", store=secrets
+        )
+    overview = linking.connection_overview(db, production, store=secrets)
+    by_id = {i.id: i for i in overview.items}
+    assert overview.can_link and overview.link_actions and overview.connections_used == 2
+    amex_view, tartan_view = by_id[amex.id], by_id[tartan.id]
+    assert amex_view.is_amex and amex_view.has_cards and amex_view.consent_known
+    assert not tartan_view.is_amex and not tartan_view.has_cards and not tartan_view.consent_known
+    assert not tartan_view.statement_details_missing  # no card: nothing to grant
+    (account,) = tartan_view.accounts
+    assert not account.is_card and account.kind == "Checking"
+    assert amex_view.accounts[0].is_card and amex_view.accounts[0].kind == "Credit card"
+
+
+# ------------------------------------------------------------- W3-BANK review fixes (safety)
+
+
+def v1_amex(db, prod_plaid, secrets):
+    """The owner's live state before wave 3: one Amex Item, its token under the v1 name."""
+    amex = prod_plaid.add_item(item_id="item-amex")
+    row = make_item(db, plaid_item_id="item-amex", last_sync_success_at=None)
+    make_account(db, row, plaid_account_id=amex.default_account_id, mask="1005")
+    secrets.set(LEGACY, amex.access_token)
+    return amex, row
+
+
+def test_a_v1_copy_the_move_could_not_delete_never_blocks_linking(
+    db, session_factory, production, prod_plaid, secrets, notifier
+):
+    """Safety review (major): the first sync moved the v1 token (new key written and read back)
+    but couldn't delete the old key. That copy can't lose its owner (placing the v1 token
+    compares values), so the page offers Link and a link goes through, instead of a refusal that
+    blamed a failed save; the next allowed delete removes the copy."""
+    amex, row = v1_amex(db, prod_plaid, secrets)
+    secrets.fail_on[("delete", LEGACY)] = app_secrets.KeychainApprovalNeeded(LEGACY, -25308)
+    out = sync_service.sync_item(
+        session_factory,
+        prod_plaid,
+        secrets,
+        production,
+        row.id,
+        trigger="schedule",
+        notifier=notifier,
+        sleep=no_sleep,
+    )
+    assert out.status == "success"
+    assert secrets.values[prod_key("item-amex")] == secrets.values[LEGACY] == amex.access_token
+    overview = linking.connection_overview(db, production, store=secrets)
+    assert overview.can_link and overview.link_blockers == () and not overview.reattach_available
+
+    link = linking.new_link_token(db, prod_plaid, production, store=secrets)  # retries; refused
+    db.commit()
+    assert link.attempt and LEGACY in secrets.values
+    tartan = prod_plaid.add_item(
+        item_id="item-tartan",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        accounts=[checking()],
+    )
+    result = linking.exchange(
+        session_factory,
+        prod_plaid,
+        secrets,
+        production,
+        prod_plaid.public_token_for(tartan),
+        link_meta(TARTAN["institution"], ("Checking", "0001")),
+        attempt=link.attempt,
+        sleep=no_sleep,
+    )
+    assert result.plaid_item_id == "item-tartan" and len(items(db)) == 2
+    assert secrets.values[prod_key("item-tartan")] == tartan.access_token
+    assert linking.legacy_state(db, store=secrets) == app_secrets.LegacyTokenState(
+        "copy", "item-amex"
+    )
+    # Tartan Bank's syncs never touch the copy; American Express's delete it once Keychain allows.
+    del secrets.fail_on[("delete", LEGACY)]
+    assert sync_service.access_token_for(production, "item-tartan", secrets) == tartan.access_token
+    assert LEGACY in secrets.values
+    assert sync_service.access_token_for(production, "item-amex", secrets) == amex.access_token
+    assert LEGACY not in secrets.values
+
+
+def test_a_v1_token_whose_move_failed_still_pauses_linking_with_the_right_reason(
+    db, production, prod_plaid, secrets
+):
+    """The other half of C6's "on any doubt": the new key couldn't be written, so the v1 token is
+    still the only copy and still unmoved. A second Item now would leave it without an owner."""
+    v1_amex(db, prod_plaid, secrets)
+    secrets.fail_on[("set", prod_key("item-amex"))] = app_secrets.SecretStoreError("locked")
+    with pytest.raises(LinkRefused, match="couldn't save the access token of your first"):
+        linking.new_link_token(db, prod_plaid, production, store=secrets)
+    assert linking.legacy_state(db, store=secrets) == app_secrets.LegacyTokenState(
+        "movable", "item-amex"
+    )
+
+
+def test_re_attach_only_deletes_a_v1_copy(db, session_factory, production, prod_plaid, secrets):
+    """A copy of a token saved under its Item's own key needs no /item/get: Re-attach (run for
+    an orphan) deletes it and asks Plaid about nothing else."""
+    amex, _row = v1_amex(db, prod_plaid, secrets)
+    app_secrets.store_access_token(production, "item-amex", amex.access_token, store=secrets)
+    assert (
+        linking.recover_orphaned_items(session_factory, prod_plaid, secrets, production)
+        == linking.ReattachOutcome()
+    )
+    assert prod_plaid.calls_to("get_item") == [] and LEGACY not in secrets.values
+
+
+def test_link_metadata_naming_a_linked_bank_without_its_id_is_refused_before_the_exchange(
+    db, session_factory, production, prod_plaid, secrets
+):
+    """Safety review (minor): metadata with the institution's name but no id (Plaid always sends
+    both; this is an odd or tampered request) matched no saved Item, so a second American
+    Express link was exchanged. It is refused now, and nothing reaches Plaid or Keychain."""
+    amex, _row = v1_amex(db, prod_plaid, secrets)
+    sync_service.migrate_legacy_token(db, production, secrets)
+    link = linking.new_link_token(db, prod_plaid, production, store=secrets)
+    db.commit()
+    second = prod_plaid.add_item(item_id="item-amex-2")
+    before = {k: v for k, v in secrets.values.items() if "link_in_progress" not in k}
+    with pytest.raises(LinkRefused, match="didn't say which bank"):
+        linking.exchange(
+            session_factory,
+            prod_plaid,
+            secrets,
+            production,
+            prod_plaid.public_token_for(second),
+            {"institution": {"name": "American Express"}, "accounts": []},
+            attempt=link.attempt,
+            sleep=no_sleep,
+        )
+    assert prod_plaid.calls_to("exchange_public_token") == []
+    assert {k: v for k, v in secrets.values.items() if "link_in_progress" not in k} == before
+    assert app_secrets.get_link_in_progress(store=secrets) is None
+    assert app_secrets.production_item_ids(store=secrets) == ["item-amex"]

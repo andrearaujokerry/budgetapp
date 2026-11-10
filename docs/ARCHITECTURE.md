@@ -1,11 +1,14 @@
 # Architecture
 
-This is the technical design for the Amex Budget Tracker described in
-`Amex Budget Tracker — Requirements & Workplan.md`. Requirement IDs (SYNC-1, REL-3, …)
-refer to that document. Anything here that conflicts with the requirements is a bug in
-this document. Facts about Plaid, Amex and macOS were verified against primary sources in
-October 2026; where a behaviour is undocumented, the design says how it is checked. The
-design was then reviewed adversarially for data integrity, money math and security.
+This is the technical design for Budget Tracker, which tracks credit cards and bank accounts
+linked through Plaid. It began as the Amex-only tracker described in
+`Amex Budget Tracker — Requirements & Workplan.md`: requirement IDs (SYNC-1, REL-3, …) refer to
+that document; the wave-3 IDs (BANK-n, MON-n, INC-n, and contracts C1–C9 as "W3-PLAN") refer to
+the wave-3 plan that added bank accounts and income. Anything here that conflicts with the
+requirements is a bug in this document. Facts about Plaid, Amex and macOS were verified against
+primary sources in October and November 2026; where a behaviour is undocumented, the design says
+how it is checked. The design was then reviewed adversarially for data integrity, money math and
+security.
 
 ## 1. Principles
 
@@ -16,9 +19,11 @@ design was then reviewed adversarially for data integrity, money math and securi
    models (which use `float`) are never used for responses.
 3. **Sync is idempotent and atomic.** Re-running a sync never duplicates anything; a failed
    sync leaves the database exactly as it was (REL-1).
-4. **One Plaid link, ever.** Each real link permanently uses one of the Trial plan's 10
-   connections, and a second Amex link can also break the first. The app never offers a new
-   production link while any trace of an existing one exists (section 7).
+4. **One Plaid link per bank login, ever.** Each real link permanently uses one of the Trial
+   plan's 10 connections, and linking the same login again can also break the first (at some
+   OAuth banks the original Item goes to `ITEM_LOGIN_REQUIRED`). Any bank can be linked, but the
+   app refuses a duplicate login before the exchange, repairs and extends connections in place
+   (update mode), re-attaches saved tokens instead of linking again, and stops at 10 (section 7).
 5. **Services are UI-agnostic.** Business logic lives in `budgetapp/services/` and takes a
    SQLAlchemy `Session`; it never imports FastAPI or Jinja. Web routes are thin. This is
    what lets a future mobile app reuse the backend through a JSON API.
@@ -48,7 +53,8 @@ Paths — never inside the git checkout, never under `~/Desktop`, `~/Documents`,
 - `~/Library/Application Support/budgetapp/bin/` — the postgres agent's start-up wrapper script
 - `~/Library/Application Support/budgetapp/backups/<env>/` — nightly `pg_dump` files (REL-2)
 - `~/Library/Application Support/budgetapp/state/` — small marker files (alert de-duplication
-  when the database or Keychain is unavailable, install stamp, recovery files)
+  when the database or Keychain is unavailable, install stamp, recovery files, the connections
+  Re-attach found removed at Plaid)
 - `~/Library/Logs/budgetapp/` — app, sync, backup and postgres logs (never contain secrets). The
   app's own logs rotate (5 MB, 3 kept); the backup agent trims any other log over 10 MB to its
   newest 1 MB in place (launchd and PostgreSQL keep those files open with `O_APPEND`)
@@ -119,7 +125,8 @@ All secrets are stored with `keyring` under service name **`budgetapp`**:
 | --- | --- |
 | `plaid.client_id` | Plaid client ID (the same for every Plaid environment) |
 | `plaid.secret.sandbox` / `plaid.secret.production` | Plaid secrets |
-| `plaid.access_token.production` | THE production access token (v1 allows one production Item) |
+| `plaid.access_token.production.<item_id>` + `plaid.item_ids.production` | production tokens, one per Item, and their index (keyring cannot list items) |
+| `plaid.access_token.production` | the v1 name of the one production token: moved once to its Item's key (below) |
 | `plaid.link_in_progress.production` | marker written when a production new-link token is issued |
 | `plaid.access_token.sandbox.<item_id>` + `plaid.item_ids.sandbox` | Sandbox tokens and their index |
 | `db.password.budgetapp_dev` / `db.password.budgetapp_live` | Generated DB role passwords |
@@ -136,20 +143,45 @@ Rules:
   raises `KeychainApprovalNeeded`: sync and backup notify once a day (de-duplicated with a
   marker file, since the database password may be the item that failed) with the exact fix —
   `./run doctor --env production` in Terminal — and exit 75; the web app stays up and shows
-  a page with the same instruction. Run interactively, `doctor` reads every item of both
-  environments so the user can click *Always Allow* (needed after each `brew upgrade` of
-  Python).
+  a page with the same instruction. The Connection page is the exception for the
+  link-in-progress marker, which every production view reads and which can outlive its link:
+  when only the marker can't be read, linking another bank is paused with that instruction
+  (`linking.link_blocks`) and Reconnect, Renew consent and Add accounts keep working. Run
+  interactively, `doctor` reads every item of both environments, the marker too, so the user
+  can click *Always Allow* (needed after each `brew upgrade` of Python).
 - A missing item (`MissingSecretError`) names the command that saves it
   (`secrets.missing_secret_fix`): `./run setup --keys-only` for the Plaid keys, `./run setup` for
   a database password (it creates the roles and their passwords), `./run doctor` otherwise. The
   web app shows it on a "Setup isn't finished" page; the sync agent notifies once a day (marker
   file: no sync runs, so no other alert can) and exits 1.
-- The production access token is written once and read back to verify; it is never
-  rewritten. If the Keychain write fails after a successful exchange, the token goes to a
-  0600 recovery file under `state/` and the app stops with instructions. `./run setup --env
-  production --access-token` re-enters a saved token (via `getpass`), verified with
-  `/item/get`. The user guide (`docs/going-live.md`) suggests keeping a copy in the user's
-  password manager.
+- Each access token is written once, under its own Item's key, and read back to verify; it is
+  never rewritten, and no token can reach another Item (`sync.access_token_for` reads only the
+  Item's own key). The index entry is written before the token (an index entry without a token
+  is harmless; a token nobody can find is an orphan). If the Keychain write fails after a
+  successful exchange, the token goes to a 0600 recovery file under `state/` and the app stops
+  with instructions; so does a token whose Item id can't be part of a Keychain name (the name is
+  worked out inside the same guard). An id may be any printable ASCII without spaces, up to 256
+  characters (Plaid doesn't document its ids' characters): the environment comes before the id,
+  so no id names another environment's item, the v1 name, an index or the marker, and ids never
+  reach a path, a shell or a URL. `./run setup --env production --access-token` re-enters a
+  saved token of any connection (via `getpass`): `/item/get` verifies it and names its Item, and
+  it is saved under that Item's key. The user guide (`docs/going-live.md`) suggests keeping a
+  copy of each in the user's password manager.
+- **The v1 token** (`plaid.access_token.production`, from before several Items were allowed) is
+  moved once, on the first run of the new code that needs it (a sync, a link, update mode), when
+  exactly one production Item exists: write the Item's key, read it back and compare, then delete
+  the old key (`secrets.move_legacy_production_token`). On any doubt the old key stays and keeps
+  working for that one Item (a failed or mismatched write — a bad copy is deleted again so it
+  can't shadow the good one — or a different token already under the new key), linking another
+  bank waits, and `./run doctor --env production` says what to do. When only the last step failed
+  (the old key couldn't be deleted, say for want of Keychain approval in an agent), the old key
+  is a copy of a token saved and read back under its Item's own key: it never blocks anything
+  (every decision about the v1 token compares its value with each Item's own token, so it can't
+  lose its owner), and every production use of that Item's token deletes it, best effort
+  (`sync.access_token_for`; doctor points to `./run sync --env production` in Terminal, where
+  macOS can ask). With no Item or several and no match, only Plaid can say whose it is: Re-attach
+  calls `/item/get` and moves it to that Item. `secrets.legacy_token_state` names the four states
+  (none, copy, movable, unplaced). Doctor reads and reports; it never moves anything.
 
 ## 4. Repository layout
 
@@ -175,6 +207,7 @@ budgetapp/
   periods.py                calendar months, statement cycles, years, days left
   plaid_gateway.py          PlaidGateway protocol, RealPlaidGateway, PlaidError
   services/
+    accounts.py             kinds of account: cards and bank accounts (W3-PLAN C1)
     userstate.py            the user-owned state of a transaction and how it moves
     categorize.py           categorization: payments → rules → Plaid/Amex mapping → Uncategorized
     spending.py             period_spending() and other aggregation over v_allocations
@@ -189,7 +222,7 @@ budgetapp/
     rules.py                rule CRUD, preview, re-apply (CAT-3/4)
     transactions.py         search/filter, edit, tags, splits, CSV export
     budgets.py              budget amounts, rollover, annual budgets, overall target
-    insights.py             dashboard and trends data
+    insights.py             dashboard and trends data: spending, income and net, account balances
     recurring.py            recurring-charge detection
     statements.py           statement cycles and reconciliation
     alerts.py               alert evaluation with de-duplication
@@ -207,6 +240,7 @@ tests/
   conftest.py               per-process test DB, rollback-per-test sessions, fakes
   fake_plaid.py             event-log FakePlaidGateway
   factories.py              model and Plaid-JSON builders
+  bank_factories.py         bank Items and checking/savings accounts (wave 3)
 docs/ARCHITECTURE.md        this file
 ```
 
@@ -217,8 +251,17 @@ TIMESTAMPTZ NOT NULL DEFAULT now()`; money `NUMERIC(14,2)`; enumerations are `TE
 `CHECK` constraint (no PostgreSQL enum types); constraint names follow a fixed SQLAlchemy
 naming convention. Every foreign key states its `ON DELETE` behaviour.
 
-**Sign convention (everywhere):** Plaid's, which Amex CSV files share. A positive amount is a
-charge, fee or interest; a negative amount is a credit (refund, statement credit, payment).
+**Sign convention (everywhere):** Plaid's, which Amex CSV files share, on cards and bank accounts
+alike: a positive amount is money leaving the account (a charge, fee or interest; on a bank
+account also rent, an ATM withdrawal, a transfer out or a card payment from checking); a negative
+amount is money coming in (a refund, statement credit or the card's payment; on a bank account a
+paycheck, interest or a transfer in).
+
+**Accounts: cards and bank accounts** (`services/accounts.py`, W3-PLAN C1). `accounts.type` is
+Plaid's: `credit` for a credit card (linked, or the manual "American Express (CSV)" account) or
+`depository` for a checking, savings or money market account; the app links nothing else.
+Spending is the same on both (§6). Statements, the statement-cycle card in Settings and CSV
+imports are for cards only (CSV imports for American Express cards, §6).
 
 ### plaid_items
 | column | type | notes |
@@ -245,7 +288,7 @@ charge, fee or interest; a negative amount is a credit (refund, statement credit
 | --- | --- | --- |
 | item_id | FK plaid_items ON DELETE RESTRICT, null | null = manual account (CSV-only, before linking) |
 | plaid_account_id | text unique, null | updated in place when Plaid re-issues an account id (churn) |
-| name, official_name, mask, type, subtype | text | |
+| name, official_name, mask, type, subtype | text | `type`: `credit` (card) or `depository` (bank account) |
 | iso_currency_code | text default 'USD' | |
 | current_balance, available_balance, credit_limit | numeric | SYNC-7 (limit is null on charge cards) |
 | balances_as_of | timestamptz | |
@@ -255,7 +298,7 @@ charge, fee or interest; a negative amount is a credit (refund, statement credit
 | liabilities_as_of | timestamptz | |
 | statement_closing_day | smallint | 1–31; used only to extend known closing dates (section 6) |
 | plaid_history_start | date | earliest Plaid posted date, set once history is complete (CSV cutover) |
-| notice | text | a message for the user (e.g. "Plaid re-issued this account; please confirm") |
+| notice | text | a message for the user (e.g. "Plaid re-issued this account; please confirm", or that Plaid stopped sharing it: `sync.no_longer_shared`, §8) |
 | is_hidden | bool not null default false | hides the account in pickers; its money still counts |
 
 `CHECK ((item_id IS NULL) = (plaid_account_id IS NULL))`: an account is manual or linked, never
@@ -267,7 +310,7 @@ nulling `item_id`.
 | column | type | notes |
 | --- | --- | --- |
 | name | text not null | unique on `lower(name)` |
-| kind | text not null default 'expense' | `expense` (spending) \| `income` (credits/rewards, not spending) \| `transfer` (card payments, not spending) |
+| kind | text not null default 'expense' | `expense` (spending) \| `income` (paychecks, interest, other income, credits/rewards: not spending) \| `transfer` (card payments, and what Plaid codes as a transfer on a bank account: moves between your own accounts, also payments to and from other people; neither spending nor income) |
 | system_key | text unique, null | `uncategorized` (always `expense`), `card_payments` (always `transfer`) — cannot be merged away, hidden or change kind (CHECK) |
 | is_hidden | bool not null default false | hidden from pickers and budget lists; transactions still count |
 | color | text | palette slot `cat-1` … `cat-16` (theme-aware; the seeded categories use these), `other` (neutral grey), or a custom `#rrggbb` |
@@ -288,7 +331,15 @@ Lookup order: detailed/full key, then primary/group key, then Uncategorized. For
 amount the keys with a `|credit` suffix are tried first (unless the row reads like a fee
 reversal): Amex files cash back and billing-inquiry credits under "Fees & Adjustments", so
 `Fees & Adjustments|credit` and `Fees & Adjustments-Fees & Adjustments|credit` map to Credits &
-Rewards while positive fees stay in Fees & Interest.
+Rewards while positive fees stay in Fees & Interest. For a Plaid row on a bank account the keys
+with a `|bank` suffix come before all of those (detailed, then primary): migration
+`0005_bank_categories` seeds them for every `INCOME`, `TRANSFER_IN`, `TRANSFER_OUT`,
+`LOAN_DISBURSEMENTS` and `LOAN_PAYMENTS` code (§6), and the "Plaid & Amex categories" editor
+lists them with a "Bank accounts" badge next to the card mapping of the same code. A primary's
+`|bank` key comes before a detailed code's plain key, so a group with a primary bank key gives
+every detailed code its own bank key. Money coming in to a bank account that Plaid didn't
+classify (no category, or `OTHER`) tries `INCOME_OTHER|bank`, then `INCOME|bank` before anything
+else (`categorize.MONEY_IN_KEYS`, §6), and the editor counts it on `INCOME_OTHER|bank`.
 
 ### rules (CAT-3)
 | column | type | notes |
@@ -441,7 +492,8 @@ the override above.
   statement cycle defines budget periods), `include_pending_in_budgets` (true),
   `budget_alerts_enabled` (true), `alert_thresholds` (int[] `{80,100}`), `sync_alerts_enabled`
   (true), `large_charge_threshold` (numeric, null = off, ALR-3), `consent_reminder_days` (30),
-  `statement_settle_days` (3), `ai_enabled` (false; AI-1 is not built in v1).
+  `statement_settle_days` (3), `ai_enabled` (false; AI-1 is not built in v1), `show_income`
+  (true; the Dashboard's and Trends' "Show income" switch, migration `0006_income_preference`).
 - **sync_runs** (SYNC-5): `item_id` (FK ON DELETE CASCADE), `trigger` (`schedule` \| `manual`
   \| `link` \| `update` \| `cli`), `status` (`running` \| `success` \| `error` \| `skipped` \|
   `interrupted`), `started_at`, `finished_at`, `added_count`, `modified_count`,
@@ -465,8 +517,11 @@ period". It reads `app_settings`: the date basis (posting date in statement mode
 `spend_date = COALESCE(authorized_date, date)` in calendar mode) and
 `include_pending_in_budgets`, and sums `v_allocations.amount` over allocations whose category
 `kind = 'expense'`, per category. Charges add; refunds (negative amounts in an expense
-category) subtract from it (TXN-3). Card payments (`kind = 'transfer'`) and credits/rewards
-(`kind = 'income'`) never count. The Budgets page, every "this period" widget on the dashboard,
+category) subtract from it (TXN-3). Card payments and transfers (`kind = 'transfer'`: moves
+between your own accounts and whatever else Plaid codes as a transfer, payments to other people
+included) and income (`kind = 'income'`) never count. Every account counts the same:
+rent, debit purchases and ATM withdrawals from checking are spending like card charges. The
+Budgets page, every "this period" widget on the dashboard,
 and the budget alerts all call it. `spending.periods_spending(session, periods)` is the same
 function for several periods read in one query (a rollover chain's earlier periods);
 `period_spending` is it for one period. Trends always use calendar months by `spend_date`, with
@@ -477,9 +532,56 @@ category filter: then each row adds what `v_allocations` puts in the chosen cate
 charge counts only those parts (its row still shows the whole charge and its split). Every
 "spent" link (Budgets, Dashboard, Trends) therefore opens a list whose Net is the figure.
 
+### Income and net (wave 3, INC-1..INC-5)
+**Income** is money in, booked to categories of kind `income` (Paycheck, Interest, Other Income,
+Credits & Rewards; the code relies on the kind, never the names), from any account, as a
+positive number: `−sum(v_allocations.amount)` over income-kind allocations. A reversal booked to
+an income category (a clawed-back statement credit) reduces it, so a month's income can be
+negative. Each income function in `spending.py` is its spending counterpart run with
+`kinds=("income",)`, so it has the same date basis, pending setting and suspect handling:
+`period_income`/`periods_income` (the budget period's basis and `include_pending_in_budgets`,
+read from `app_settings` like `period_spending`), `monthly_income` (calendar months by
+`spend_date`, like `monthly_spending`) and `income_by_category`. The spending functions return
+exactly what they did before.
+
+**Net = income − spending**, where spending is `period_spending`'s total (every expense
+category, annual-budget ones included) or the month's `monthly_spending` total. Transfers (kind
+`transfer`: card payments from either side, and Plaid's transfers, between own accounts or to
+and from other people) are neither, so for any period `spending − income + transfers` is the
+plain sum of every counted row's amount
+(`tests/test_spending.py` checks this in both modes, pending on and off). Credits & Rewards is
+income kind, so Amex statement credits are income and stay their own line wherever income is
+broken down (Trends' Every month table).
+
+`insights.dashboard` adds `IncomeAndNet` (the period's `period_income`, all spending and the net)
+while the switch shows income, and `AccountBalances`: every visible card and bank account
+(`services.accounts`, C1) with Plaid's cached balances, cash (bank accounts' current balances)
+and owed (cards' current balances: positive is owed, negative a credit, RESEARCH T2.7). An
+account without a balance (not synced yet, or a CSV account) adds nothing and is counted, so the
+card says how many a total leaves out; a total no account adds to is `None` (shown "—"), never
+zero. An account Plaid no longer shares (`sync.no_longer_shared`, §8) is listed, marked, but left
+out of cash, owed and "as of": its balance is only the last one Plaid sent.
+`insights.trends(..., income=True)` adds `TrendsIncome`: income per income category per month,
+all income, and the net per month, for the same months as spending. Without a bank account the
+months keep spending's statuses (card credits are known for the whole history). Once one exists,
+paychecks are known only from the bank history's first day (`insights.bank_history_start`: the
+earliest counted transaction on any bank account, hidden ones included, by purchase date), which
+can come after the card's (a bank that sends less history, or older Amex CSV files imported), so
+income months take their statuses from that day: a month before it has no income or net
+(`None`, never $0 and minus all spending), its month is partial, and the income averages,
+`complete_months` and the change count only the months it covers (`starts`; `partial` when a
+month in range has spending data but no or partial income data, which a note above the income
+chart explains). An income figure's link lists every income category's rows for its dates
+(`routes.dashboard.categories_url`); the list signs money in as Plaid does (negative), so its Net
+is the figure with a minus sign. Both income objects carry `cards_only` while no bank account
+exists (`insights.has_bank_account`, hidden accounts included since their money still counts):
+the only income is then card credits, so the Net tiles and the Trends income note say so and
+link to Connection, and the figures stay as they are.
+
 ### Categorization precedence (CAT-2, TXN-3)
 For a new transaction:
-0. **Payments (fixed, not overridable by rules).** Card Payments when `amount < 0` and any of:
+0. **Payments (fixed, not overridable by rules), on a card only.** Card Payments when
+   `amount < 0` and any of:
    `transaction_code = 'payment'`; `pfc_detailed` is `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` or
    `LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT`; `pfc_primary = 'TRANSFER_IN'`; the name or original
    description matches `PAYMENT.*(THANK YOU|RECEIVED)|AUTOPAY`; or a CSV row with a blank Amex
@@ -490,11 +592,64 @@ For a new transaction:
    `needs_review` when one was dropped.
 2. The first matching active rule by `(priority, id)`.
 3. Plaid PFC v2 mapping (detailed, then primary) or, for CSV rows, the Amex category mapping —
-   sign-aware: negative amounts try the `|credit` mappings first (section 5), and a positive
-   amount never reaches a `transfer` category through a mapping (it is a charge; real payment
-   reversals were caught by step 0, and a row Plaid codes as a card payment stays one): it goes
-   to Uncategorized, which counts as spending.
+   sign-aware: negative amounts try the `|credit` mappings first (section 5), and on a card a
+   positive amount never reaches a `transfer` category through a mapping (it is a charge; real
+   payment reversals were caught by step 0, and a row Plaid codes as a card payment stays one):
+   it goes to Uncategorized, which counts as spending.
 4. Uncategorized.
+
+**Bank accounts** (`accounts.type = 'depository'`, W3-PLAN C3). Step 0 doesn't apply: a transfer
+in from savings or a deposit that reads like a payment is not forced into Card Payments. Step 3
+tries the `|bank` mappings first (section 5): `INCOME_SALARY` (and PFC v1's `INCOME_WAGES`) →
+Paycheck; `INCOME_INTEREST_EARNED` and `INCOME_DIVIDENDS` → Interest; every other `INCOME` code
+→ Other Income; `TRANSFER_IN` and `TRANSFER_OUT` codes → Transfers (Plaid's taxonomy uses them
+for moves between the owner's accounts and also for payments to and from other people, apps and
+wires and for check and cash deposits, so Transfers holds both, neither spending nor income,
+until a rule moves one; the pages and guides say so, and going-live has the owner look through
+Transfers after the first bank sync), except `TRANSFER_OUT_WITHDRAWAL` (ATM and cash) → Cash &
+ATM (spending);
+`LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, positive on the bank side, → Card Payments, so a card
+payment from checking that Plaid codes this way is never spending and never counts the card's
+charges twice (one coded `TRANSFER_OUT_*` lands in Transfers, not spending either, but rules
+apply to it; which code Plaid gives such a payment is unverified; a payment to a card the app
+doesn't have is a card payment too, so that card's spending counts nowhere, and the guides say to
+link every card paid from checking). One that Plaid gives a spending code
+(`LOAN_PAYMENTS_OTHER_PAYMENT` → Other, a merchant's code, or no code at all → Uncategorized) is
+spending, and counts the card's charges a second time until the owner files it in Card Payments
+(on the row, then a rule from it), so going-live's checklist has the owner check the payment's
+**Counts as** after the first bank sync. The app doesn't guess such a payment from its text:
+RESEARCH has no verified bank-side description, and a pattern loose enough for every bank's
+wording could also match ordinary spending (final review money-2). Any other loan payment is
+spending (the car, mortgage, student loan, personal loan and buy-now-pay-later codes keep their
+card category, Transportation, Home, Education, Utilities & Bills and Shopping; `LOAN_PAYMENTS`
+and its other codes → Other); and money a lender deposits (`LOAN_DISBURSEMENTS` codes) → Transfers,
+neither income nor spending. The cards' mappings of these codes are card-sided (on a card, money
+in under a loan code is the card's payment, Card Payments, and a cash advance is spending), so
+every loan code has a bank key and no bank row reaches them. Every other code maps as for cards,
+and the positive-row guard is for cards only (money leaving for savings is a transfer, not a
+charge). One more bank-only step (final review money-3, a deviation from C3's "maps as for
+cards"): money coming in that Plaid didn't classify, a negative row with no category (Plaid's
+`personal_finance_category` is nullable, RESEARCH T1.5) or `OTHER`/`OTHER_OTHER`, is a deposit,
+not a refund that lowers spending, so step 3 tries `MONEY_IN_KEYS` first, the bank mapping of
+`INCOME_OTHER`, then of `INCOME` (both Other Income from 0005, so the owner can redirect them);
+the decision's source is `default`, and the sync marks such a new row `needs_review`
+(`UNCLASSIFIED_MONEY_IN_REVIEW`). With neither key mapped it maps as before (`OTHER` → Other, no
+category → Uncategorized); money out, a card's credit and an Amex CSV row never take this step.
+Rules still come first, so a rule can turn a regular transfer into income, with one
+exception: rules never apply to a bank row Plaid codes
+`LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` (`categorize.is_bank_card_payment`). A rule written for card
+rows, where step 0 shields payments, could otherwise match the payment's ACH text on checking and
+count the card's charges twice; the row keeps its bank mapping, and a category set on the row
+itself still wins. The refund rule applies as on cards. Plaid's `transaction_code` is mostly
+empty for US banks, so bank rows are classified by the PFC; the text counts only through the
+owner's rules (no built-in text test, unlike step 0 on cards: final review money-2). Anything
+not on a bank account (a card, the manual CSV account, an account Plaid hasn't typed yet) is a
+card.
+Re-applying rules (CAT-4) follows the same rules for bank rows. The categories (Paycheck,
+Interest, Other Income, Transfers, Cash & ATM) and the mappings come from migration
+`0005_bank_categories`, which only adds: a category whose name is taken keeps its kind, and a
+bank mapping goes only to a category of the intended kind. Its downgrade removes the bank
+mappings and only the categories it created (its transaction's `created_at`) that nothing uses.
 
 Every path that gives a row the user state of the row it replaces calls
 `categorize.apply_carried_state(categorizer, row, state)`, so this order never depends on call
@@ -540,13 +695,17 @@ applies.
    without user state are matched to the rows inserted in this batch still unmatched by the same
    rules, only to record `consumed_by_transaction_id`: the row is the same charge (a posting
    Plaid didn't link, a re-delivery after account churn), not a new one (section 11, ALR-3).
+   Then each inserted row that categorization filed as money in that Plaid didn't classify (§6
+   bank accounts; not one that took the user's category) is marked `needs_review`.
 6. **Reconciliation** with CSV rows (below), then the cursor update.
 
 ### CSV ↔ Plaid reconciliation (SYNC-8)
 `reconcile.reconcile_item(session, item_id)` is a full pass, run by every sync that inserted
 rows or completed Plaid's history, after every CSV import and after attaching a manual account:
 - Candidates: unpaired CSV rows (`source = 'csv'`) and unpaired, posted Plaid rows (no
-  `csv_reference`) across all accounts of the Item, with equal amounts, the CSV date within
+  `csv_reference`) across all accounts of the Item except its bank accounts (a CSV file holds
+  card charges, and Link lets a login bring checking or savings accounts too), with equal
+  amounts, the CSV date within
   `[COALESCE(authorized_date, date) − 3 days, date]` — widened to `[date − 30 days, date]` when
   `authorized_date` is null. A CSV row whose Reference holds a plausible posting date pairs only
   with a Plaid row posted on that date or up to 3 days before it (never with a later charge of
@@ -573,9 +732,13 @@ rows or completed Plaid's history, after every CSV import and after attaching a 
   reported values winning), re-points `app_settings.budget_cycle_account_id` when it names the
   manual account (its ON DELETE SET NULL would otherwise silently turn statement-cycle budgets
   into calendar months), copies `statement_closing_day` and `notice` when the Plaid account has
-  none, deletes the manual account, then runs the full pass. Linking calls it when exactly one
-  manual account and one credit account exist; otherwise the Connection page asks. Once a
-  production Item exists, CSV import may only target linked accounts.
+  none, deletes the manual account, then runs the full pass. It accepts only a linked American
+  Express card, and so do the import targets, the attach offers and attaching after linking: one
+  rule, `status.is_amex_card` (a credit account of an American Express Item, `status.is_amex`),
+  so an Amex CSV file never goes to a bank account or another bank's card. Linking calls it when
+  exactly one manual account and one linked Amex card exist (BANK-8); otherwise the Connection
+  page asks. Once a production Amex Item exists, CSV import may only target its linked cards (an
+  Item at another bank doesn't block the manual account).
 
 ### Locks (REL-1)
 - **Sync lock** (per Item): `pg_try_advisory_lock` on a dedicated connection held for the whole
@@ -635,7 +798,7 @@ rows or completed Plaid's history, after every CSV import and after attaching a 
 (an allowlist — nothing that can move money exists, SEC-3):
 
 ```python
-create_link_token(*, access_token=None, additional_consented_products=()) -> str
+create_link_token(*, access_token=None, additional_consented_products=(), account_selection=False) -> str
 exchange_public_token(public_token) -> ExchangeResult(access_token, item_id)
 transactions_sync(access_token, cursor) -> dict      # raw JSON with Decimal amounts
 transactions_refresh(access_token) -> None
@@ -652,11 +815,15 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
 - **New-link token:** `products=['transactions']` only (Auth, Transfer or Signal would hide
   credit cards), `additional_consented_products=['liabilities']`,
   `transactions.days_requested=730` (fixed forever after linking), `country_codes=['US']`,
-  `language='en'`, `client_name='Amex Budget Tracker'`, `user.client_user_id='owner-1'`. No
-  `redirect_uri` (desktop pop-up OAuth), no `webhook`.
-- **Update-mode token** (reconnect, consent renewal): `access_token` plus the basic fields, no
-  products and no flags; `additional_consented_products=['liabilities']` when Liabilities consent
-  is missing.
+  `language='en'`, `client_name='Budget Tracker'`, `user.client_user_id='owner-1'`, and
+  `account_filters` limited to `depository` (`checking`, `savings`, `money market`) and `credit`
+  (`credit card`): investment, loan and mortgage accounts are never offered. No `redirect_uri`
+  (desktop pop-up OAuth), no `webhook`.
+- **Update-mode token** (Reconnect, Renew consent, statement details, Add accounts):
+  `access_token` plus the basic fields, no products; `additional_consented_products=
+  ['liabilities']` to ask for statement details (card connections only); for **Add accounts**,
+  `update.account_selection_enabled=true` with the same `account_filters` (RESEARCH T2.4: that flag
+  is required to pass filters in update mode). The Item and its token stay the same.
 - **Sync request:** `count=500`, cursor omitted when none is stored,
   `include_original_description=True`, `personal_finance_category_version='v2'`.
 - **Calls** use `_preload_content=False` and an explicit `_request_timeout` (sync `(10, 180)`,
@@ -670,38 +837,90 @@ sandbox_create_transactions(access_token, account_id, transactions) -> None
   `INTERNAL_SERVER_ERROR`, transport errors → `error` (retried next run);
   `TRIAL_CONNECTION_LIMIT` → shown plainly and never retried.
 
-### Linking safety (SYNC-1)
-- **The guard.** A production new-link token is issued only when there is no `plaid_items` row,
-  no `plaid.access_token.production` in Keychain, no unexpired
-  `plaid.link_in_progress.production` marker and no unsaved production token in a recovery file
-  (`secrets.production_link_blockers`) — checked and the marker set under the link lock.
+### Linking safety (SYNC-1, BANK-1 … BANK-8)
+- **Any institution.** Banks and card companies alike, in production and the Sandbox. Each
+  production Item uses one of the Trial plan's 10 for good; the app counts the ones it has created
+  (`linking.connections_used`: Item rows, the Keychain index and unsaved recovery files) and
+  offers no link once 10 exist (`TRIAL_ITEM_LIMIT`).
+- **The guard.** A production new-link token is issued only while no unexpired
+  `plaid.link_in_progress.production` marker exists (one link at a time), no unsaved production
+  token waits in a recovery file, no token in Keychain lacks its Item row (unless Re-attach found
+  its connection removed at Plaid), no v1 token is left
+  that the app can't place (re-attach first, so the duplicate check knows every bank) or failed
+  to move, and fewer than 10 Items exist
+  (`linking.link_blocks`, with `secrets.production_link_blockers` for the Keychain-only facts) —
+  checked and the marker set under the link lock. A v1 token of the one Item is moved first.
   The marker records a random attempt id that goes back to the page with the Link token; only
   that attempt clears it: after its successful exchange (once `store_access_token` has returned
-  normally), a definite refusal, or Link's `onExit`. Otherwise it expires after 4 hours (a Link
+  normally, or once the token waits in a recovery file, which blocks new links by itself until it
+  is stored), a definite refusal, or Link's `onExit`. Otherwise it expires after 4 hours (a Link
   token's lifetime). `./run setup --env production --access-token` marks a stored token's
   recovery files `*.saved`.
-- **Re-attach.** If Keychain holds a production token but the database has no Item (lost or
-  restored database), the Connection page offers "Re-attach existing connection" (rebuild the row
-  from `/item/get` and `/accounts/get`, sync from a null cursor, reconcile) — never a new link.
-- **Pre-flight.** Before the first production link the Connection page shows Plaid's checklist
-  (a Data Transparency use case selected; American Express access, which the Trial plan grants
-  automatically: the Dashboard's OAuth institutions tab says no action is needed) and
-  `search_institutions('American Express', ['liabilities'])`. A Link attempt that fails these
-  checks creates no access token and uses no connection.
-- **Exchange.** In production a public token is not exchanged while any trace of a connection
-  exists (an Item row, the Keychain token, an unsaved recovery file) or when `onSuccess` names an
-  institution that clearly isn't American Express. One exchange or re-attach runs at a time (a
-  session-level advisory lock held until the Item row is committed; a second one is refused), and
-  it keeps the link-in-progress marker while it runs. The public token stays in memory until the
-  access token is in Keychain (read back) and the Item row is committed; transport failures are
-  retried within the token's 30-minute life; one code path only; recovery file if the Keychain
-  write fails (section 3), and if no file can be written either, the token is shown once for the
-  user to keep.
-- **After linking:** `/item/get` (consent expiry, `consented_products`), `/accounts/get`,
-  attach a manual CSV account if one exists, `/liabilities/get` only if Liabilities was consented
-  (otherwise the page offers an update-mode session to add it), then the first sync and backfill.
+- **Duplicates are refused before the exchange** (BANK-3; plaid.com/docs/link/duplicate-items/:
+  "Do not exchange a public token for an access token if you detect a duplicate Item"). When
+  Link's `onSuccess` names an institution that is already linked (Plaid's `institution_id`, or
+  the name for an Item saved without one), the public token is not exchanged and the page points
+  to **Add accounts** (update mode with account selection) or **Reconnect** on that connection —
+  unless the user started the link as "a different login at a bank I've already linked" (a
+  checkbox in the confirm dialog, sent as `different_login`). Even then the link is refused when
+  any picked account's name and mask match an account already linked at that institution. Masks
+  are compared with masks only, never with account numbers (the app has none). With connections
+  in place, metadata without the institution's id (or, with the choice, without accounts, or with
+  more picked accounts than the 20 the app reads) is refused too: Plaid's `onSuccess` names an
+  institution with both its id and its name. A connection saved with neither (a first link whose
+  metadata named no institution while `/item/get` failed right after linking) could be any bank,
+  so every new link is refused until a sync or Reconnect has asked `/item/get` which it is. The
+  Sandbox applies the same check to Link; its test Items made without Link don't. Whether a
+  public token that is never exchanged counts toward the 10 is not documented; the app treats the
+  exchange as the step that creates the Item. The refusal can't undo what happened in Plaid's
+  window: at OAuth banks that don't allow duplicates, signing in to the same login again already
+  sends the first Item to `ITEM_LOGIN_REQUIRED` (RESEARCH T1), which Reconnect repairs. A
+  connection Plaid removed (its last error `ITEM_NOT_FOUND`: deleted in Plaid Portal or by a
+  data-deletion request) can't be repaired by update mode (RESEARCH T2.4), so its refusal says
+  that instead of pointing to Reconnect or Add accounts; removing a connection isn't part of this
+  version (W3-PLAN §0), so that login stays refused while the connection is listed.
+- **Re-attach.** A token in Keychain whose Item row is missing (lost or restored database, or a
+  crash between the Keychain write and the commit), and a v1 token the app can't place, are
+  re-attached per token: `/item/get` names the Item, its row is rebuilt from `/item/get` and
+  `/accounts/get`, it syncs from a null cursor and reconciles — never a new link. Each token is
+  handled on its own (`linking.ReattachOutcome`), so one that fails never stops the others or
+  hides what was done. A token whose `/item/get` answers `ITEM_NOT_FOUND` belongs to a connection
+  Plaid removed (RESEARCH T2.4): its id is noted in `state/removed-items-production.json`
+  (`secrets.mark_production_item_removed`; item ids aren't secrets) and it no longer waits to be
+  re-attached or blocks a link, while its token stays in Keychain and in the index, so it still
+  counts toward the 10. Any other failure is reported, and that token waits for the next try.
+- **Pre-flight.** Before a production link the Connection page shows Plaid's checklist (a Data
+  Transparency use case selected; OAuth banks, which the Trial plan grants automatically: the
+  Dashboard's OAuth institutions tab says no action is needed) and a live `/institutions/search`
+  that shows Plaid answers with the Production keys. A Link attempt that fails these checks
+  creates no access token and uses no connection.
+- **Exchange.** In production a public token is not exchanged while the guard says no (a v1
+  token is moved first) or when it would duplicate a login. One exchange or re-attach runs at a
+  time (a session-level advisory lock held until the Item row is committed; a second one is
+  refused), and it keeps the link-in-progress marker while it runs. The public token stays in
+  memory until the access token is in Keychain under the Item's key (read back) and the Item row
+  is committed; transport failures are retried within the token's 30-minute life; one code path
+  only; recovery file if the Keychain write fails (section 3), and if no file can be written
+  either, the token is shown once for the user to keep.
+- **After linking:** `/item/get` (consent expiry, `consented_products`), `/accounts/get`, attach
+  a manual CSV account when the new Item is American Express (`ins_10`) and has exactly one card
+  for it (the CSV files are Amex's: BANK-8), `/liabilities/get` only if the Item has a credit card
+  and Liabilities was consented (otherwise a card connection offers an update-mode session to add
+  it), then the first sync and backfill.
+- **Each connection** on the Connection page shows its institution, status and accounts (cards:
+  balance, statement balance, minimum payment, credit limit and due date; bank accounts: current
+  and available balance) and its own actions: Reconnect, Renew consent (when a consent date is
+  known: Plaid's, or the American Express estimate), Add accounts, and "Grant access to statement
+  details" for card connections only. Those actions always need Plaid Link, so a page with a
+  connection loads Plaid's script whenever linking is possible. It also names the connection's
+  Keychain item (never the token), so the owner's password-manager copies can be told apart;
+  while the v1 token waits to move (`movable`, section 3), that is the v1 name, with the item the
+  next sync moves it to.
+  Connections at the same institution (a second login, or Sandbox test Items at one test bank)
+  are told apart everywhere by a label from their first account, "Houndstooth Bank (Cash Rewards ··5678)"
+  (`status.connection_labels`).
 - Link's `onExit` (Link closed without linking) clears its own attempt's marker. The
-  `CLOSE_OAUTH` and `FAIL_OAUTH` events are logged as "not linked" but never clear it: the Amex
+  `CLOSE_OAUTH` and `FAIL_OAUTH` events are logged as "not linked" but never clear it: the bank's
   window closed or timed out while Link itself stays open and can still succeed.
 
 ## 8. Sync engine (SYNC-2, SYNC-5, SYNC-6, SYNC-7, REL-1)
@@ -712,6 +931,7 @@ sync_item(item_id, trigger):
   schema guard
   take the sync lock (busy → record 'skipped', return); mark older 'running' runs 'interrupted'
   record sync_run 'running' (own transaction)
+  the Item's own access token (a v1 token of the one Item is moved to its key here, section 3)
   start = item.transactions_cursor            # None → omit cursor
   fetch every page until has_more is false; on TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION
      or a transport error, discard the pages and restart from `start` (bounded retries)
@@ -724,13 +944,17 @@ sync_item(item_id, trigger):
   best effort, each in its own transaction:
      /accounts/get → balances (SYNC-7)
      /item/get → consent_expires_at, consented_products, item error, Plaid freshness
-     /liabilities/get when consented → liabilities columns + statements snapshot (SYNC-7)
+     /liabilities/get when the Item has a credit card and Liabilities was consented →
+        liabilities columns + statements snapshot (SYNC-7); an Item without cards is "not
+        applicable": Plaid isn't asked and liabilities_status is cleared (never "unsupported",
+        never a warning)
   on PlaidError: roll back, set item status/error per classification, record the run
   on any other exception: roll back, record the run as error 'INTERNAL' with the exception
      class, set item status 'error'
   release the sync lock, then alerts.evaluate_after_sync in its own transaction (after success,
      not_ready and every failure; ALR-2 once a day); an INTERNAL exception is then re-raised
-     (non-zero exit)
+     (sync_all, the sync command's loop, logs its traceback, reports it as that Item's
+     "failed (INTERNAL)" line, syncs the other Items and exits 1)
 ```
 
 - **Schedule:** the launchd sync agent runs at 00:15, 06:15, 12:15 and 18:15
@@ -739,11 +963,23 @@ sync_item(item_id, trigger):
 - **Stale data:** `status.py` reports `stale` (and alerts once a day) when the last successful
   sync is more than 36 hours old, whatever the Item status says.
 - **Sync now:** `/transactions/refresh` (free on the Trial plan, 2 per minute), then syncs now
-  and after about 15 s, 45 s and 2 min.
+  and after about 15 s, 45 s and 2 min. A connection that needs reconnecting is left out while
+  another can sync; the top bar keeps Sync now as long as one can (`ConnectionStatus.syncable`).
+- **Accounts Plaid stops listing** (unticked in Add accounts, or closed: "Plaid will stop
+  returning the account", RESEARCH T2.4 and the T2 gotchas) keep their history; `/accounts/get`
+  marks them with a notice (`sync.mark_not_shared`, read by `sync.no_longer_shared`), their
+  balance is the last one Plaid sent, and a later listing clears the notice.
 - **After linking or update mode:** the web process re-syncs with backoff until
   `HISTORICAL_UPDATE_COMPLETE` (cap about 1 hour), and once shortly after update mode.
-- **Consent (SYNC-6):** read on every run; if Amex leaves it null, the due date is
-  `last_consented_at + 365 days`. Renewal is update mode.
+- **Consent (SYNC-6, BANK-6):** read on every run. Only American Express (`ins_10`) asks every 12
+  months, so only it falls back to `last_consented_at + 365 days` when Plaid leaves the date
+  null; another bank uses Plaid's `consent_expiration_time` or has no due date (no reminder, no
+  banner). Renewal is update mode. The top-bar pill shows the worst connection and names each
+  institution in its tooltip; the reconnect and consent banners and the connection alerts name
+  the institution(s). The consent banner names every connection whose consent is due except one
+  that itself needs reconnecting (its Reconnect renews it), so it shows beside another bank's
+  reconnect banner. `ITEM_LOGIN_REQUIRED` is explained as a consent problem only for American
+  Express; at another bank it can as well follow a password change or withdrawn access.
 - Sandbox Items expire after 30 days (`ITEM_LOGIN_REQUIRED`); handled like any reconnect.
 
 ## 9. Web layer
@@ -789,6 +1025,22 @@ Pages: Dashboard `/`, Transactions `/transactions`, Budgets `/budgets`, Trends `
 Recurring `/recurring`, Statements `/statements`, Categories `/categories`, Rules `/rules`,
 Import `/import`, Connection `/connection`, Settings `/settings`. A banner marks the Sandbox
 environment on every page.
+
+**The "Show income" switch (INC-2).** One view preference shared by the Dashboard and Trends,
+stored in `app_settings.show_income` (on by default) and offered once any counted money is booked
+to an income category (`insights.income_switch`). Budgets, Statements and Recurring stay spending
+only. It is a form in each page's header (`templates/dashboard/_income_switch.html`): a checkbox
+with `role="switch"` and a visible label that posts on change (`hx-trigger="change"`) to
+`POST /dashboard/show-income` or `POST /trends/show-income`. The route saves the choice, commits,
+and answers an HTMX request with the region the choice changes (the Dashboard's headline tiles
+`#dash-kpis`; Trends' `#trends-results`, rendered for the filter bar's values, which the form
+sends with `hx-include="#trends-filters"`) plus a toast that screen readers hear; the switch
+stays outside that region, so focus never moves. Without JavaScript a Save button in
+`<noscript>` submits the same form and the route redirects (303) to the Dashboard or to `next`
+(only a `/trends` address). An unchecked switch sends nothing, which the route reads as off.
+Trends shows income with all categories only; in one category's view, while the switch is on, a
+note under the category (and the results' `data-status`) says that income and net show with all
+categories, with a link there.
 
 ## 10. Commands and background jobs
 
@@ -873,14 +1125,18 @@ that called it.
   healthy, then renamed, so the next occurrence alerts); stale data after 36 h once a day (folded
   into a failure or reconnect alert sent in the same run); Keychain approval needed and a
   Keychain item missing (marker files).
-- **Consent (SYNC-6):** renewal due within `consent_reminder_days`, once per due date; not while
-  the Item needs reconnecting (update mode renews the consent too).
+- **Consent (SYNC-6, BANK-6):** renewal due within `consent_reminder_days`, once per due date,
+  for a connection that has a due date (Plaid's, or American Express's 12-month estimate, §8); not
+  while the Item needs reconnecting (update mode renews the consent too). Titles and messages name
+  the connection.
 - **Large charges (ALR-3):** only Plaid rows inserted by a sync for more than
-  `large_charge_threshold`, dated at most 7 days before the previous successful sync (so a
-  catch-up sync after a break of over a week still announces the break's charges), after the
-  initial history load; once per charge and not again when it posts. The sync outcome lists only
-  new charges: a row that replaces one the app already had (a posting, linked or matched, or a
-  re-delivery after account churn) is left out. A charge that first goes over the amount when it
+  `large_charge_threshold` whose category is spending (`kind = 'expense'`) after categorization,
+  on any account (paying the card from checking, a transfer or a paycheck never alerts), dated
+  at most 7 days before the previous successful sync (so a catch-up sync after a break of over a
+  week still announces the break's charges), after the initial history load; once per charge
+  and not again when it posts. The sync outcome lists only new charges: a row that replaces one
+  the app already had (a posting, linked or matched, or a re-delivery after account churn) is
+  left out. A charge that first goes over the amount when it
   posts (a pending charge at or under it, posted higher with a tip or hotel incidentals, or
   raised in place by Plaid; the sync outcome's `pending_raises`) alerts once, under the pending
   row's key. More than 3 new ones in a run send one summary notification.
@@ -904,7 +1160,15 @@ that called it.
   with `/transactions/refresh` for pending → posted. They produce the Gate A evidence. Plaid posts
   a pending charge only on a refresh on or after its posting date, which is still ahead for an
   Item created that day, so the pending → posted test then skips and says why; the fake-Plaid
-  tests cover the carry-over. Tests never drive the Link UI.
+  tests cover the carry-over. Wave 3 (BANK-9) adds a First Platypus Bank login (Sandbox user
+  `bank`) that syncs checking, savings and its credit card, a bank-only login with no
+  statement-details warning, and the same bank linked again, refused before the exchange. Tests
+  never drive the Link UI.
+- Wave-3 integration: `tests/test_w3_upgrade.py` rehearses the owner's upgrade on a scratch
+  database (a customized v1 install at `0003_f1_verification_fixes` with the v1 Keychain token:
+  upgrade, every page, the figures before and after, the token's move, downgrade and upgrade
+  again); `tests/test_w3_seams.py` and `tests/web/test_w3_seams.py` pin the seams between the
+  wave-3 packages.
 
 ## 13. Toward a mobile app
 

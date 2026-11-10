@@ -13,9 +13,10 @@
 {%- set effective = category_by_id.get(r.effective_category_id) if r.effective_category_id is not none else none %}
 <tr>
 <td class="col-grow">
-{#- The Credits badge comes first so a truncated label (phones) never hides it. -#}
+{#- The Credits and Bank accounts badges come first so a truncated label (phones) never hides them. -#}
 <span class="table__primary">
 {%- if r.for_credits %}{{ ui.badge("Credits", tone="info", title="Tried first for credits (negative amounts), e.g. cash back. Fee reversals use the main mapping.") }} {% endif -%}
+{%- if r.for_banks %}{{ ui.badge("Bank accounts", tone="info", title="Tried first for checking and savings accounts, e.g. paychecks and transfers. Cards use the row without this badge.") }} {% endif -%}
 {{ r.label }}</span>
 <span class="table__secondary"><code>{{ r.code }}</code></span>
 </td>
@@ -25,7 +26,7 @@
 <input type="hidden" name="source" value="{{ r.source }}">
 <input type="hidden" name="key" value="{{ r.key }}">
 <input type="hidden" name="show" value="{{ show }}">
-{{ form.category_select("category_id", categories, value=r.category_id, inline=true, label=group.label ~ ": " ~ r.label ~ (" (credits)" if r.for_credits else "") ~ " goes to", placeholder="Not mapped", id="map-" ~ r.slug) }}
+{{ form.category_select("category_id", categories, value=r.category_id, inline=true, label=group.label ~ ": " ~ r.label ~ (" (credits)" if r.for_credits else "") ~ (" (bank accounts)" if r.for_banks else "") ~ " goes to", placeholder="Not mapped", id="map-" ~ r.slug) }}
 <noscript>{{ ui.button("Save", size="sm", type="submit") }}</noscript>
 </form>
 {%- if not r.is_mapped %}

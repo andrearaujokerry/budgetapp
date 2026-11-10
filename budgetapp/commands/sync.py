@@ -40,6 +40,7 @@ from budgetapp.logsetup import setup_logging
 from budgetapp.models import PlaidItem
 from budgetapp.plaid_gateway import PlaidGateway, RealPlaidGateway
 from budgetapp.services import backup as backups
+from budgetapp.services import status as status_service
 from budgetapp.services import sync as sync_service
 from budgetapp.services.events import SyncOutcome
 from budgetapp.services.notify import Notifier, get_notifier
@@ -119,12 +120,16 @@ class Runtime:
         sync_service.ensure_database(self.settings, self.session_factory.kw["bind"])
 
     def item_names(self) -> dict[int, str]:
-        """Every Item's database id → a short name, in id order."""
+        """Every Item's database id → a short name, in id order. Two logins at one bank (or
+        Sandbox test Items at one test bank) are told apart as everywhere else: "Houndstooth
+        Bank (Cash Rewards ··5678)" (``status.connection_labels``)."""
         with self.session_factory() as s:
-            rows = s.execute(
-                select(PlaidItem.id, PlaidItem.institution_name).order_by(PlaidItem.id)
-            ).all()
-        return {row.id: row.institution_name or f"Item {row.id}" for row in rows}
+            items = list(s.scalars(select(PlaidItem).order_by(PlaidItem.id)))
+            labels = status_service.connection_labels(s, items)
+            return {
+                item.id: labels.get(item.id) or item.institution_name or f"Item {item.id}"
+                for item in items
+            }
 
     def plaid_item_ids(self) -> dict[int, str]:
         """Every Item's database id → its Plaid ``item_id``."""
@@ -152,7 +157,7 @@ def describe_outcome(name: str, outcome: SyncOutcome) -> str:
     if outcome.status == "error":
         code = outcome.error_code or "error"
         detail = outcome.display_message or sync_service.describe_error(
-            outcome.error_code, outcome.error_type
+            outcome.error_code, outcome.error_type, name
         )
         line = f"{name}: failed ({code})."
         if detail:
@@ -266,7 +271,7 @@ def sync_command(args: argparse.Namespace, rt: Runtime) -> int:
         rt.ensure_database()
         names = rt.item_names()
         if not names:
-            rt.out("Nothing is linked yet. Link your Amex card on the Connection page.")
+            rt.out("Nothing is linked yet. Link a bank or card on the Connection page.")
             return EXIT_OK
         if item_id is not None and item_id not in names:
             known = ", ".join(f"{i} ({n})" for i, n in names.items())
@@ -293,7 +298,7 @@ def sync_command(args: argparse.Namespace, rt: Runtime) -> int:
     except secrets.MissingSecretError as exc:
         return missing_secret(rt, exc, unattended)
     except Exception:
-        # sync_item already recorded it (INTERNAL on the Item, the run, the alert hook).
+        # Outside any one Item's sync: sync_all reports those as that Item's "failed (INTERNAL)".
         log.exception("The sync failed")
         rt.out("error: the sync failed unexpectedly; the details are in the sync log.")
         return EXIT_FAILED

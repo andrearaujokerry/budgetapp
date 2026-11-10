@@ -1,22 +1,29 @@
 {#- Trends (INS-2): spending per category per calendar month, with the change from last
-    month. The filter bar swaps #trends-results (trends/_results.html); see routes/trends.py. -#}
+    month. The filter bar swaps #trends-results (trends/_results.html); see routes/trends.py.
+    With income to show, the "Show income" switch (INC-2) adds income and net (INC-4); it
+    swaps the same region, sending the filter bar's values along. -#}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
 {% import "components/forms.html" as form %}
+{% import "dashboard/_income_switch.html" as income %}
 {% block title %}Trends{% endblock %}
 {% block charts %}{% if t.has_data %}yes{% endif %}{% endblock %}
 {% block head %}<link rel="stylesheet" href="/static/css/pages/trends.css">{% endblock %}
 {% block content %}
-{{ ui.page_header("Trends", "Spending per category by calendar month, and how it changed.") }}
+{% call ui.page_header("Trends", "Spending per category by calendar month, and how it changed.") %}
+{%- if t.has_data and switch.available %}
+{{ income.switch(switch_path, switch.on, '#trends-results', swap='innerHTML', include='#trends-filters', next_url=switch_next) }}
+{%- endif %}
+{% endcall %}
 {%- if not t.has_data %}
 <div class="card" id="trends-empty">
 {%- if conn and conn.state != 'not_linked' %}
-{% call ui.empty_state('No spending to chart yet', 'Your card is linked, but no transactions have arrived yet. Once they do, this page shows your spending per category for each month, and how each month compares with the one before.', icon='trending') %}
+{% call ui.empty_state('No spending to chart yet', 'Your accounts are linked, but no transactions have arrived yet. Once they do, this page shows your spending per category for each month, and how each month compares with the one before.', icon='trending') %}
 {{ ui.button('Open Connection', href='/connection', icon='link', variant='primary') }}
 {% endcall %}
 {%- else %}
-{% call ui.empty_state('No spending to chart yet', 'Once transactions arrive from your linked card or an imported CSV file, this page shows your spending per category for each month, and how each month compares with the one before.', icon='trending') %}
-{{ ui.button('Link account', href='/connection', icon='link', variant='primary') }}
+{% call ui.empty_state('No spending to chart yet', 'Once transactions arrive from your linked accounts or an imported CSV file, this page shows your spending per category for each month, and how each month compares with the one before.', icon='trending') %}
+{{ ui.button('Link a bank or card', href='/connection', icon='link', variant='primary') }}
 {{ ui.button('Import a CSV file', href='/import', icon='upload') }}
 {% endcall %}
 {%- endif %}

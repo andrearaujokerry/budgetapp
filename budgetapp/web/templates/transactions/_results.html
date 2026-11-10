@@ -31,7 +31,7 @@
 {%- if page.total_count == 0 %}
 <div class="card">
 {%- if not any_transactions %}
-{% call ui.empty_state("No transactions yet", "Link your Amex card to sync charges automatically, or import a CSV download from americanexpress.com for older history.", icon="credit-card") %}
+{% call ui.empty_state("No transactions yet", "Link a bank or card to sync transactions automatically, or import an Amex CSV download from americanexpress.com for older history.", icon="credit-card") %}
 <a class="btn btn--primary" href="/connection">{{ ui.icon('link') }}<span>Link account</span></a>
 <a class="btn" href="/import">{{ ui.icon('upload') }}<span>Import CSV</span></a>
 {% endcall %}
@@ -57,9 +57,9 @@
 <div class="txn-sums__item"><dt>Credits &amp; payments</dt><dd>{{ ui.money(page.sums.credits) }}</dd></div>
 <div class="txn-sums__item"><dt>Net</dt><dd>{{ ui.money(page.sums.net, tone='neutral') }}</dd></div>
 {%- if filt.categories %}
-<div class="txn-sums__tip">{{ ui.tip("Sums of every transaction listed, on all pages (not only this one). Charges are positive amounts; credits are refunds, statement credits and card payments. A split charge counts only its parts in the chosen categories, as on Budgets and Trends; its row still shows the whole charge.", pos="bottom-end") }}</div>
+<div class="txn-sums__tip">{{ ui.tip("Sums of every transaction listed, on all pages (not only this one). Charges are positive amounts (money out); credits are refunds, statement credits, card payments and, on a bank account, paychecks and other money in. A split charge counts only its parts in the chosen categories, as on Budgets and Trends; its row still shows the whole charge.", pos="bottom-end") }}</div>
 {%- else %}
-<div class="txn-sums__tip">{{ ui.tip("Sums of the full amounts of every transaction listed, on all pages (not only this one). Charges are positive amounts; credits are refunds, statement credits and card payments. Filter by category to count only a split charge's parts in it. Spending by category is on Budgets and Trends.", pos="bottom-end") }}</div>
+<div class="txn-sums__tip">{{ ui.tip("Sums of the full amounts of every transaction listed, on all pages (not only this one). Charges are positive amounts (money out); credits are refunds, statement credits, card payments and, on a bank account, paychecks and other money in. Filter by category to count only a split charge's parts in it. Spending by category is on Budgets and Trends.", pos="bottom-end") }}</div>
 {%- endif %}
 </dl>
 <div class="txn-summary__actions">{{ ui.button("Export CSV", icon="download", size="sm", href=urls.export, download=true) }}</div>

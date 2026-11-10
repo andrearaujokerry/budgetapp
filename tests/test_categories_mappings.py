@@ -7,7 +7,14 @@ from budgetapp.models import CategoryMapping, Transaction
 from budgetapp.services import categories, rules
 from budgetapp.services.categories import MappingError
 from budgetapp.services.categorize import Categorizer, amex_category_keys
-from tests.factories import get_category, make_account, make_transaction, uncategorized
+from tests.bank_factories import make_bank_account
+from tests.factories import (
+    get_category,
+    make_account,
+    make_category,
+    make_transaction,
+    uncategorized,
+)
 
 
 def row(listing, key):
@@ -430,3 +437,159 @@ class TestChangeCounts:
     def test_an_id_beyond_bigint_is_no_category(self, db):
         with pytest.raises(MappingError):
             categories.set_mapping(db, "plaid_pfc", "TRAVEL", 2**63)
+
+
+class TestBankRows:
+    """MON-1: the ``|bank`` mappings (W3-PLAN C3) in the "Plaid & Amex categories" editor."""
+
+    @pytest.fixture
+    def checking(self, db):
+        return make_bank_account(db)
+
+    def test_bank_rows_sit_next_to_their_codes(self, db):
+        listing = categories.list_mappings(db, "plaid_pfc")
+        income = group(listing, "Income")
+        keys = [r.key for r in income.rows]
+        assert keys[:2] == ["INCOME", "INCOME|bank"]
+        assert keys.index("INCOME_SALARY|bank") == keys.index("INCOME_SALARY") + 1
+        salary = row(listing, "INCOME_SALARY|bank")
+        assert salary.for_banks and not salary.for_credits and salary.code == "INCOME_SALARY"
+        assert salary.label == "Salary" and salary.group == "INCOME"
+        assert salary.category_id == get_category(db, "Paycheck").id
+        assert not row(listing, "INCOME_SALARY").for_banks
+        assert row(listing, "INCOME|bank").is_group
+        withdrawal = row(listing, "TRANSFER_OUT_WITHDRAWAL|bank")
+        assert withdrawal.category_id == get_category(db, "Cash & ATM").id
+        assert len({r.slug for r in listing.rows}) == len(listing.rows)
+
+    def test_bank_rows_count_on_the_bank_row_and_cards_on_theirs(self, db, checking):
+        card = make_account(db)
+        for _ in range(2):
+            plaid(db, checking, "INCOME_SALARY", "INCOME", amount="-3412.18")
+        plaid(db, card, "INCOME_SALARY", "INCOME", amount="-30.00")
+        plaid(db, checking, "FOOD_AND_DRINK_COFFEE", "FOOD_AND_DRINK")  # no bank key: shared
+        plaid(db, card, "FOOD_AND_DRINK_COFFEE", "FOOD_AND_DRINK")
+        listing = categories.list_mappings(db, "plaid_pfc", only_used=True)
+        assert row(listing, "INCOME_SALARY|bank").transaction_count == 2
+        assert row(listing, "INCOME_SALARY").transaction_count == 1
+        assert row(listing, "FOOD_AND_DRINK_COFFEE").transaction_count == 2
+        assert not any(r.for_banks for r in group(listing, "Food and drink").rows)
+
+    def test_an_unlisted_code_on_a_bank_counts_on_its_bank_row(self, db, checking):
+        plaid(db, checking, "INCOME_LOTTERY", "INCOME", amount="-50.00")
+        listing = categories.list_mappings(db, "plaid_pfc", only_used=True)
+        lottery = row(listing, "INCOME_LOTTERY|bank")
+        assert lottery.transaction_count == 1 and not lottery.is_mapped
+        assert lottery.fallback_category_id == get_category(db, "Other Income").id
+        assert lottery.fallback_from == "group"
+        assert row(listing, "INCOME|bank").transaction_count == 0  # listed: it is the fallback
+
+    def test_without_bank_mappings_a_bank_row_goes_as_on_cards(self, db, checking):
+        categories.set_mapping(db, "plaid_pfc", "INCOME_SALARY|bank", None)
+        change = categories.set_mapping(db, "plaid_pfc", "INCOME|bank", None)
+        assert change.fallback_category_id == get_category(db, "Credits & Rewards").id
+        plaid(db, checking, "INCOME_SALARY", "INCOME", amount="-3412.18")
+        listing = categories.list_mappings(db, "plaid_pfc", only_used=True)
+        counted = row(listing, "INCOME_SALARY")  # no bank key in reach: the card row counts it
+        assert counted.transaction_count == 1
+        assert counted.effective_category_id == get_category(db, "Credits & Rewards").id
+        full = categories.list_mappings(db, "plaid_pfc")
+        assert not any(r.key in ("INCOME|bank", "INCOME_SALARY|bank") for r in full.rows)
+        refund = row(full, "INCOME_TAX_REFUND|bank")  # still mapped; without it: as on cards
+        assert refund.is_mapped and refund.fallback_from == "cards"
+        assert refund.fallback_category_id == get_category(db, "Credits & Rewards").id
+
+    def test_every_bank_and_card_row_shows_the_category_it_gets(self, db, checking):
+        savings = make_bank_account(db, checking.item, subtype="savings")
+        card = make_account(db)
+        categories.set_mapping(db, "plaid_pfc", "TRANSFER_IN_DEPOSIT|bank", None)
+        rows = [
+            plaid(db, checking, "INCOME_SALARY", "INCOME", amount="-3412.18"),
+            plaid(db, savings, "INCOME_INTEREST_EARNED", "INCOME", amount="-48.12"),
+            plaid(db, checking, "INCOME_TAX_REFUND", "INCOME", amount="-812.00"),
+            plaid(db, checking, "TRANSFER_OUT_SAVINGS", "TRANSFER_OUT", amount="500.00"),
+            plaid(db, savings, "TRANSFER_IN_SAVINGS", "TRANSFER_IN", amount="-500.00"),
+            plaid(db, checking, "TRANSFER_IN_DEPOSIT", "TRANSFER_IN", amount="-120.00"),
+            plaid(db, checking, "TRANSFER_OUT_WITHDRAWAL", "TRANSFER_OUT", amount="80.00"),
+            plaid(
+                db, checking, "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT", "LOAN_PAYMENTS", amount="900.00"
+            ),
+            plaid(db, checking, "FOOD_AND_DRINK_GROCERIES", "FOOD_AND_DRINK", amount="42.00"),
+            plaid(db, checking, None, "INCOME", amount="-10.00"),
+            plaid(db, card, "INCOME_OTHER", "INCOME", amount="-25.00"),
+            plaid(db, card, "TRANSFER_OUT_SAVINGS", "TRANSFER_OUT", amount="15.00"),
+        ]
+        cz = Categorizer.load(db)
+        listing = categories.list_mappings(db, "plaid_pfc", only_used=True)
+        assert sum(r.transaction_count for r in listing.rows) == len(rows)
+        for txn in rows:
+            code = txn.pfc_detailed or txn.pfc_primary
+            same = [r for r in listing.rows if r.transaction_count and r.code == code]
+            on_bank_row = cz.on_bank(txn) and any(r.for_banks for r in same)
+            counted = [r for r in same if r.for_banks == on_bank_row]
+            assert len(counted) == 1, (txn.name, code, counted)
+            if on_bank_row and code == "TRANSFER_IN_DEPOSIT":
+                assert counted[0].fallback_from == "group"  # TRANSFER_IN|bank
+            shown = counted[0].effective_category_id or uncategorized(db).id
+            assert shown == cz.decide(txn).category_id, (code, counted[0])
+
+    def test_changing_a_bank_row_counts_only_bank_rows(self, db, checking):
+        auto = {"category": get_category(db, "Paycheck"), "category_source": "plaid"}
+        for _ in range(3):
+            plaid(db, checking, "INCOME_SALARY", "INCOME", amount="-3412.18", **auto)
+        plaid(db, checking, "INCOME_SALARY", "INCOME", amount="-3412.18", category_source="user")
+        plaid(
+            db,
+            make_account(db),
+            "INCOME_SALARY",
+            "INCOME",
+            amount="-20.00",
+            category=get_category(db, "Credits & Rewards"),
+            category_source="plaid",
+        )
+        salary = make_category(db, "Salary", kind="income")
+        change = categories.set_mapping(db, "plaid_pfc", "INCOME_SALARY|bank", salary.id)
+        assert change.label == "Salary (bank accounts)"
+        assert (change.transaction_count, change.reapply_count) == (4, 3)
+        assert change.old_category_id == get_category(db, "Paycheck").id
+
+    def test_money_in_plaid_did_not_classify_counts_on_the_other_income_bank_row(
+        self, db, checking
+    ):
+        """Final review money-3: on a bank account, money in without a usable Plaid category
+        (none, or OTHER) goes where Income → Other's bank row says, so that row counts it, and
+        changing the row counts it as moving."""
+        auto = {"category": get_category(db, "Other Income"), "category_source": "default"}
+        deposits = [
+            plaid(db, checking, None, None, amount="-1800.00", name="MOBILE DEPOSIT", **auto),
+            plaid(db, checking, "OTHER_OTHER", "OTHER", amount="-600.00", name="DEPOSIT", **auto),
+        ]
+        plaid(db, checking, "OTHER_OTHER", "OTHER", amount="45.00")  # money out: as on cards
+        plaid(db, make_account(db), "OTHER_OTHER", "OTHER", amount="-20.00")  # a card's credit
+        listing = categories.list_mappings(db, "plaid_pfc", only_used=True)
+        counted = row(listing, "INCOME_OTHER|bank")
+        assert counted.transaction_count == 2
+        cz = Categorizer.load(db)
+        assert {cz.decide(t).category_id for t in deposits} == {counted.effective_category_id}
+        assert row(listing, "OTHER_OTHER").transaction_count == 2
+        gifts = make_category(db, "Gifts received", kind="income")
+        change = categories.set_mapping(db, "plaid_pfc", "INCOME_OTHER|bank", gifts.id)
+        assert (change.transaction_count, change.reapply_count) == (2, 2)
+
+    def test_bank_keys_are_plaid_only(self, db):
+        assert categories.normalize_mapping_key("plaid_pfc", " INCOME_SALARY|bank ") == (
+            "INCOME_SALARY|bank"
+        )
+        with pytest.raises(MappingError):
+            categories.normalize_mapping_key("amex_csv", "Travel-Airline|bank")
+        with pytest.raises(MappingError):
+            categories.set_mapping(db, "amex_csv", "Travel|bank", get_category(db, "Travel").id)
+
+    def test_removing_the_group_bank_row_keeps_the_others(self, db):
+        change = categories.set_mapping(db, "plaid_pfc", "TRANSFER_OUT|bank", None)
+        assert change.fallback_category_id == get_category(db, "Other").id  # the card mapping
+        listing = categories.list_mappings(db, "plaid_pfc")
+        assert (
+            row(listing, "TRANSFER_OUT_SAVINGS|bank").category_id
+            == get_category(db, "Transfers").id
+        )

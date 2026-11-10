@@ -10,6 +10,7 @@ from sqlalchemy import select, text
 
 from budgetapp.models import Statement
 from budgetapp.services import statements as st
+from tests.bank_factories import make_bank_account
 from tests.factories import (
     card_payments,
     get_category,
@@ -904,8 +905,8 @@ class TestCombineAndRemove:
         with pytest.raises(st.StatementError) as err:
             st.set_closing_date(db, card.id, D(2026, 10, 17), "2026-10-25")
         assert err.value.errors["closing_date"] == (
-            "That is 2 days from the statement Amex reported for Oct 27, 2026. To combine the "
-            "two, set this closing date to Oct 27, 2026."
+            "That is 2 days from the statement the card company reported for Oct 27, 2026. "
+            "To combine the two, set this closing date to Oct 27, 2026."
         )
 
     def test_only_onto_the_amex_statement_next_to_it(self, db, today, card):
@@ -965,7 +966,7 @@ class TestCombineAndRemove:
         for closing in (D(2026, 9, 27), D(2026, 10, 26)):
             with pytest.raises(st.StatementError) as err:
                 st.remove_statement(db, card.id, closing)
-            assert "came from Amex" in err.value.errors["remove"]
+            assert "came from the card company" in err.value.errors["remove"]
         assert moved in statement_rows(db, card)
 
     def test_removing_needs_a_stored_statement(self, db, today, card):
@@ -1088,6 +1089,31 @@ class TestAccounts:
         set_app_settings(db, budget_cycle_account_id=manual.id)
         assert st.default_account(db, options).id == manual.id
         assert st.default_account(db, []) is None
+
+    def test_bank_accounts_have_no_statements(self, db, today, card):
+        """MON-3: checking and savings are never listed, and their cycles are unknown."""
+        checking = make_bank_account(db, statement_closing_day=27)
+        savings = make_bank_account(db, checking.item, subtype="savings")
+        make_transaction(db, checking, amount="40.00", date=D(2026, 10, 3))
+        assert [o.id for o in st.accounts(db)] == [card.id]
+        set_app_settings(db, budget_cycle_account_id=checking.id)
+        assert st.default_account(db, st.accounts(db)).id == card.id
+        for account in (checking, savings):
+            for call in (
+                lambda a=account: st.cycles(db, a.id),
+                lambda a=account: st.cycle_inputs(db, a.id),
+                lambda a=account: st.add_statement(db, a.id, "2026-09-27"),
+                lambda a=account: st.save_statement(db, a.id, D(2026, 9, 27), {}),
+                lambda a=account: st.find_cycle(db, a.id, D(2026, 9, 27)),
+            ):
+                with pytest.raises(LookupError):
+                    call()
+            assert st.detail(db, account.id, D(2026, 9, 27)) is None
+        assert db.scalar(select(Statement.id).where(Statement.account_id == checking.id)) is None
+
+    def test_only_bank_accounts_means_no_statements(self, db):
+        make_bank_account(db)
+        assert st.accounts(db) == [] and st.default_account(db, []) is None
 
     def test_detail_bundles_the_page(self, db, today, card):
         make_statement(db, card, "2026-08-27")

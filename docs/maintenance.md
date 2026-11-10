@@ -27,8 +27,8 @@ skip, so backups stay about a day apart. To back up by hand:
 - If a backup fails, or the newest one is more than 26 hours old, you get a notification (once a
   day) and `./run doctor --env production` reports it. The sync agent checks too, so you also hear
   about it when the backup agent itself stops running.
-- Backups hold the database only. Your keys and the access token stay in Keychain; keep a copy of
-  the token in your password manager ([Going live](going-live.md#keep-a-copy-of-the-access-token-recommended)).
+- Backups hold the database only. Your keys and each connection's access token stay in Keychain;
+  keep a copy of each token in your password manager ([Going live](going-live.md#keep-a-copy-of-each-access-token-recommended)).
 
 ### Time Machine and copies elsewhere
 
@@ -125,11 +125,11 @@ FAILs.
 | Background agents | each agent is loaded and allowed; the installed copy matches the code; Mac notifications are set up |
 | Backups | a recent verified backup exists; the folder and files are private; Time Machine skips the live database and copies backups only to encrypted disks |
 | Code | no Plaid tokens in files git tracks; CSV downloads are kept out of git |
-| Plaid connection | the connection works; consent isn't about to run out; statement details are shared; the last sync isn't too old |
+| Plaid connection | for each connection, by name: it works; its consent isn't about to run out; a card's statement details are shared; its last sync isn't too old |
 
-Run in Terminal, doctor also reads every Keychain item of both environments, so after a
-`brew upgrade` of Python macOS asks about each one; click **Always Allow**. Values are never
-shown. A report looks like this (shortened):
+Run in Terminal, doctor also reads every Keychain item of both environments (the marker an
+unfinished Plaid link can leave behind too), so after a `brew upgrade` of Python macOS asks about
+each one; click **Always Allow**. Values are never shown. A report looks like this (shortened):
 
 ```text
 Budget Tracker doctor · production · database budgetapp
@@ -144,7 +144,7 @@ Background agents
   …
 Plaid connection
   WARN  Renew American Express consent by Nov 26, 2026 (25 days left)
-        Fix: Connection page → Renew
+        Fix: Connection page → Renew consent on American Express
 
 All good: 24 passed, 2 warning(s), 0 failed, 1 info
 ```
@@ -180,7 +180,7 @@ lines.
 | `~/Library/Application Support/budgetapp/state` | small marker files (once-a-day notices, the install stamp) and, only if Keychain failed during a link, `recovery/` |
 | `~/Library/Logs/budgetapp` | logs |
 | `~/Library/LaunchAgents/local.budgetapp.*.plist` | the background agents |
-| login Keychain, name `budgetapp` | Plaid keys, the access token and database passwords ([the list](setup.md#what-keychain-holds)) |
+| login Keychain, name `budgetapp` | Plaid keys, each connection's access token and database passwords ([the list](setup.md#what-keychain-holds)) |
 
 Every folder is readable only by you (mode 700) and every file the app writes there only by you
 (600). The databases: `budgetapp` (production) and `budgetapp_sandbox`, plus `budgetapp_test_…`
@@ -200,7 +200,7 @@ their fix.
 | **"Upgrade needed"** | Sandbox: `./run migrate` (or restart `./run`). Production: `./run live`, which backs up first. Demo: `./run demo create NAME` |
 | **"The Sandbox database was upgraded by a newer version of the app"**, or "which this code doesn't know: newer code upgraded it" from a command | Another branch or checkout with newer code migrated it, so `./run migrate` can't help: check out that code again, or restore an older Sandbox backup with `./run restore FILE` ([Restore a backup](#restore-a-backup)) |
 | **"Setup isn't finished"** | `./run setup --keys-only` for the Plaid keys, or `./run setup` for the database passwords |
-| **"Keychain approval needed"** | `./run doctor --env production` in Terminal, then **Always Allow** for each item |
+| **"Keychain approval needed"**, or **"Linking is paused."** saying macOS Keychain needs your approval | `./run doctor --env production` in Terminal, then **Always Allow** for each item |
 | **"127.0.0.1:8766 is already in use"** | The app already runs in another Terminal window: open the address, or stop that one with Ctrl-C |
 | **"PostgreSQL 18 not found"** | `brew install postgresql@18` |
 | **"Python 3.14 is required"** | `brew install python@3.14` |

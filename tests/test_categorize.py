@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import select
 
 from budgetapp.models import Rule
+from budgetapp.periods import month_of
 from budgetapp.services import categorize
 from budgetapp.services.categorize import (
     Categorizer,
@@ -19,7 +20,9 @@ from budgetapp.services.categorize import (
     rule_matches,
     system_category_id,
 )
+from budgetapp.services.spending import period_spending
 from budgetapp.services.userstate import UserState
+from tests.bank_factories import make_bank_account
 from tests.bounded import run_bounded
 from tests.factories import (
     card_payments,
@@ -696,3 +699,518 @@ class TestSignAwareMapping:
         )
         assert recategorize(db).changed >= 1
         assert row.category_id == uncategorized(db).id
+
+
+# --------------------------------------------------------------------------- bank accounts (C3)
+
+
+class TestBankAccounts:
+    """MON-1 / W3-PLAN C3: bank money goes to the income, transfer and cash categories."""
+
+    @pytest.fixture
+    def checking(self, db):
+        return make_bank_account(db)
+
+    @pytest.fixture
+    def savings(self, db, checking):
+        return make_bank_account(db, checking.item, subtype="savings")
+
+    def _decide(self, db, account, **fields):
+        row = make_transaction(db, account, **fields)
+        return Categorizer.load(db).decide(row)
+
+    @pytest.mark.parametrize(
+        ("primary", "detailed", "amount", "category"),
+        [
+            ("INCOME", "INCOME_SALARY", "-3412.18", "Paycheck"),
+            ("INCOME", "INCOME_WAGES", "-3412.18", "Paycheck"),  # PFC v1's name
+            ("INCOME", "INCOME_INTEREST_EARNED", "-48.12", "Interest"),
+            ("INCOME", "INCOME_DIVIDENDS", "-12.40", "Interest"),
+            ("INCOME", "INCOME_TAX_REFUND", "-812.00", "Other Income"),
+            ("INCOME", "INCOME_OTHER", "-40.00", "Other Income"),
+            ("INCOME", "INCOME_SOMETHING_NEW", "-40.00", "Other Income"),  # falls to INCOME|bank
+            ("INCOME", None, "-40.00", "Other Income"),
+            ("TRANSFER_IN", "TRANSFER_IN_SAVINGS", "-500.00", "Transfers"),
+            ("TRANSFER_IN", "TRANSFER_IN_ACCOUNT_TRANSFER", "-500.00", "Transfers"),
+            ("TRANSFER_IN", "TRANSFER_IN_DEPOSIT", "-120.00", "Transfers"),
+            ("TRANSFER_OUT", "TRANSFER_OUT_SAVINGS", "500.00", "Transfers"),
+            ("TRANSFER_OUT", "TRANSFER_OUT_ACCOUNT_TRANSFER", "500.00", "Transfers"),
+            ("TRANSFER_OUT", "TRANSFER_OUT_WITHDRAWAL", "80.00", "Cash & ATM"),
+            ("LOAN_PAYMENTS", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT", "2512.37", "Card Payments"),
+            ("FOOD_AND_DRINK", "FOOD_AND_DRINK_GROCERIES", "42.10", "Groceries"),  # as for cards
+            ("FOOD_AND_DRINK", "FOOD_AND_DRINK_GROCERIES", "-8.00", "Groceries"),  # a refund
+            ("RENT_AND_UTILITIES", "RENT_AND_UTILITIES_RENT", "2450.00", "Home"),
+            ("BANK_FEES", "BANK_FEES_OVERDRAFT_FEES", "35.00", "Fees & Interest"),
+            # Review finding (major): a loan payment from checking is spending, never a card
+            # payment, and money a lender deposits is a transfer (never a refund of spending).
+            ("LOAN_PAYMENTS", "LOAN_PAYMENTS_OTHER_PAYMENT", "450.00", "Other"),
+            ("LOAN_PAYMENTS", "LOAN_PAYMENTS_EWA", "120.00", "Other"),
+            ("LOAN_PAYMENTS", "LOAN_PAYMENTS_CASH_ADVANCES", "575.00", "Other"),
+            ("LOAN_PAYMENTS", None, "450.00", "Other"),
+            # a code Plaid adds later takes the primary's bank key, LOAN_PAYMENTS|bank
+            ("LOAN_PAYMENTS", "LOAN_PAYMENTS_SOMETHING_NEW", "450.00", "Other"),
+            ("LOAN_PAYMENTS", "LOAN_PAYMENTS_CAR_PAYMENT", "480.00", "Transportation"),
+            ("LOAN_PAYMENTS", "LOAN_PAYMENTS_MORTGAGE_PAYMENT", "2100.00", "Home"),
+            ("LOAN_PAYMENTS", "LOAN_PAYMENTS_STUDENT_LOAN_PAYMENT", "310.00", "Education"),
+            ("LOAN_PAYMENTS", "LOAN_PAYMENTS_PERSONAL_LOAN_PAYMENT", "260.00", "Utilities & Bills"),
+            ("LOAN_PAYMENTS", "LOAN_PAYMENTS_BNPL", "45.00", "Shopping"),
+            ("LOAN_DISBURSEMENTS", "LOAN_DISBURSEMENTS_CASH_ADVANCES", "-500.00", "Transfers"),
+            ("LOAN_DISBURSEMENTS", "LOAN_DISBURSEMENTS_PERSONAL", "-5000.00", "Transfers"),
+            ("LOAN_DISBURSEMENTS", "LOAN_DISBURSEMENTS_EWA", "-100.00", "Transfers"),
+            ("LOAN_DISBURSEMENTS", "LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT", "-300.00", "Transfers"),
+            ("LOAN_DISBURSEMENTS", None, "-300.00", "Transfers"),
+        ],
+    )
+    def test_bank_rows_follow_the_bank_mappings(
+        self, db, checking, primary, detailed, amount, category
+    ):
+        decision = self._decide(
+            db, checking, amount=amount, pfc_primary=primary, pfc_detailed=detailed
+        )
+        assert (decision.category_id, decision.source) == (get_category(db, category).id, "plaid")
+        if detailed is not None and detailed != "INCOME_SOMETHING_NEW":
+            assert "(bank accounts)" in decision.reason or category in {
+                "Groceries",
+                "Home",
+                "Fees & Interest",
+            }
+
+    def test_the_new_categories_have_the_intended_kinds(self, db):
+        kinds = {name: get_category(db, name).kind for name in categorize_kinds()}
+        assert kinds == {
+            "Paycheck": "income",
+            "Interest": "income",
+            "Other Income": "income",
+            "Transfers": "transfer",
+            "Cash & ATM": "expense",
+        }
+
+    @pytest.mark.parametrize(
+        ("primary", "detailed", "amount", "category", "source"),
+        [
+            ("INCOME", "INCOME_SALARY", "-3412.18", "Credits & Rewards", "plaid"),
+            ("INCOME", "INCOME_INTEREST_EARNED", "-4.12", "Credits & Rewards", "plaid"),
+            ("TRANSFER_IN", "TRANSFER_IN_SAVINGS", "-500.00", "Card Payments", "system"),
+            ("TRANSFER_OUT", "TRANSFER_OUT_SAVINGS", "500.00", "Other", "plaid"),
+            ("TRANSFER_OUT", "TRANSFER_OUT_WITHDRAWAL", "80.00", "Other", "plaid"),
+            (
+                "LOAN_PAYMENTS",
+                "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+                "-2512.37",
+                "Card Payments",
+                "system",
+            ),
+            ("LOAN_PAYMENTS", "LOAN_PAYMENTS_OTHER_PAYMENT", "-450.00", "Card Payments", "plaid"),
+            ("LOAN_PAYMENTS", "LOAN_PAYMENTS_OTHER_PAYMENT", "450.00", "Uncategorized", "default"),
+            ("LOAN_DISBURSEMENTS", "LOAN_DISBURSEMENTS_CASH_ADVANCES", "200.00", "Other", "plaid"),
+        ],
+    )
+    def test_cards_are_unchanged(self, db, primary, detailed, amount, category, source):
+        card = make_account(db)
+        decision = self._decide(db, card, amount=amount, pfc_primary=primary, pfc_detailed=detailed)
+        assert (decision.category_id, decision.source) == (get_category(db, category).id, source)
+
+    def test_step_zero_is_for_cards_only(self, db, checking):
+        """A transfer in from savings that reads like a payment stays a transfer on a bank."""
+        fields = {
+            "amount": "-500.00",
+            "name": "AUTOPAY TRANSFER FROM SAV 7702",
+            "transaction_code": "payment",
+            "pfc_primary": "TRANSFER_IN",
+            "pfc_detailed": "TRANSFER_IN_ACCOUNT_TRANSFER",
+        }
+        on_bank = self._decide(db, checking, **fields)
+        assert (on_bank.category_id, on_bank.source) == (get_category(db, "Transfers").id, "plaid")
+        on_card = self._decide(db, make_account(db), **fields)
+        assert (on_card.category_id, on_card.source) == (card_payments(db).id, "system")
+
+    def test_a_positive_bank_row_may_be_a_transfer(self, db, checking):
+        """The guard that sends a positive row out of a transfer category is for cards only."""
+        cz = Categorizer.load(db)
+        fields = {
+            "amount": "300.00",
+            "pfc_primary": "TRANSFER_IN",
+            "pfc_detailed": "TRANSFER_IN_ACCOUNT_TRANSFER",
+        }
+        out = make_transaction(db, checking, **fields)
+        assert cz.decide(out).category_id == get_category(db, "Transfers").id
+        same_on_card = make_transaction(db, **fields)  # the card mapping: Card Payments
+        assert cz.decide(same_on_card).category_id == uncategorized(db).id
+
+    def test_money_a_lender_deposits_never_lowers_spending(self, db, checking):
+        """Review finding (major): a cash advance paid into checking took the card mapping
+        (Other, spending) and lowered the month's spending like a refund."""
+        october = month_of(dt.date(2026, 10, 15))
+        cz = Categorizer.load(db)
+        for fields in (
+            {"amount": "60.00", "pfc_primary": "GENERAL_MERCHANDISE"},
+            {
+                "amount": "-500.00",
+                "name": "PAYDAY ADVANCE",
+                "pfc_primary": "LOAN_DISBURSEMENTS",
+                "pfc_detailed": "LOAN_DISBURSEMENTS_CASH_ADVANCES",
+            },
+            {
+                "amount": "-5000.00",
+                "name": "LOAN FUNDING",
+                "pfc_primary": "LOAN_DISBURSEMENTS",
+                "pfc_detailed": "LOAN_DISBURSEMENTS_PERSONAL",
+            },
+            {
+                "amount": "450.00",
+                "name": "LOAN PMT",
+                "pfc_primary": "LOAN_PAYMENTS",
+                "pfc_detailed": "LOAN_PAYMENTS_OTHER_PAYMENT",
+            },
+        ):
+            row = make_transaction(db, checking, date="2026-10-05", **fields)
+            apply_decision(row, cz.decide(row))
+        db.flush()
+        assert period_spending(db, october).total == Decimal("510.00")  # $60 + the $450 payment
+
+    def test_rules_come_first_so_a_transfer_can_become_income(self, db, savings):
+        other_income = get_category(db, "Other Income")
+        rule = make_rule(db, other_income, description_pattern="VENMO CASHOUT")
+        decision = self._decide(
+            db,
+            savings,
+            amount="-75.00",
+            name="VENMO CASHOUT",
+            pfc_primary="TRANSFER_IN",
+            pfc_detailed="TRANSFER_IN_TRANSFER_IN_FROM_APPS",
+        )
+        assert decision == Decision(other_income.id, "rule", rule.id, reason=f"rule {rule.id}")
+
+    def test_rules_never_touch_a_card_payment_from_checking(self, db, checking):
+        """Review finding: a rule written for card rows (where step 0 shields payments) matched
+        the ACH text on checking and turned the card's payment into spending, so the card's
+        charges counted twice. Rules now skip a bank row Plaid codes as a card payment; they still
+        apply to every other row, on the card and on checking."""
+        travel = get_category(db, "Travel")
+        card_rule = make_rule(db, travel, description_pattern="AMERICAN EXPRESS")
+        make_rule(db, get_category(db, "Other Income"), account_id=checking.id, priority=1)
+        cz = Categorizer.load(db)
+        payment = {
+            "amount": "2512.37",
+            "name": "AMERICAN EXPRESS ACH PMT",
+            "pfc_primary": "LOAN_PAYMENTS",
+            "pfc_detailed": "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+        }
+        from_checking = make_transaction(db, checking, **payment)
+        assert cz.card_payment_from_bank(from_checking)
+        decision = cz.decide(from_checking)
+        assert (decision.category_id, decision.source) == (card_payments(db).id, "plaid")
+        assert decision.reason == (
+            "Plaid category LOAN_PAYMENTS_CREDIT_CARD_PAYMENT (bank accounts)"
+        )
+        assert cz.automatic(from_checking) == decision
+        returned = make_transaction(db, checking, **{**payment, "amount": "-2512.37"})
+        assert cz.decide(returned).category_id == card_payments(db).id
+        # every other row still meets the rules first
+        on_card = make_transaction(
+            db,
+            amount="640.00",
+            name="AMERICAN EXPRESS TRAVEL",
+            pfc_primary="TRAVEL",
+            pfc_detailed="TRAVEL_FLIGHTS",
+        )
+        assert cz.decide(on_card) == Decision(
+            travel.id, "rule", card_rule.id, reason=f"rule {card_rule.id}"
+        )
+        transfer = make_transaction(
+            db,
+            checking,
+            amount="-75.00",
+            name="ZELLE FROM SAM",
+            pfc_primary="TRANSFER_IN",
+            pfc_detailed="TRANSFER_IN_ACCOUNT_TRANSFER",
+        )
+        assert cz.decide(transfer).category_id == get_category(db, "Other Income").id
+
+    def test_a_category_set_on_a_card_payment_from_checking_still_wins(self, db, checking):
+        """Only rules skip it: the owner's own choice (carried from the pending row, or set on the
+        row) and an edited bank mapping still decide."""
+        travel = get_category(db, "Travel")
+        payment = {
+            "amount": "900.00",
+            "name": "STORE CARD PMT",
+            "pfc_primary": "LOAN_PAYMENTS",
+            "pfc_detailed": "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+        }
+        posted = make_transaction(db, checking, **payment)
+        state = UserState(category_id=travel.id, notes=None, tags=(), splits=())
+        assert categorize.apply_carried_state(Categorizer.load(db), posted, state) is False
+        assert (posted.category_id, posted.category_source) == (travel.id, "user")
+        from budgetapp.services import categories
+
+        categories.set_mapping(
+            db, "plaid_pfc", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT|bank", get_category(db, "Other").id
+        )
+        remapped = make_transaction(db, checking, **payment)
+        assert Categorizer.load(db).decide(remapped).category_id == get_category(db, "Other").id
+
+    def test_recategorize_takes_a_card_payment_from_checking_back_from_a_rule(self, db, checking):
+        """A row a rule had put in spending before the fix returns to Card Payments when rules
+        are re-applied."""
+        travel = get_category(db, "Travel")
+        rule = make_rule(db, travel, description_pattern="AMEX EPAYMENT")
+        row = make_transaction(
+            db,
+            checking,
+            amount="1200.00",
+            name="AMEX EPAYMENT ACH PMT",
+            pfc_primary="LOAN_PAYMENTS",
+            pfc_detailed="LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+            category=travel,
+            category_source="rule",
+            rule_id=rule.id,
+        )
+        result = recategorize(db, transaction_ids=[row.id])
+        assert result.changed == 1
+        assert (row.category_id, row.category_source, row.rule_id) == (
+            card_payments(db).id,
+            "plaid",
+            None,
+        )
+
+    def test_the_rules_page_preview_keeps_a_card_payment_from_checking(self, db, checking):
+        """The Rules page preview shows the bank side of a card payment as a payment that stays,
+        and its counts are what saving the rule then changes."""
+        from budgetapp.services import rules
+
+        travel = get_category(db, "Travel")
+        payment = make_transaction(
+            db,
+            checking,
+            amount="2512.37",
+            name="AMERICAN EXPRESS ACH PMT",
+            pfc_primary="LOAN_PAYMENTS",
+            pfc_detailed="LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+            category=card_payments(db),
+            category_source="plaid",
+        )
+        booking = make_transaction(db, amount="640.00", name="AMERICAN EXPRESS TRAVEL")
+        draft = rules.RuleDraft(
+            description_pattern="AMERICAN EXPRESS",
+            category_id=str(travel.id),
+            apply_to_existing=True,
+        )
+        preview = rules.preview(db, draft)
+        by_id = {item.transaction_id: item for item in preview.sample}
+        assert (by_id[payment.id].status, by_id[payment.id].proposed) == ("payment", None)
+        assert by_id[booking.id].status == "change"
+        assert (preview.match_count, preview.payment_count, preview.would_change_count) == (2, 1, 1)
+        assert rules.create(db, draft).applied.changed == 1
+        assert (payment.category_id, booking.category_id) == (card_payments(db).id, travel.id)
+
+    def test_is_bank_card_payment(self, db, checking):
+        coded = {"amount": "50.00", "pfc_detailed": "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"}
+        assert categorize.is_bank_card_payment(make_transaction(db, checking, **coded))
+        assert not categorize.is_bank_card_payment(make_transaction(db, **coded))  # a card
+        other = make_transaction(
+            db, checking, amount="50.00", pfc_detailed="LOAN_PAYMENTS_OTHER_PAYMENT"
+        )
+        assert not categorize.is_bank_card_payment(other)
+        assert categorize.is_bank_card_payment(txn(**coded), bank=True)
+        assert not categorize.is_bank_card_payment(txn(**coded))  # not stored: a card row
+
+    def test_the_refund_rule_still_applies_on_a_bank(self, db, checking):
+        groceries = get_category(db, "Groceries")
+        make_transaction(
+            db, checking, amount="40.00", merchant_name="Rainbow Grocery", category=groceries
+        )
+        decision = self._decide(
+            db,
+            checking,
+            amount="-12.00",
+            merchant_name="Rainbow Grocery",
+            transaction_code="refund",
+            pfc_primary="TRANSFER_IN",
+            pfc_detailed="TRANSFER_IN_DEPOSIT",
+        )
+        assert (decision.category_id, decision.source) == (groceries.id, "default")
+
+    def test_an_account_added_after_loading_is_still_a_bank(self, db):
+        cz = Categorizer.load(db)
+        checking = make_bank_account(db)  # e.g. stored by the sync that brought the row
+        row = make_transaction(
+            db, checking, amount="-3412.18", pfc_primary="INCOME", pfc_detailed="INCOME_SALARY"
+        )
+        assert cz.on_bank(row) and cz.decide(row).category_id == get_category(db, "Paycheck").id
+
+    def test_an_untyped_or_manual_account_counts_as_a_card(self, db):
+        untyped = make_account(db, type=None, subtype=None)
+        manual = make_account(db, manual=True)
+        cz = Categorizer.load(db)
+        for account in (untyped, manual):
+            row = make_transaction(db, account, amount="-500.00", pfc_primary="TRANSFER_IN")
+            assert not cz.on_bank(row) and cz.decide(row).source == "system"
+
+    def test_is_payment_reads_the_rows_account(self, db, checking):
+        fields = {"amount": "-500.00", "name": "ONLINE PAYMENT - THANK YOU"}
+        assert not is_payment(make_transaction(db, checking, **fields))
+        assert is_payment(make_transaction(db, **fields))
+        assert is_payment(txn(**fields))  # not a stored row: a card unless told otherwise
+        assert not is_payment(txn(**fields), bank=True)
+        loose = categorize_transaction(account=checking, **fields)  # not in a session yet
+        assert not is_payment(loose)
+
+    def test_a_carried_category_lands_on_a_bank_transfer(self, db, savings):
+        """A pending transfer the owner called income keeps that category when it posts (step 0
+        would drop it on a card) and is not flagged."""
+        other_income = get_category(db, "Other Income")
+        state = UserState(category_id=other_income.id, notes=None, tags=(), splits=())
+        posted = make_transaction(
+            db,
+            savings,
+            amount="-75.00",
+            name="ZELLE FROM SAM RIVERA",
+            pfc_primary="TRANSFER_IN",
+            pfc_detailed="TRANSFER_IN_ACCOUNT_TRANSFER",
+        )
+        assert categorize.apply_carried_state(Categorizer.load(db), posted, state) is False
+        assert (posted.category_id, posted.category_source) == (other_income.id, "user")
+        assert not posted.needs_review
+
+    def test_recategorize_moves_bank_rows_to_the_bank_mappings(self, db, checking):
+        credits = get_category(db, "Credits & Rewards")
+        paycheck = make_transaction(
+            db,
+            checking,
+            amount="-3412.18",
+            category=credits,
+            category_source="plaid",
+            pfc_primary="INCOME",
+            pfc_detailed="INCOME_SALARY",
+        )
+        card_credit = make_transaction(
+            db,
+            amount="-25.00",
+            category=credits,
+            category_source="plaid",
+            pfc_primary="INCOME",
+            pfc_detailed="INCOME_OTHER",
+        )
+        result = recategorize(db, transaction_ids=[paycheck.id, card_credit.id])
+        assert result.changed == 1
+        assert paycheck.category_id == get_category(db, "Paycheck").id
+        assert card_credit.category_id == credits.id
+
+    def test_editing_a_bank_mapping_leaves_cards_alone(self, db, checking):
+        from budgetapp.services import categories
+
+        salary = make_category(db, "Salary", kind="income")
+        change = categories.set_mapping(db, "plaid_pfc", "INCOME_SALARY|bank", salary.id)
+        assert change.label == "Salary (bank accounts)" and change.key == "INCOME_SALARY|bank"
+        on_bank = self._decide(
+            db, checking, amount="-3412.18", pfc_primary="INCOME", pfc_detailed="INCOME_SALARY"
+        )
+        on_card = self._decide(
+            db,
+            make_account(db),
+            amount="-30.00",
+            pfc_primary="INCOME",
+            pfc_detailed="INCOME_SALARY",
+        )
+        assert on_bank.category_id == salary.id
+        assert on_card.category_id == get_category(db, "Credits & Rewards").id
+
+    @pytest.mark.parametrize(
+        ("on", "primary", "detailed", "amount", "category", "source"),
+        [
+            # Money in to a bank account that Plaid didn't classify (no category: nullable in
+            # Plaid's spec, RESEARCH T1.5; or PFC v2's OTHER) is a deposit, never a refund.
+            ("bank", None, None, "-1800.00", "Other Income", "default"),
+            ("bank", "OTHER", "OTHER_OTHER", "-600.00", "Other Income", "default"),
+            ("bank", "OTHER", None, "-600.00", "Other Income", "default"),
+            # Money out, and credits on a card (most likely refunds), map as before.
+            ("bank", None, None, "45.00", "Uncategorized", "default"),
+            ("bank", "OTHER", "OTHER_OTHER", "45.00", "Other", "plaid"),
+            ("card", None, None, "-20.00", "Uncategorized", "default"),
+            ("card", "OTHER", "OTHER_OTHER", "-20.00", "Other", "plaid"),
+            # A code Plaid did give keeps its mapping (a debit-card refund lowers spending).
+            ("bank", "FOOD_AND_DRINK", "FOOD_AND_DRINK_GROCERIES", "-8.00", "Groceries", "plaid"),
+        ],
+    )
+    def test_money_in_plaid_did_not_classify_is_other_income(
+        self, db, checking, on, primary, detailed, amount, category, source
+    ):
+        """Final review money-3: such a deposit took Uncategorized or Other (spending), so it
+        lowered spending and budgets like a refund and never counted as income."""
+        account = checking if on == "bank" else make_account(db)
+        decision = self._decide(
+            db, account, amount=amount, name="DEPOSIT", pfc_primary=primary, pfc_detailed=detailed
+        )
+        assert (decision.category_id, decision.source) == (get_category(db, category).id, source)
+
+    def test_rules_still_come_first_for_money_in_plaid_did_not_classify(self, db, checking):
+        transfers = get_category(db, "Transfers")
+        rule = make_rule(db, transfers, description_pattern="TRANSFER FROM BROKERAGE")
+        decision = self._decide(db, checking, amount="-900.00", name="TRANSFER FROM BROKERAGE")
+        assert (decision.category_id, decision.source, decision.rule_id) == (
+            transfers.id,
+            "rule",
+            rule.id,
+        )
+
+    def test_a_refund_plaid_did_not_classify_still_lowers_the_merchants_spending(
+        self, db, checking
+    ):
+        home = get_category(db, "Home")
+        make_transaction(
+            db, checking, amount="64.00", merchant_name="Corner Hardware", category=home
+        )
+        decision = self._decide(
+            db,
+            checking,
+            amount="-14.00",
+            merchant_name="Corner Hardware",
+            transaction_code="refund",
+        )
+        assert (decision.category_id, decision.source) == (home.id, "default")
+
+    def test_money_in_plaid_did_not_classify_follows_the_other_income_bank_row(self, db, checking):
+        """It goes where the "Bank accounts" row of Income → Other says (else Income's), so the
+        owner can send it elsewhere; with neither, it maps as before."""
+        from budgetapp.services import categories
+
+        gifts = make_category(db, "Gifts received", kind="income")
+        categories.set_mapping(db, "plaid_pfc", "INCOME_OTHER|bank", gifts.id)
+        deposit = {"amount": "-150.00", "name": "MOBILE DEPOSIT"}
+        assert self._decide(db, checking, **deposit).category_id == gifts.id
+        categories.set_mapping(db, "plaid_pfc", "INCOME_OTHER|bank", None)
+        other_income = get_category(db, "Other Income")
+        assert self._decide(db, checking, **deposit).category_id == other_income.id
+        categories.set_mapping(db, "plaid_pfc", "INCOME|bank", None)
+        assert self._decide(db, checking, **deposit).category_id == uncategorized(db).id
+
+    def test_recategorize_moves_money_in_plaid_did_not_classify(self, db, checking):
+        deposit = make_transaction(db, checking, amount="-1800.00", name="MOBILE DEPOSIT")
+        assert recategorize(db, transaction_ids=[deposit.id]).changed == 1
+        assert deposit.category_id == get_category(db, "Other Income").id
+        assert deposit.category_source == "default"
+
+    def test_amex_csv_rows_never_use_bank_keys(self, db):
+        manual = make_account(db, manual=True)
+        row = make_transaction(
+            db,
+            manual,
+            source="csv",
+            amount="12.00",
+            external_category="Restaurant-Restaurant",
+        )
+        assert (
+            Categorizer.load(db).decide(row).category_id == get_category(db, "Dining & Drinks").id
+        )
+
+
+def categorize_kinds() -> tuple[str, ...]:
+    return ("Paycheck", "Interest", "Other Income", "Transfers", "Cash & ATM")
+
+
+def categorize_transaction(**fields):
+    """A ``Transaction`` that is in no session (its account given as an object)."""
+    from budgetapp.models import Transaction
+
+    amount = fields.pop("amount")
+    return Transaction(source="plaid", amount=Decimal(amount), **fields)

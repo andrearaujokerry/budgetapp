@@ -441,7 +441,7 @@ class TestSave:
         errors = response.context["f"]["errors"]
         assert set(errors) >= {"conditions", "category_id"}
         text = html.unescape(response.text)
-        assert "Add at least one condition (merchant, description, amount or card)." in text
+        assert "Add at least one condition (merchant, description, amount or account)." in text
         assert 'value="Nothing"' in response.text  # what was typed stays
         assert db.scalar(select(func.count()).select_from(Rule)) == before
         assert csp_problems(response.text, rendered=True) == []

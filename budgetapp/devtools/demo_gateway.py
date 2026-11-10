@@ -40,7 +40,11 @@ class DemoPlaidGateway:
         raise demo_error()
 
     def create_link_token(
-        self, *, access_token: str | None = None, additional_consented_products: Sequence[str] = ()
+        self,
+        *,
+        access_token: str | None = None,
+        additional_consented_products: Sequence[str] = (),
+        account_selection: bool = False,
     ) -> str:
         self._refuse()
 

@@ -21,6 +21,12 @@ the address fields and ``Extended Details`` → ``location``; ``source='csv'``, 
 the ``Date``. ``Account #`` is never used: it differs per additional card member, and the whole
 file goes to one account the user chooses.
 
+Targets (W3-PLAN MON-3): an Amex CSV file goes to an American Express card: a linked credit
+account of an Amex Item (institution ``ins_10``), or the manual "American Express (CSV)" account,
+which is refused only once an Amex Item exists in production (its history would count twice).
+Bank accounts and other banks' cards are never targets, and an Item at another bank doesn't
+block the manual account.
+
 Flow: :func:`preview` parses and classifies every row (new, held for review, matches a Plaid
 transaction, already imported, changed since an earlier import, error) without writing anything
 and keeps the parsed rows in process memory under a random token for 30 minutes (uploaded files are
@@ -61,10 +67,12 @@ from budgetapp.db import ledger_lock
 from budgetapp.models import Account, CsvImport, PlaidItem, Transaction
 from budgetapp.money import CENT, to_money
 from budgetapp.services import alerts, reconcile
+from budgetapp.services.accounts import CARD
 from budgetapp.services.categorize import Categorizer
 from budgetapp.services.events import ImportOutcome
 from budgetapp.services.notify import Notifier, NullNotifier
 from budgetapp.services.reconcile import CsvSide, ReconcileResult, reference_posting_date
+from budgetapp.services.status import is_amex, is_amex_card
 from budgetapp.textutil import has_control_chars, strip_control_chars
 
 log = logging.getLogger(__name__)
@@ -439,13 +447,16 @@ class TargetOption:
 class ImportTargets:
     options: tuple[TargetOption, ...]
     default: str | None
-    #: True once a production Item exists: only linked accounts may be targeted.
+    #: True once a production Amex Item exists: only linked Amex cards may be targeted.
     linked_only: bool
 
 
 def linked_only(session: Session, *, production: bool) -> bool:
-    """Once a production Item exists, CSV import may only target linked accounts (§6)."""
-    return production and session.scalar(select(func.count()).select_from(PlaidItem)) > 0
+    """Once a production Amex Item exists, CSV import may only target its linked cards (§6):
+    an Item at another bank (checking, another card) doesn't block the manual account."""
+    if not production:
+        return False
+    return any(is_amex(item) for item in session.scalars(select(PlaidItem)))
 
 
 def account_label(account: Account) -> str:
@@ -457,22 +468,22 @@ def account_label(account: Account) -> str:
 
 
 def import_targets(session: Session, *, production: bool = False) -> ImportTargets:
-    """Accounts a file can go to. Default: the only linked credit-card account; else the only
-    manual account; else a new manual account (created when the import is committed)."""
+    """Accounts a file can go to: linked Amex cards, then the manual account (unless a production
+    Amex Item exists). Default: the only linked Amex card; else the only manual account; else a
+    new manual account (created when the import is committed)."""
     only_linked = linked_only(session, production=production)
     accounts = session.scalars(
         select(Account).where(Account.is_hidden.is_(False)).order_by(Account.id)
     ).all()
-    linked = [a for a in accounts if not a.is_manual]
+    linked = [a for a in accounts if is_amex_card(a)]
     manual = [] if only_linked else [a for a in accounts if a.is_manual]
     options = [TargetOption(str(a.id), account_label(a), True) for a in linked]
     options += [TargetOption(str(a.id), account_label(a), False) for a in manual]
     if not only_linked and not manual:
         options.append(TargetOption(NEW_ACCOUNT, f"New account: {MANUAL_ACCOUNT_NAME}", False))
-    credit = [a for a in linked if (a.type or "credit") == "credit"]
     default: str | None = None
-    if len(credit) == 1:
-        default = str(credit[0].id)
+    if len(linked) == 1:
+        default = str(linked[0].id)
     elif not linked:
         default = str(manual[0].id) if len(manual) == 1 else (NEW_ACCOUNT if not manual else None)
     return ImportTargets(tuple(options), default, only_linked)
@@ -510,6 +521,12 @@ def _target(session: Session, account_id: int | None, *, production: bool) -> Ac
         raise ImportRefused(
             "account",
             "Your Amex card is linked, so import into the linked account, not the CSV-only one.",
+        )
+    if not account.is_manual and not is_amex_card(account):
+        raise ImportRefused(
+            "account",
+            f"An Amex CSV file goes into an American Express card: your linked Amex card or "
+            f"“{MANUAL_ACCOUNT_NAME}”. Choose the account again.",
         )
     return account
 
@@ -988,7 +1005,7 @@ def _manual_account(session: Session) -> Account:
         return existing
     account = Account(
         name=MANUAL_ACCOUNT_NAME,
-        type="credit",
+        type=CARD,
         subtype="credit card",
         iso_currency_code="USD",
     )
@@ -1365,15 +1382,15 @@ class AttachOffer:
 
 
 def attach_offers(session: Session) -> list[AttachOffer]:
-    """Manual accounts and the linked accounts they can be attached to (none without both)."""
+    """Manual accounts and the linked Amex cards they can be attached to (none without both):
+    Amex CSV history never moves onto a bank account or another bank's card."""
     accounts = session.scalars(select(Account).order_by(Account.id)).all()
-    linked = [a for a in accounts if not a.is_manual]
+    linked = [a for a in accounts if is_amex_card(a)]
     manual = [a for a in accounts if a.is_manual]
     if not linked or not manual:
         return []
     visible = [a for a in linked if not a.is_hidden] or linked
-    credit = [a for a in visible if (a.type or "credit") == "credit"]
-    default = credit[0].id if len(credit) == 1 else (visible[0].id if len(visible) == 1 else None)
+    default = visible[0].id if len(visible) == 1 else None
     counts = dict(
         session.execute(
             select(Transaction.account_id, func.count())

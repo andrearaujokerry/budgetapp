@@ -11,6 +11,7 @@ page must keep: it renders with an empty database, inside the full layout.
 from __future__ import annotations
 
 import datetime as dt
+import html as html_lib
 import re
 from decimal import Decimal
 
@@ -391,7 +392,9 @@ def test_sync_error(probe_client, db, at_now):
     make_item(db, status="error", error_code="INSTITUTION_DOWN", error_message="Amex is down")
     html = probe_client.get("/_probe/page").text
     assert pill(html) == ("error", "Sync problem")
-    assert 'data-tooltip="Amex is down"' in html and 'class="notices"' not in html
+    # BANK-6: the tooltip names the institution
+    assert 'data-tooltip="American Express: Amex is down"' in html
+    assert 'class="notices"' not in html
 
 
 def test_needs_reconnect_shows_the_banner(probe_client, db, at_now):
@@ -411,8 +414,8 @@ def test_needs_reconnect_shows_the_banner(probe_client, db, at_now):
     ("offset", "tone", "words"),
     [
         (dt.timedelta(days=20), "warn", "(20 days left)"),
-        (dt.timedelta(0), "over", "Your Amex consent expires today."),
-        (dt.timedelta(days=-3), "over", "Your Amex consent has expired."),
+        (dt.timedelta(0), "over", "Your American Express consent expires today."),
+        (dt.timedelta(days=-3), "over", "Your American Express consent has expired."),
     ],
     ids=["due-soon", "today", "expired"],
 )
@@ -447,8 +450,186 @@ def test_the_connection_page_shows_no_layout_banners(probe_client, db, at_now, i
 
 def test_two_items_show_the_worst(probe_client, db, at_now):
     make_item(db, last_sync_success_at=NOW - dt.timedelta(minutes=1))
-    make_item(db, status="error", error_code="INTERNAL_SERVER_ERROR")
-    assert pill(probe_client.get("/_probe/page").text) == ("error", "Sync problem")
+    make_item(
+        db,
+        institution_name="Tartan Bank",
+        institution_id="ins_109511",
+        status="error",
+        error_code="INTERNAL_SERVER_ERROR",
+    )
+    html = probe_client.get("/_probe/page").text
+    assert pill(html) == ("error", "Sync problem")
+    # BANK-6: with several connections the tooltip names each one, worst first
+    assert 'data-tooltip="Tartan Bank: sync problem · American Express: connected"' in html
+
+
+def test_the_reconnect_banner_names_the_banks_that_need_it(probe_client, db, at_now):
+    for name, inst in (("Windowpane Bank", "ins_135858"), ("Houndstooth Bank", "ins_109512")):
+        make_item(
+            db,
+            institution_name=name,
+            institution_id=inst,
+            status="needs_reconnect",
+            error_code="ITEM_LOGIN_REQUIRED",
+        )
+    make_item(db)  # American Express, healthy
+    html = probe_client.get("/_probe/page").text
+    banner = re.search(
+        r'<div class="banner banner--over" role="alert" id="reconnect-banner">.*?'
+        r"</div>\s*</div>",
+        html,
+        re.S,
+    ).group(0)
+    assert "Windowpane Bank and Houndstooth Bank need attention." in banner
+    assert "Syncing them is paused until you sign in again through Plaid." in banner
+    assert "American Express" not in banner
+
+
+def test_a_bank_consent_banner_names_the_bank_without_amex_wording(probe_client, db, at_now):
+    """BANK-6: the yearly-consent sentence is American Express's; another bank only has a date
+    when Plaid sends one."""
+    set_app_settings(db, consent_reminder_days=30)
+    make_item(
+        db, institution_name="Tartan Bank", institution_id="ins_109511"
+    )  # no date: nothing due
+    html = probe_client.get("/_probe/page").text
+    assert 'id="consent-banner"' not in html and "Renew access" not in html
+    make_item(
+        db,
+        institution_name="First Gingham Credit Union",
+        institution_id="ins_109509",
+        consent_expires_at=NOW + dt.timedelta(days=6),
+    )
+    html = probe_client.get("/_probe/page").text
+    assert (
+        "Renew your First Gingham Credit Union connection by" in html and "(6 days left)." in html
+    )
+    assert "12 months" not in html
+
+
+def notices(html: str) -> str:
+    """The every-page notices as text (empty when there are none)."""
+    match = re.search(r'<div class="notices">(.*?)<main', html, re.S)
+    if match is None:
+        return ""
+    return " ".join(html_lib.unescape(re.sub(r"<[^>]+>", " ", match.group(1))).split())
+
+
+def top_bar_action(html: str) -> str:
+    """The sync status partial: the pill and its action."""
+    return re.search(r'<div id="sync-status".*?</div>', html, re.S).group(0)
+
+
+def tartan_bank_broken(db) -> None:
+    make_item(
+        db,
+        institution_name="Tartan Bank",
+        institution_id="ins_109511",
+        status="needs_reconnect",
+        error_code="ITEM_LOGIN_REQUIRED",
+        consent_expires_at=None,
+    )
+
+
+def test_a_consent_due_at_one_bank_shows_beside_another_banks_reconnect(probe_client, db, at_now):
+    """UX review (major): a reconnect at Tartan Bank renews nothing at American Express, so Amex's
+    renewal (5 days left) is still announced on every page while Tartan Bank waits."""
+    set_app_settings(db, consent_reminder_days=30)
+    make_item(db, consent_expires_at=NOW + dt.timedelta(days=5))  # American Express
+    tartan_bank_broken(db)
+    html = probe_client.get("/_probe/page").text
+    shown = notices(html)
+    assert "Tartan Bank needs attention. Syncing it is paused" in shown
+    due = date_long((NOW + dt.timedelta(days=5)).astimezone().date())
+    assert f"Renew your American Express connection by {due} (5 days left)." in shown
+    assert html.index('id="reconnect-banner"') < html.index('id="consent-banner"')
+
+
+def test_an_expired_consent_elsewhere_is_still_announced(probe_client, db, at_now):
+    """American Express's consent lapsed while Tartan Bank needs a reconnect: the consent banner
+    says so (with Renew now), and the healthy-but-lapsed card's renewal isn't lost."""
+    set_app_settings(db, consent_reminder_days=30)
+    make_item(db, consent_expires_at=NOW - dt.timedelta(days=2))
+    tartan_bank_broken(db)
+    html = probe_client.get("/_probe/page").text
+    shown = notices(html)
+    assert "Your American Express consent has expired." in shown
+    assert re.search(r'id="consent-banner">.*?Renew now', html, re.S)
+    # nothing can sync (Tartan Bank needs a reconnect, Amex's consent lapsed): the top bar's repair
+    assert "Reconnect" in top_bar_action(html) and "sync-now" not in top_bar_action(html)
+
+
+def test_several_due_consents_are_named_together(probe_client, db, at_now):
+    set_app_settings(db, consent_reminder_days=30)
+    make_item(db, consent_expires_at=NOW - dt.timedelta(days=1))  # American Express, lapsed
+    for name, inst, days in (
+        ("Tartan Bank", "ins_109511", 12),
+        ("Windowpane Bank", "ins_135858", 20),
+    ):
+        make_item(
+            db,
+            institution_name=name,
+            institution_id=inst,
+            consent_expires_at=NOW + dt.timedelta(days=days),
+        )
+    html = probe_client.get("/_probe/page").text
+    (banner,) = re.findall(
+        r'<div class="banner banner--(\w+)" role="\w+" id="consent-banner">', html
+    )
+    assert banner == "over"
+    due = date_long((NOW + dt.timedelta(days=12)).astimezone().date())
+    assert (
+        "Your American Express consent has expired. Renew your Tartan Bank and Windowpane Bank "
+        f"connections by {due} (12 days left)."
+    ) in notices(html)
+    assert "Amex asks you to renew access every 12 months." in notices(html)
+
+
+def test_sync_now_stays_while_another_connection_can_sync(probe_client, db, at_now):
+    """UX review: one broken bank used to replace Sync now on every page; the healthy card can
+    still sync, and the pill and banner lead to Tartan Bank's repair."""
+    make_item(db, last_sync_success_at=NOW - dt.timedelta(minutes=5))  # American Express
+    tartan_bank_broken(db)
+    action = top_bar_action(probe_client.get("/_probe/page").text)
+    assert 'id="sync-now"' in action and ">Reconnect<" not in action
+    assert pill(action) == ("needs_reconnect", "Reconnect needed")
+    assert 'data-tooltip="Tartan Bank: reconnect needed · American Express: connected"' in action
+
+
+def test_an_unnamed_connection_reads_as_a_sentence(probe_client, db, at_now):
+    make_item(
+        db,
+        institution_name=None,
+        institution_id=None,
+        status="needs_reconnect",
+        error_code="ITEM_LOGIN_REQUIRED",
+    )
+    shown = notices(probe_client.get("/_probe/page").text)
+    assert "A bank connection needs attention. Syncing it is paused until" in shown
+
+
+def test_two_logins_at_one_bank_are_told_apart(probe_client, db, at_now):
+    """UX review: BANK-3's "a different login at a bank I've already linked": the pill's tooltip
+    and the banner say which Houndstooth Bank login needs the reconnect."""
+    from tests.factories import make_account
+
+    mine = make_item(db, institution_name="Houndstooth Bank", institution_id="ins_109512")
+    make_account(db, mine, name="Travel Rewards", mask="1234")
+    theirs = make_item(
+        db,
+        institution_name="Houndstooth Bank",
+        institution_id="ins_109512",
+        status="needs_reconnect",
+        error_code="ITEM_LOGIN_REQUIRED",
+    )
+    make_account(db, theirs, name="Cash Rewards", mask="5678")
+    html = probe_client.get("/_probe/page").text
+    tooltip = re.search(r'class="pill pill--\w+" href="/connection" data-tooltip="([^"]*)"', html)
+    assert html_lib.unescape(tooltip.group(1)) == (
+        "Houndstooth Bank (Cash Rewards ··5678): reconnect needed · "
+        "Houndstooth Bank (Travel Rewards ··1234): connected"
+    )
+    assert "Houndstooth Bank (Cash Rewards ··5678) needs attention." in notices(html)
 
 
 def test_htmx_gets_the_partial_with_an_out_of_band_toast(probe_client, db, at_now):

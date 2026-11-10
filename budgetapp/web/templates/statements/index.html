@@ -9,7 +9,7 @@
 {% block head %}<link rel="stylesheet" href="/static/css/pages/statements.css">{% endblock %}
 
 {% block content %}
-{{ ui.page_header("Statements", (account.name ~ " · " if account and account_tabs|length <= 1 else "") ~ "Each statement period, checked against Amex to the cent.") }}
+{{ ui.page_header("Statements", (account.name ~ " · " if account and account_tabs|length <= 1 else "") ~ "Each statement period, checked against the printed statement to the cent.") }}
 
 {%- if account_tabs|length > 1 %}
 {{ ui.tabs(account_tabs, account.id|string, label="Cards") }}
@@ -17,11 +17,11 @@
 
 {%- if not account %}
 <div class="card">
-{{ ui.empty_state("No card yet", "Link your Amex on the Connection page, or import an Amex CSV file, and its statement periods appear here.", icon="receipt", action_href="/connection", action_label="Go to Connection") }}
+{{ ui.empty_state("No card yet", "Link a card on the Connection page, or import an Amex CSV file, and its statement periods appear here.", icon="receipt", action_href="/connection", action_label="Go to Connection") }}
 </div>
 {%- elif not rows %}
 <div class="card">
-{% call ui.empty_state("No statement dates yet", "The app learns each closing date from Amex through Plaid after a sync. Until then, set the card's closing day in Settings, or add a statement by the closing date printed on it.", icon="calendar") %}
+{% call ui.empty_state("No statement dates yet", "The app learns each closing date from the card company through Plaid after a sync. Until then, set the card's closing day in Settings, or add a statement by the closing date printed on it.", icon="calendar") %}
 {{ ui.button("Open Settings", href="/settings") }}
 {% endcall %}
 </div>
@@ -30,7 +30,7 @@
 
 {%- if mismatches %}
 {%- set first = mismatches[0] %}
-{{ ui.banner("over", ("The first is the period that closed " ~ (first.cycle.closing_date|date_long) ~ ", off by " ~ (first.check.difference|abs|money) ~ ".") if mismatches|length > 1 else ("The period that closed " ~ (first.cycle.closing_date|date_long) ~ " is off by " ~ (first.check.difference|abs|money) ~ ". Open it to see where the difference comes from."), title=(mismatches|length|pluralize("statement")) ~ " " ~ ("doesn't" if mismatches|length == 1 else "don't") ~ " match your Amex statement.", action_href="/statements/" ~ account.id ~ "/" ~ first.cycle.key, action_label="Open it", id="mismatch-banner") }}
+{{ ui.banner("over", ("The first is the period that closed " ~ (first.cycle.closing_date|date_long) ~ ", off by " ~ (first.check.difference|abs|money) ~ ".") if mismatches|length > 1 else ("The period that closed " ~ (first.cycle.closing_date|date_long) ~ " is off by " ~ (first.check.difference|abs|money) ~ ". Open it to see where the difference comes from."), title=(mismatches|length|pluralize("statement")) ~ " " ~ ("doesn't" if mismatches|length == 1 else "don't") ~ " match the printed statement.", action_href="/statements/" ~ account.id ~ "/" ~ first.cycle.key, action_label="Open it", id="mismatch-banner") }}
 {%- endif %}
 
 <div class="grid grid--3 stmt-stats">

@@ -1,29 +1,34 @@
-"""Linking the Amex card through Plaid: Link tokens, the token exchange, update mode, re-attaching
-(ARCHITECTURE §3, §7 "Linking safety"; SYNC-1, SYNC-3, SYNC-5, SYNC-6).
+"""Linking banks and cards through Plaid: Link tokens, the token exchange, update mode,
+re-attaching (ARCHITECTURE §3, §7 "Linking safety"; SYNC-1, SYNC-3, SYNC-5, SYNC-6; BANK-1..8).
 
-Principle 4: each real link permanently uses one of the Trial plan's 10 connections, and a second
-Amex link can also break the first. So in production:
+Principle 4, "One Plaid link per bank login, ever": each real link permanently uses one of the
+Trial plan's 10 connections, and linking the same login a second time can also break the first
+(RESEARCH T1, W3-PLAN §1). Any institution can be linked, in production and the Sandbox, but:
 
-* :func:`new_link_token` issues a new-link token only when there is no ``plaid_items`` row, no
-  production access token in Keychain, no unexpired link-in-progress marker and no unsaved token
-  in a recovery file (``secrets.production_link_blockers``) — checked, and the marker set, under
-  ``db.link_lock``. The marker records a random *attempt* id that goes back to the page with the
-  token; only that attempt's own Link exit (``onExit``) or exchange clears it
+* :func:`new_link_token` issues a production new-link token only while no unexpired
+  link-in-progress marker exists (one link at a time), no unsaved token waits in a recovery file,
+  no token in Keychain lacks its Item row (re-attach it first), and fewer than
+  :data:`TRIAL_ITEM_LIMIT` production Items exist (:func:`link_blocks`) — checked, and the marker
+  set, under ``db.link_lock``. The marker records a random *attempt* id that goes back to the page
+  with the token; only that attempt's own Link exit (``onExit``) or exchange clears it
   (:func:`link_exited`, :func:`exchange`). Link's ``CLOSE_OAUTH`` / ``FAIL_OAUTH`` events leave it:
   Link is still open after them and can still succeed.
-* :func:`exchange` holds an advisory lock on its own connection (:data:`db.LINK_WORK_KEY`) from the
-  checks to the Item commit, so a second exchange is refused rather than run alongside. It never
-  exchanges while any trace of a connection exists (an Item row, a production token in Keychain,
-  an unsaved recovery file) or when Link reports an institution that clearly isn't American
-  Express; it keeps the marker while it runs; it retries transport failures within the public
-  token's 30-minute life; it saves the access token in Keychain (write-once, read back) BEFORE
-  writing the database; a failed Keychain write leaves the token in a 0600 recovery file and stops
-  with instructions (or, when no file can be written either, shows the token once:
-  :class:`TokenNotSaved`).
-* Repairs and consent renewals use update mode (:func:`update_link_token`,
-  :func:`complete_update`): same Item, same token, no connection used.
-* A token in Keychain without an Item row (lost or restored database) is re-attached
-  (:func:`recover_orphaned_items`, under the same lock), never linked again.
+* :func:`exchange` refuses a duplicate BEFORE exchanging (BANK-3; exchanging is the step that
+  creates the Item): an institution that is already linked, unless the user started the link as
+  "a different login at a bank I've already linked" — and even then when a picked account's name
+  and mask match an account already linked there (:func:`duplicate_problem`). In production it
+  holds an advisory lock on its own connection (``db.LINK_WORK_KEY``) from the checks to the
+  Item commit, so a second exchange is refused rather than run alongside; it re-checks the guard,
+  keeps the marker while it runs, retries transport failures within the public token's 30-minute
+  life, saves the access token in Keychain under the Item's own key (write-once, read back)
+  BEFORE writing the database, and leaves the token in a 0600 recovery file when Keychain fails
+  (or, when no file can be written either, shows it once: :class:`TokenNotSaved`).
+* Repairs, consent renewals, statement details and new accounts use update mode
+  (:func:`update_link_token`, :func:`complete_update`): same Item, same token, no connection used.
+* A token in Keychain without an Item row (lost or restored database), and the v1 token when the
+  app can't tell whose it is, is re-attached (:func:`recover_orphaned_items`, under the same
+  lock): Plaid's ``/item/get`` names the Item. Never linked again. One whose Item Plaid removed
+  (``ITEM_NOT_FOUND``) is noted and left out from then on; it still counts toward the 10.
 
 Tokens are never logged or stored outside Keychain (SEC-2), and never returned in messages except
 the one documented case above. Functions that need several transactions take a ``sessionmaker``
@@ -68,25 +73,35 @@ from budgetapp.plaid_gateway import (
 from budgetapp.services import reconcile, userstate
 from budgetapp.services import status as status_service
 from budgetapp.services import sync as sync_service
+from budgetapp.services.accounts import CARD
 from budgetapp.services.status import ConnectionStatus, ItemStatus
 
 log = logging.getLogger(__name__)
 
 #: The public token lives 30 minutes; retries stop a little before that.
 EXCHANGE_WINDOW = 25 * 60.0
-#: Plaid's id for American Express (RESEARCH T3.1). Link's own metadata is trusted first.
-AMEX_INSTITUTION_ID = "ins_10"
+#: "You can create 10 Production Items on a Trial plan", and removing one never gives it back
+#: (plaid.com/docs/account/billing/, W3-PLAN §1).
+TRIAL_ITEM_LIMIT = 10
 DEFAULT_SANDBOX_INSTITUTION = "ins_109508"
 SANDBOX_INSTITUTIONS = {
     "ins_109508": "First Platypus Bank",
+    "ins_109509": "First Gingham Credit Union",
+    "ins_109511": "Tartan Bank",
+    "ins_109512": "Houndstooth Bank",
     "ins_127287": "Platypus OAuth Bank",
     "ins_129644": "First Platypus Bank - OAuth",
     "ins_10": "American Express",
 }
+#: Sandbox banks without OAuth, where user_good / pass_good signs in (RESEARCH T3.1), in the
+#: order the Sandbox copy suggests them in Plaid's window: a test bank links once, like a real
+#: one (BANK-3), so the page names the first one not linked yet (``ConnectionOverview``).
+#: Houndstooth Bank is last: Plaid also uses it for automated micro-deposits.
+SANDBOX_TEST_BANKS = ("ins_109508", "ins_109511", "ins_109509", "ins_109512")
 RECENT_RUNS = 20
 LOST_EDITS_LIMIT = 50
 
-#: The production pre-flight, checked by hand in Plaid's Dashboard before the link. On the Trial
+#: The production pre-flight, checked by hand in Plaid's Dashboard before a link. On the Trial
 #: plan Plaid grants OAuth banks automatically (its OAuth institutions tab says "No action is needed
 #: to access banks through Plaid's free trial"), so the use case is the only setting left to make.
 CHECKLIST: tuple[tuple[str, str, str, str], ...] = (
@@ -99,10 +114,11 @@ CHECKLIST: tuple[tuple[str, str, str, str], ...] = (
         "https://dashboard.plaid.com/link/data-transparency-v5",
     ),
     (
-        "amex_oauth",
-        "Plaid gives your team access to American Express",
+        "oauth",
+        "Your team may use banks that sign in through their own window (OAuth)",
         "Dashboard → Institutions → OAuth institutions. On the Trial plan it says no action is "
-        "needed to access banks; on a paid plan American Express must show as enabled.",
+        "needed to access banks through Plaid's free trial, so there is nothing to do; on a paid "
+        "plan your bank must show as enabled.",
         "https://dashboard.plaid.com/activity/status?tab=oauth",
     ),
 )
@@ -146,14 +162,22 @@ class LinkAccount:
     subtype: str | None = None
 
 
+#: The most picked accounts kept from Link's metadata (untrusted JSON from the browser). A link
+#: that sent more can't be checked account by account (BANK-3), so it isn't checked in part.
+LINK_ACCOUNTS_LIMIT = 20
+
+
 @dataclass(frozen=True, slots=True)
 class LinkMetadata:
-    """The parts of Link's ``onSuccess`` metadata the app uses (nothing else is kept)."""
+    """The parts of Link's ``onSuccess`` metadata the app uses (nothing else is kept).
+    ``accounts_truncated``: Link sent more picked accounts than :data:`LINK_ACCOUNTS_LIMIT`, and
+    only the first ones were kept."""
 
     institution_id: str | None = None
     institution_name: str | None = None
     accounts: tuple[LinkAccount, ...] = ()
     link_session_id: str | None = None
+    accounts_truncated: bool = False
 
     @classmethod
     def from_json(cls, data: Any) -> LinkMetadata:
@@ -181,8 +205,9 @@ class LinkMetadata:
         return cls(
             institution_id=text(institution.get("institution_id")),
             institution_name=text(institution.get("name")),
-            accounts=tuple(accounts[:20]),
+            accounts=tuple(accounts[:LINK_ACCOUNTS_LIMIT]),
             link_session_id=text(data.get("link_session_id")),
+            accounts_truncated=len(accounts) > LINK_ACCOUNTS_LIMIT,
         )
 
 
@@ -206,13 +231,10 @@ class UpdateResult:
     status: str
     consent_expires_at: dt.datetime | None
     liabilities_consented: bool
+    institution_name: str | None = None
 
 
 # --------------------------------------------------------------------------- new links
-
-
-def _item_count(session: Session) -> int:
-    return session.scalar(select(func.count()).select_from(PlaidItem)) or 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +301,19 @@ def _release(
             release_attempt(s, store, attempt)
 
 
+def _release_for_recovery_file(
+    session_factory: sessionmaker[Session], store: secrets.SecretStore | None, attempt: str | None
+) -> None:
+    """The attempt's token waits in a production recovery file, which keeps new links away by
+    itself until it is stored (:func:`secrets.unsaved_production_tokens`), so the marker goes:
+    once the owner has stored it and re-attached, the next link may start. Best effort: a failure
+    here must not hide the message that names the file (the marker then expires by itself)."""
+    try:
+        _release(session_factory, store, attempt)
+    except Exception:
+        log.warning("Couldn't clear the link-in-progress marker; it expires by itself")
+
+
 def _claim_marker(store: secrets.SecretStore | None, attempt: str | None) -> str | None:
     """While an exchange runs, the marker keeps new links away: (re)write it for this attempt
     unless another attempt's unexpired marker is there. Returns the attempt that now owns it (a new
@@ -327,21 +362,102 @@ def _clock_text(value: dt.datetime, today: dt.date) -> str:
     return f"{text} on {local:%b} {local.day}"
 
 
-def link_blocks(settings: Settings, *, store: secrets.SecretStore | None = None) -> tuple[str, ...]:
+def orphaned_production_items(
+    session: Session, settings: Settings, *, store: secrets.SecretStore | None = None
+) -> list[str]:
+    """Production Item ids whose token is in Keychain (the index) but whose Item row is missing:
+    a crash between the Keychain write and the commit, or a lost or restored database. One that
+    Re-attach found removed at Plaid (:func:`secrets.removed_production_items`) is left out: it
+    can't come back, so it no longer waits to be re-attached (it still counts toward the 10)."""
+    known = set(session.scalars(select(PlaidItem.plaid_item_id)))
+    known |= secrets.removed_production_items(settings)
+    return [
+        item_id
+        for item_id in secrets.production_item_ids(store=store)
+        if item_id not in known and secrets.get_access_token("production", item_id, store=store)
+    ]
+
+
+def legacy_state(
+    session: Session, *, store: secrets.SecretStore | None = None
+) -> secrets.LegacyTokenState:
+    """Where the v1 token (C6) stands against this database's Items
+    (:func:`secrets.legacy_token_state`)."""
+    ids = list(session.scalars(select(PlaidItem.plaid_item_id).order_by(PlaidItem.id)))
+    return secrets.legacy_token_state(ids, store=store)
+
+
+def legacy_unplaced(session: Session, *, store: secrets.SecretStore | None = None) -> bool:
+    """The v1 token (C6) is in Keychain and the database can't place it by itself: it matches no
+    Item's own token, and there is no Item, or several, or the one Item already has a different
+    token of its own (so the v1 token may belong to a connection the database lost). Re-attach
+    asks Plaid whose it is. With exactly one Item and no other token for it, the next sync or link
+    moves it there instead; a copy of an Item's own token is only deleted."""
+    if not secrets.legacy_production_token(store=store):
+        return False
+    return legacy_state(session, store=store).state == "unplaced"
+
+
+def connections_used(
+    session: Session, settings: Settings, *, store: secrets.SecretStore | None = None
+) -> int:
+    """How many of the Trial plan's 10 production Items this app has created (BANK-1): every
+    Item it knows of, from the database, the Keychain index and unsaved recovery files (removing
+    an Item never gives its slot back). A v1 token that no Item row accounts for counts as one."""
+    known = set(session.scalars(select(PlaidItem.plaid_item_id)))
+    known |= set(secrets.production_item_ids(store=store))
+    known |= secrets.recovery_item_ids(settings)
+    if not known and secrets.legacy_production_token(store=store):
+        return 1
+    return len(known)
+
+
+def link_blocks(
+    session: Session,
+    settings: Settings,
+    *,
+    store: secrets.SecretStore | None = None,
+    after_move: bool = False,
+) -> tuple[str, ...]:
     """Why no production link can start right now, in plain words with local times (the page's
-    "Linking is paused" banner and the refusal itself). Empty when the guard of
-    ``secrets.production_link_blockers`` passes; its own text is the fallback."""
-    blockers = secrets.production_link_blockers(settings, store=store)
-    if not blockers:
-        return ()
+    "Linking is paused" banner and the refusal itself). Empty when a link may start: no link in
+    progress, no unsaved token in a recovery file, no token in Keychain without its connection,
+    and fewer than 10 Items created.
+
+    The v1 token (C6, :func:`legacy_state`): one the database can't place needs Re-attach first.
+    One it can place (the only Item has no token of its own) blocks only once a move was tried
+    (``after_move``; the page, which never writes, passes False): a link first moves it
+    (:func:`new_link_token`), and a v1 token still unmoved then would lose its owner once a
+    second Item exists. A copy of a token already saved under its Item's own key never blocks:
+    it can't lose its owner (placing it compares values), and syncs delete it."""
     today = clock.today()
     reasons: list[str] = []
-    if secrets.get_access_token("production", store=store):
+    orphans = orphaned_production_items(session, settings, store=store)
+    legacy = legacy_state(session, store=store)
+    if orphans or legacy.state == "unplaced":
         reasons.append(
-            "Keychain holds the access token of an earlier American Express connection: re-attach "
-            "it instead of linking again."
+            "Keychain holds the access token of a connection that this database doesn't show: "
+            "re-attach it first (Re-attach existing connection), so the app can tell which bank "
+            "it is and never links the same login twice."
         )
-    expires = secrets.get_link_in_progress(store=store)
+    elif legacy.state == "movable" and after_move:
+        reasons.append(
+            "Keychain couldn't save the access token of your first connection under its new name "
+            "yet, so linking another waits. Run ./run doctor --env production in Terminal: it "
+            "says what to do."
+        )
+    try:
+        expires = secrets.get_link_in_progress(store=store)
+    except secrets.KeychainApprovalNeeded:
+        # After a brew upgrade of Python every item needs one Always Allow, which the web agent
+        # can't ask for. A marker it can't read still blocks a new link (fail safe), but the page
+        # stays up: Reconnect, Renew consent and Add accounts don't need it (final review 3 ops-1).
+        expires = None
+        reasons.append(
+            "macOS Keychain needs your approval before the app can check for a Plaid link in "
+            f"progress, so linking another bank waits. Run {secrets.KEYCHAIN_FIX_COMMAND} in "
+            "Terminal and click Always Allow."
+        )
     if expires is not None:
         started = sync_service.parse_timestamp((_read_marker(store) or {}).get("created_at"))
         since = f" started at {_clock_text(started, today)}" if started else ""
@@ -356,7 +472,13 @@ def link_blocks(settings: Settings, *, store: secrets.SecretStore | None = None)
             "it with ./run setup --env production --access-token (it belongs to a connection "
             "that already exists), then re-attach it here."
         )
-    return tuple(reasons) or tuple(blockers)
+    used = connections_used(session, settings, store=store)
+    if used >= TRIAL_ITEM_LIMIT:
+        reasons.append(
+            f"All {TRIAL_ITEM_LIMIT} of your Plaid connections are used, and Plaid's Trial plan "
+            "never gives one back. Add accounts to a connection you already have instead."
+        )
+    return tuple(reasons) or tuple(secrets.production_link_blockers(settings, store=store))
 
 
 def new_link_token(
@@ -367,22 +489,20 @@ def new_link_token(
     store: secrets.SecretStore | None = None,
 ) -> LinkToken:
     """A Link token for a NEW Item (``products=['transactions']``, 730 days, Liabilities as an
-    additional consented product; the gateway builds the exact request).
+    additional consented product, checking, savings, money market and credit-card accounts only;
+    the gateway builds the exact request).
 
-    Production: refused (:class:`LinkRefused`) unless the link guard passes, checked under the
-    link lock, which also covers setting the link-in-progress marker for a new attempt id
-    (returned with the token). The caller commits (that releases the lock). Sandbox may hold
-    several Items and keeps no marker.
+    Production: refused (:class:`LinkRefused`) while :func:`link_blocks` lists anything, checked
+    under the link lock, which also covers setting the link-in-progress marker for a new attempt
+    id (returned with the token). A v1 token is moved to its Item's key first when exactly one
+    Item exists. The caller commits (that releases the lock). Sandbox Items are free: no guard,
+    no marker; the duplicate check at the exchange applies to both.
     """
     if not settings.is_production:
         return LinkToken(gateway.create_link_token())
     db.link_lock(session)
-    if _item_count(session):
-        raise LinkRefused(
-            "American Express is already linked. Use Reconnect or Renew instead: a second link "
-            "would use another of your 10 Plaid connections and could break the first."
-        )
-    blocks = link_blocks(settings, store=store)
+    sync_service.migrate_legacy_token(session, settings, store or secrets.get_store())
+    blocks = link_blocks(session, settings, store=store, after_move=True)
     if blocks:
         raise LinkRefused(" ".join(blocks))
     attempt = uuid.uuid4().hex
@@ -414,7 +534,7 @@ def link_exited(
 
     ``event`` "EXIT" (or none) is ``onExit``: Link is closed, so a production new-link attempt's
     marker is cleared — only if ``attempt`` set it. ``CLOSE_OAUTH`` / ``FAIL_OAUTH`` are only
-    events: the Amex window closed or timed out, but Link stays open and can still succeed, so the
+    events: the bank's window closed or timed out, but Link stays open and can still succeed, so the
     marker stays. Under the link lock; the caller commits. True when the marker was cleared.
     """
     closed = event in (None, LINK_EXIT)
@@ -442,7 +562,8 @@ class ChecklistItem:
 
 @dataclass(frozen=True, slots=True)
 class InstitutionCheck:
-    """``/institutions/search`` for American Express with Liabilities (best effort)."""
+    """The live pre-flight check: does Plaid answer with the saved Production keys (best
+    effort; it creates nothing)."""
 
     status: str  # ok | missing | error
     message: str
@@ -460,36 +581,33 @@ def checklist() -> tuple[ChecklistItem, ...]:
     return tuple(ChecklistItem(*row) for row in CHECKLIST)
 
 
+#: The pre-flight's question to Plaid: any institution that offers Transactions. A search
+#: creates no Item and uses no connection; it proves the Production keys work (BANK-2).
+PREFLIGHT_QUERY = "Bank"
+
+
 def preflight(gateway: PlaidGateway, settings: Settings) -> Preflight:
-    """The production pre-flight (ARCHITECTURE §7): the manual Dashboard checklist plus the live
-    ``search_institutions('American Express', ['liabilities'])`` result. A failed search is
-    shown, never fatal (it creates no Item and uses no connection)."""
+    """The production pre-flight (ARCHITECTURE §7): the manual Dashboard checklist plus a live
+    ``/institutions/search``, which shows that Plaid answers with the saved Production keys
+    before a link is tried. Any bank can be linked, so no institution is singled out. A failed
+    search is shown, never fatal (it creates no Item and uses no connection)."""
     try:
-        body = gateway.search_institutions("American Express", ["liabilities"])
+        body = gateway.search_institutions(PREFLIGHT_QUERY, ["transactions"])
     except PlaidGatewayError as err:
         message = err.display_message or err.error_message or "Plaid couldn't be reached."
         check = InstitutionCheck(
             "error", f"Couldn't check with Plaid just now ({message}). This check is optional."
         )
         return Preflight(checklist(), check)
-    found = [
-        inst
-        for inst in body.get("institutions") or ()
-        if isinstance(inst, Mapping)
-        and (inst.get("institution_id") == "ins_10" or inst.get("name") == "American Express")
-    ]
-    if found:
-        inst = found[0]
-        oauth = inst.get("oauth") if isinstance(inst.get("oauth"), bool) else None
-        message = "Plaid lists American Express with statement details (Liabilities)"
-        message += ", signing in through Amex's own pop-up (OAuth)." if oauth else "."
-        check = InstitutionCheck("ok", message, inst.get("institution_id"), oauth)
+    if [inst for inst in body.get("institutions") or () if isinstance(inst, Mapping)]:
+        check = InstitutionCheck(
+            "ok", "Plaid answers with your Production keys and lists banks to link."
+        )
     else:
         check = InstitutionCheck(
             "missing",
-            "Plaid's search didn't list American Express with statement details (Liabilities). "
-            "Transactions can still be linked; balances due and statement snapshots may be "
-            "missing.",
+            "Plaid answered with your Production keys but listed no banks just now. You can "
+            "still try: a link that fails before the end uses no connection.",
         )
     return Preflight(checklist(), check)
 
@@ -510,7 +628,7 @@ def _expired_message(unlock_at: dt.datetime | None) -> str:
         "Plaid couldn't be reached to finish linking, and the link expired before it could "
         "finish. Plaid may or may not have created the connection; if it did, this app never "
         "received its access token and can't recover it. Before linking again, check Plaid's "
-        "Dashboard (dashboard.plaid.com) for a new American Express Item."
+        "Dashboard (dashboard.plaid.com) for a new Item at that bank."
     )
     if unlock_at is not None:
         text += f" Linking stays paused until {_clock_text(unlock_at, clock.today())}."
@@ -546,13 +664,123 @@ def _exchange_with_retries(
             delay = min(delay * 2, 60.0)
 
 
-def _looks_like_amex(meta: LinkMetadata) -> bool:
-    """False only when Link names an institution that clearly isn't American Express (another id
-    AND a name without "American Express"/"Amex"); unknown or partial metadata passes."""
-    if not meta.institution_id or meta.institution_id == AMEX_INSTITUTION_ID:
-        return True
-    name = (meta.institution_name or "").casefold()
-    return not name or "american express" in name or "amex" in name
+def _normal(text: str | None) -> str:
+    return " ".join((text or "").casefold().split())
+
+
+#: Plaid's answer for a connection it no longer has (deleted at my.plaid.com, removed with
+#: /item/remove or by a data-deletion request); update mode can't repair it (RESEARCH T2.4).
+ITEM_NOT_FOUND = "ITEM_NOT_FOUND"
+
+
+def _removed_refusal(name: str) -> str:
+    """The refusal to link a login again whose connection Plaid removed (ops-3): nothing on this
+    page can repair it, and removing a connection isn't part of this version (W3-PLAN §0)."""
+    return (
+        f"Plaid no longer has your {name} connection (it was removed at Plaid), so Reconnect and "
+        "Add accounts can't repair it, and the app can't link that login again while the "
+        "connection is listed here. This new link was not completed (its token was not "
+        "exchanged). The data already here stays."
+    )
+
+
+def _same_institution(item: PlaidItem, meta: LinkMetadata) -> bool:
+    """Link's institution is this Item's: Plaid's id, or (an Item saved without one) its name."""
+    if item.institution_id:
+        return item.institution_id == meta.institution_id
+    return bool(meta.institution_name) and _normal(item.institution_name) == _normal(
+        meta.institution_name
+    )
+
+
+def duplicate_problem(
+    session: Session, meta: LinkMetadata, *, different_login: bool = False
+) -> str | None:
+    """Why this public token must NOT be exchanged because it would duplicate a login that is
+    already linked (BANK-3; plaid.com/docs/link/duplicate-items/: "Do not exchange a public token
+    for an access token if you detect a duplicate Item"). ``None`` when it may be exchanged.
+
+    * Link names an institution already linked → refused, unless the user started this link as
+      "a different login at a bank I've already linked" (``different_login``); the way to add
+      accounts to a login is Add accounts on its connection, and Reconnect repairs it.
+    * With that choice, still refused when any picked account's name and mask match an account
+      already linked at that institution (the same login again). Masks are compared with masks
+      only, never with account numbers (the app never has those).
+    * A connection whose last error is ``ITEM_NOT_FOUND`` was removed at Plaid: neither Reconnect
+      nor Add accounts can repair it, so its refusal says that instead. Linking that login again
+      stays refused while the connection is listed (removing one isn't in this version, W3-PLAN
+      §0, and a new link would use another of the 10).
+    * With connections in place, Link metadata without the institution's id (or, with the
+      choice, without the picked accounts, or with more of them than :data:`LINK_ACCOUNTS_LIMIT`)
+      can't be checked, so it is refused too (fail safe). Plaid's ``onSuccess`` names the
+      institution with both its id and its name (RESEARCH T2: ``institution: {name,
+      institution_id} | null``), and Items get the id from it or from ``/item/get``, so a name
+      alone would match none of them.
+    * A connection saved with neither the institution's id nor its name (a first link whose
+      metadata named none, while ``/item/get`` failed right after linking) could be any bank:
+      every new link is refused until a sync or Reconnect has asked ``/item/get`` which it is."""
+    items = list(session.scalars(select(PlaidItem).order_by(PlaidItem.id)))
+    if not items:
+        return None
+    if not meta.institution_id:
+        return (
+            "Plaid didn't say which bank you picked, so the app can't check that you haven't "
+            "linked it already. This new link was not completed (its token was not exchanged); "
+            "try again."
+        )
+    if any(not i.institution_id and not i.institution_name for i in items):
+        return (
+            "A connection here was saved without the name of its bank, so the app can't check "
+            "that this isn't the same bank and login again. This new link was not completed (its "
+            "token was not exchanged). Sync now (or Reconnect it, if it needs that) asks Plaid "
+            "which bank it is; then link again."
+        )
+    same = [i for i in items if _same_institution(i, meta)]
+    if not same:
+        return None
+    name = meta.institution_name or same[0].institution_name or "This bank"
+    removed = {i.id for i in same if i.error_code == ITEM_NOT_FOUND}
+    if not different_login:
+        if len(removed) == len(same):
+            return _removed_refusal(name)
+        return (
+            f"{name} is already linked, so this new link was not completed (its token was not "
+            "exchanged). To add accounts from that login, use Add accounts on its connection; "
+            "to repair it, use Reconnect. If this really is a different login at the same bank, "
+            "link again and tick “A different login at a bank I've already linked”."
+        )
+    if not meta.accounts:
+        return (
+            f"Plaid didn't list the accounts you picked at {name}, so the app can't check that "
+            "this login isn't linked already. This new link was not completed (its token was "
+            "not exchanged)."
+        )
+    linked = list(
+        session.scalars(
+            select(Account).where(Account.item_id.in_([i.id for i in same])).order_by(Account.id)
+        )
+    )
+    for picked in meta.accounts:
+        for account in linked:
+            if _normal(picked.name) == _normal(account.name) and picked.mask == account.mask:
+                if account.item_id in removed:
+                    return _removed_refusal(name)
+                label = account.display_name
+                return (
+                    f"{label} is already linked at {name}: this looks like the same login linked "
+                    "again, which would use another of your Plaid connections and can break the "
+                    "first one. This new link was not completed (its token was not exchanged). "
+                    "To add accounts to that login, use Add accounts on its connection."
+                )
+    if meta.accounts_truncated:
+        return (
+            f"You picked more than {LINK_ACCOUNTS_LIMIT} accounts at {name}, more than the app "
+            "checks against the accounts already linked there, so it can't tell that this login "
+            "isn't linked already. This new link was not completed (its token was not "
+            f"exchanged). Link again with at most {LINK_ACCOUNTS_LIMIT}; Add accounts on the new "
+            "connection adds the others."
+        )
+    return None
 
 
 def _exchange_problem(
@@ -560,27 +788,11 @@ def _exchange_problem(
     settings: Settings,
     store: secrets.SecretStore | None,
     meta: LinkMetadata,
+    different_login: bool,
 ) -> str | None:
-    """Why a production public token must NOT be exchanged (§7; exchanging is what uses one of the
-    10 connections): an Item row, a production token in Keychain, an unsaved recovery file (each
-    one an existing connection), or an institution that isn't American Express."""
-    existing = list(session.scalars(select(PlaidItem)))
-    if existing:
-        same = any(
-            meta.institution_id and item.institution_id == meta.institution_id for item in existing
-        )
-        return (
-            "This institution is already linked, " if same else "A connection already exists, "
-        ) + (
-            "so this new link was not completed (its token was not exchanged). Use Reconnect on "
-            "the existing connection instead."
-        )
-    if secrets.get_access_token("production", store=store):
-        return (
-            "Keychain already holds the access token of an earlier American Express connection, "
-            "so this new link was not completed (its token was not exchanged). Re-attach the "
-            "saved connection on this page instead."
-        )
+    """Why a production public token must NOT be exchanged (§7; exchanging is what uses one of
+    the 10 connections): the guard of :func:`link_blocks` (but not this attempt's own marker), or
+    a duplicate login (:func:`duplicate_problem`)."""
     files = secrets.unsaved_production_tokens(settings)
     if files:
         return (
@@ -588,14 +800,25 @@ def _exchange_problem(
             "this new link was not completed (its token was not exchanged). Store that token "
             "with ./run setup --env production --access-token, then re-attach it here."
         )
-    if not _looks_like_amex(meta):
+    legacy = legacy_state(session, store=store)
+    if orphaned_production_items(session, settings, store=store) or legacy.state == "unplaced":
         return (
-            f"You picked {meta.institution_name} in Plaid, not American Express. This app links "
-            "only your American Express card, so the connection was not completed (its token was "
-            "not exchanged). Plaid may still count the attempt toward your 10 connections. Link "
-            "again and choose American Express."
+            "Keychain holds the access token of a connection that this database doesn't show, "
+            "so this new link was not completed (its token was not exchanged). Re-attach the "
+            "saved connection on this page first."
         )
-    return None
+    if legacy.state == "movable":  # the move just tried (exchange) failed
+        return (
+            "Keychain couldn't save the access token of your first connection under its new name "
+            "yet, so this new link was not completed (its token was not exchanged). Run ./run "
+            "doctor --env production in Terminal: it says what to do."
+        )
+    if connections_used(session, settings, store=store) >= TRIAL_ITEM_LIMIT:
+        return (
+            f"All {TRIAL_ITEM_LIMIT} of your Plaid connections are used, so this new link was not "
+            "completed (its token was not exchanged)."
+        )
+    return duplicate_problem(session, meta, different_login=different_login)
 
 
 def _details(gateway: PlaidGateway, token: str) -> tuple[dict | None, dict | None]:
@@ -691,20 +914,29 @@ def exchange(
     metadata: LinkMetadata | Mapping[str, Any] | None,
     *,
     attempt: str | None = None,
+    different_login: bool = False,
+    duplicate_check: bool = True,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     window: float = EXCHANGE_WINDOW,
 ) -> LinkResult:
     """Turn Link's public token into a saved Item (ARCHITECTURE §7 "Exchange"); one code path.
 
-    Production: under :data:`db.LINK_WORK_KEY` (a second exchange at the same time is refused with
-    :class:`LinkBusy`), refused before anything reaches Plaid while any trace of a connection exists
-    or when Link reports another institution (:func:`_exchange_problem`). While it runs it keeps the
-    link-in-progress marker (of ``attempt``, the id :func:`new_link_token` returned), and clears it
-    once the token is safe or Plaid gave a definite no; an unknown outcome keeps it until it
-    expires. The access token goes to Keychain (write-once, read back) BEFORE the database; then the
-    Item, its accounts and ``/item/get`` details are saved in one transaction, and a lone manual CSV
-    account is attached to a lone linked card. The caller starts the post-link backfill
+    Both environments refuse a duplicate login before anything reaches Plaid
+    (:func:`duplicate_problem`; ``different_login`` is the confirm dialog's choice).
+    ``duplicate_check=False`` is for Sandbox test Items made without Link only (several test users
+    at one test bank), and is refused in production.
+
+    Production: under ``db.LINK_WORK_KEY`` (a second exchange at the same time is refused with
+    :class:`LinkBusy`), refused before anything reaches Plaid while the guard says no
+    (:func:`_exchange_problem`; a v1 token is moved to its Item's key first). While it runs it
+    keeps the link-in-progress marker (of ``attempt``, the id :func:`new_link_token` returned), and
+    clears it once the token is safe (in Keychain, or in a recovery file, which keeps new links away
+    by itself) or Plaid gave a definite no; an unknown outcome, or a token that only this answer
+    holds (:class:`TokenNotSaved`), keeps it until it expires. The access token goes to Keychain
+    under the Item's own key (write-once, read back) BEFORE the database; then the Item, its
+    accounts and ``/item/get`` details are saved in one transaction, and a lone manual CSV account
+    is attached to a lone American Express card. The caller starts the post-link backfill
     (``sync.Backfill``).
     """
     if not public_token or not isinstance(public_token, str):
@@ -713,9 +945,17 @@ def exchange(
     meta = metadata if isinstance(metadata, LinkMetadata) else LinkMetadata.from_json(metadata)
     options = {"sleep": sleep, "monotonic": monotonic, "window": window}
     if not settings.is_production:
+        if duplicate_check:
+            with session_factory() as s:
+                problem = duplicate_problem(s, meta, different_login=different_login)
+            if problem is not None:
+                log.warning("Exchange refused: %s is already linked", meta.institution_id)
+                raise LinkRefused(problem)
         return _complete_exchange(
             session_factory, gateway, store, settings, public_token, meta, None, **options
         )
+    if not duplicate_check:
+        raise ValueError("production links always check for duplicates")
     with _link_work_lock(session_factory) as acquired:
         if not acquired:
             log.warning("Exchange refused: another link or re-attach is being completed")
@@ -725,7 +965,8 @@ def exchange(
             )
         with db.transaction(session_factory) as s:
             db.link_lock(s)
-            problem = _exchange_problem(s, settings, store, meta)
+            sync_service.migrate_legacy_token(s, settings, store)
+            problem = _exchange_problem(s, settings, store, meta, different_login)
             if problem is None:
                 owned = _claim_marker(store, attempt)
             else:
@@ -735,6 +976,11 @@ def exchange(
                 "Exchange refused before reaching Plaid (institution %s)", meta.institution_id
             )
             raise LinkRefused(problem)
+        log.info(
+            "Exchanging a new link at %s (%s)",
+            meta.institution_id or "an unknown institution",
+            "a different login at a linked bank" if different_login else "a new bank",
+        )
         return _complete_exchange(
             session_factory, gateway, store, settings, public_token, meta, owned, **options
         )
@@ -771,7 +1017,7 @@ def _complete_exchange(
     production = settings.is_production
     reattach = "re-attach" if production else "recover"
     never_again = (
-        " Don't link again: that would use another of your 10 Plaid connections."
+        " Don't link this login again: that would use another of your 10 Plaid connections."
         if production
         else ""
     )
@@ -785,7 +1031,7 @@ def _complete_exchange(
                 "The test Item was created, but its access token couldn't be saved, neither to "
                 "Keychain nor to a recovery file, so it can't be used. Create another test Item."
             ) from exc
-        if exc.recovery_path is None:
+        if exc.recovery_path is None:  # the marker stays: nothing else keeps new links away
             raise TokenNotSaved(
                 "The connection was created, but its access token couldn't be saved, neither to "
                 "Keychain nor to a recovery file. Copy the token shown below into your password "
@@ -793,6 +1039,7 @@ def _complete_exchange(
                 f"{reattach} the connection on this page.{never_again}",
                 result.access_token,
             ) from exc
+        _release_for_recovery_file(session_factory, store, owned)
         raise LinkFailed(
             "The connection was created, but its access token couldn't be saved to Keychain. It "
             f"was saved to {exc.recovery_path} (readable only by you). Store it with {setup}, "
@@ -800,6 +1047,8 @@ def _complete_exchange(
         ) from exc
     except secrets.AccessTokenConflict as exc:
         log.error("Keychain already held a different access token; Item %s", result.item_id)
+        if exc.recovery_path is not None:
+            _release_for_recovery_file(session_factory, store, owned)
         raise LinkFailed(
             "The connection was created, but Keychain already holds a different access token. "
             f"{exc} Re-attach the saved connection on this page instead.{never_again}"
@@ -829,7 +1078,8 @@ def sandbox_create_item(
     sleep: Callable[[float], None] = time.sleep,
 ) -> LinkResult:
     """Sandbox only: a test Item without Plaid Link (``/sandbox/public_token/create``, 730 days),
-    saved through the same :func:`exchange` path as a real link."""
+    saved through the same :func:`exchange` path as a real link. Each test user is its own
+    login, so several test Items at one test bank are allowed (no duplicate check)."""
     if settings.is_production or settings.plaid_env != "sandbox":
         raise LinkRefused("Test Items exist only in the Sandbox.")
     public_token = gateway.sandbox_create_public_token(
@@ -839,14 +1089,24 @@ def sandbox_create_item(
         initial_products=tuple(initial_products),
     )
     meta = LinkMetadata(institution_id, SANDBOX_INSTITUTIONS.get(institution_id))
-    return exchange(session_factory, gateway, store, settings, public_token, meta, sleep=sleep)
+    return exchange(
+        session_factory,
+        gateway,
+        store,
+        settings,
+        public_token,
+        meta,
+        duplicate_check=False,
+        sleep=sleep,
+    )
 
 
 # --------------------------------------------------------------------------- Sandbox test users
 
 
-#: Sandbox test users (RESEARCH T3.2, T3.7): ``custom`` is the Amex-like card below.
-SANDBOX_USERS = ("custom", "user_transactions_dynamic", "user_good")
+#: Sandbox test users (RESEARCH T3.2, T3.7): ``custom`` is the Amex-like card below, ``bank`` a
+#: bank login with checking, savings and a credit card (wave 3, BANK-9).
+SANDBOX_USERS = ("custom", "bank", "user_transactions_dynamic", "user_good")
 CUSTOM_USERNAME = "user_custom"
 
 
@@ -886,6 +1146,50 @@ CUSTOM_LIABILITY = {
     "is_overdue": False,
 }
 
+#: The ``bank`` user's accounts (BANK-9): ``(type, subtype, name, mask, starting balance,
+#: transactions)``, every transaction posted. Inflows are negative (Plaid's sign; RESEARCH T3.7:
+#: Plaid's own example has its direct deposit at -5500). The card's APRs are 0, so totals stay
+#: exact. ``bank_only=True`` leaves the card out (a bank login with no card: BANK-7).
+BANK_ACCOUNTS: tuple[tuple[str, str, str, str, Decimal, tuple[CustomCharge, ...]], ...] = (
+    (
+        "depository",
+        "checking",
+        "Everyday Checking",
+        "0101",
+        Decimal("2480.40"),
+        (
+            CustomCharge(-30, -30, Decimal("-2100.00"), "ACME CORP PAYROLL DIRECT DEP"),
+            CustomCharge(-28, -28, Decimal("1650.00"), "RIVERSIDE APARTMENTS RENT"),
+            CustomCharge(-20, -19, Decimal("64.12"), "TRADER JOE'S #552 DEBIT"),
+            CustomCharge(-16, -16, Decimal("-2100.00"), "ACME CORP PAYROLL DIRECT DEP"),
+            CustomCharge(-12, -12, Decimal("100.00"), "ATM WITHDRAWAL 1ST AVE"),
+            CustomCharge(-8, -8, Decimal("300.00"), "TRANSFER TO SAVINGS 0202"),
+        ),
+    ),
+    (
+        "depository",
+        "savings",
+        "High Yield Savings",
+        "0202",
+        Decimal("5300.00"),
+        (
+            CustomCharge(-8, -8, Decimal("-300.00"), "TRANSFER FROM CHECKING 0101"),
+            CustomCharge(-2, -2, Decimal("-4.17"), "INTEREST PAYMENT"),
+        ),
+    ),
+    (
+        "credit",
+        "credit card",
+        "Cash Rewards Card",
+        "0303",
+        Decimal("212.48"),
+        (
+            CustomCharge(-14, -13, Decimal("87.30"), "SHELL OIL 57444"),
+            CustomCharge(-9, -8, Decimal("125.18"), "TARGET 00012345"),
+        ),
+    ),
+)
+
 
 def custom_posted_total(charges: Sequence[CustomCharge] = CUSTOM_CHARGES) -> Decimal:
     """The sum of the charges already posted when the Item is created ($793.61)."""
@@ -897,12 +1201,24 @@ def custom_pending_total(charges: Sequence[CustomCharge] = CUSTOM_CHARGES) -> De
     return sum((c.amount for c in charges if c.posted > 0), Decimal("0.00"))
 
 
-def custom_user_config(today: dt.date) -> dict[str, Any]:
-    """The ``user_custom`` configuration (passed as the password) for an Item created ``today``."""
-
+def _transactions(charges: Sequence[CustomCharge], today: dt.date) -> list[dict[str, Any]]:
     def day(offset: int) -> str:
         return (today + dt.timedelta(days=offset)).isoformat()
 
+    return [
+        {
+            "date_transacted": day(c.transacted),
+            "date_posted": day(c.posted),
+            "amount": c.amount,
+            "description": c.description,
+            "currency": "USD",
+        }
+        for c in charges
+    ]
+
+
+def custom_user_config(today: dt.date) -> dict[str, Any]:
+    """The ``user_custom`` configuration (passed as the password) for an Item created ``today``."""
     return {
         "version": 2,
         "roll_dates_forward": False,
@@ -913,26 +1229,41 @@ def custom_user_config(today: dt.date) -> dict[str, Any]:
                 "starting_balance": CUSTOM_STARTING_BALANCE,
                 "currency": "USD",
                 "meta": dict(CUSTOM_ACCOUNT),
-                "transactions": [
-                    {
-                        "date_transacted": day(c.transacted),
-                        "date_posted": day(c.posted),
-                        "amount": c.amount,
-                        "description": c.description,
-                        "currency": "USD",
-                    }
-                    for c in CUSTOM_CHARGES
-                ],
+                "transactions": _transactions(CUSTOM_CHARGES, today),
                 "liability": dict(CUSTOM_LIABILITY),
             }
         ],
     }
 
 
+def bank_user_config(today: dt.date, *, bank_only: bool = False) -> dict[str, Any]:
+    """A ``user_custom`` configuration for a bank login (BANK-9): checking with two paychecks,
+    rent, a debit purchase, an ATM withdrawal and a transfer to savings; savings with that
+    transfer and interest; and a credit card (left out with ``bank_only``)."""
+    accounts = []
+    for kind, subtype, name, mask, balance, charges in BANK_ACCOUNTS:
+        if bank_only and kind == "credit":
+            continue
+        account: dict[str, Any] = {
+            "type": kind,
+            "subtype": subtype,
+            "starting_balance": balance,
+            "currency": "USD",
+            "meta": {"name": name, "official_name": f"Test {name}", "mask": mask},
+            "transactions": _transactions(charges, today),
+        }
+        if kind == "credit":
+            account["liability"] = {**CUSTOM_LIABILITY, "last_statement_balance": balance}
+        accounts.append(account)
+    return {"version": 2, "roll_dates_forward": False, "override_accounts": accounts}
+
+
 def sandbox_credentials(user: str, today: dt.date) -> tuple[str, str]:
     """``(override_username, override_password)`` for one of :data:`SANDBOX_USERS`."""
     if user == "custom":
         return CUSTOM_USERNAME, db.json_dumps(custom_user_config(today))
+    if user == "bank":
+        return CUSTOM_USERNAME, db.json_dumps(bank_user_config(today))
     if user not in SANDBOX_USERS:
         raise ValueError(f"unknown Sandbox user {user!r}")
     return user, "pass_good"
@@ -947,16 +1278,33 @@ def update_link_token(
     item: PlaidItem | int,
     *,
     add_liabilities: bool = False,
+    add_accounts: bool = False,
     store: secrets.SecretStore | None = None,
     settings: Settings,
 ) -> str:
-    """An update-mode Link token (Reconnect, Renew consent, or ``add_liabilities`` to ask for
-    statement details): the Item's own access token, no products — the same Item and token
-    afterwards, so no Plaid connection is used."""
+    """An update-mode Link token: Reconnect, Renew consent, ``add_liabilities`` (ask for
+    statement details; card connections only) or ``add_accounts`` (BANK-5 "Add accounts": Plaid's
+    account selection, RESEARCH T2.4). The Item's own access token, no products — the same Item
+    and token afterwards, so no Plaid connection is used."""
     row = item if isinstance(item, PlaidItem) else session.get(PlaidItem, item)
     if row is None:
         raise LinkRefused("That connection no longer exists.")
-    token = sync_service.access_token_for(settings, row.plaid_item_id, store or secrets.get_store())
+    if add_liabilities and add_accounts:
+        raise ValueError("one update-mode change at a time")
+    if add_liabilities and not session.scalar(
+        select(func.count())
+        .select_from(Account)
+        .where(Account.item_id == row.id, Account.type == CARD)
+    ):
+        raise LinkRefused(
+            f"Statement details are for credit cards, and {row.institution_name or 'this bank'} "
+            "has none linked here."
+        )
+    token = sync_service.access_token_for(
+        settings, row.plaid_item_id, store or secrets.get_store(), source=session
+    )
+    if add_accounts:
+        return gateway.create_link_token(access_token=token, account_selection=True)
     products = ("liabilities",) if add_liabilities else ()
     return gateway.create_link_token(access_token=token, additional_consented_products=products)
 
@@ -980,7 +1328,7 @@ def complete_update(
         if row is None:
             raise LinkRefused("That connection no longer exists.")
         plaid_item_id = row.plaid_item_id
-    token = sync_service.access_token_for(settings, plaid_item_id, store)
+    token = sync_service.access_token_for(settings, plaid_item_id, store, source=session_factory)
     body = None
     try:
         body = gateway.get_item(token)
@@ -1005,7 +1353,9 @@ def complete_update(
             item_id,
             meta.link_session_id or "unknown",
         )
-        return UpdateResult(item.id, item.status, item.consent_expires_at, consented)
+        return UpdateResult(
+            item.id, item.status, item.consent_expires_at, consented, item.institution_name
+        )
 
 
 # --------------------------------------------------------------------------- re-attach
@@ -1027,10 +1377,30 @@ def orphaned_sandbox_items(
 def reattach_available(
     session: Session, settings: Settings, *, store: secrets.SecretStore | None = None
 ) -> bool:
-    """Production: Keychain holds THE access token but the database has no Item."""
-    if not settings.is_production or _item_count(session):
+    """Production: Keychain holds a token the database doesn't account for — a token of its own
+    without its Item row (BANK-4), or a v1 token it can't place (:func:`legacy_unplaced`; one it
+    can place, the next sync or link moves to that Item's key by itself)."""
+    if not settings.is_production:
         return False
-    return bool(secrets.get_access_token("production", store=store))
+    return bool(orphaned_production_items(session, settings, store=store)) or legacy_unplaced(
+        session, store=store
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ReattachOutcome:
+    """What Re-attach did (:func:`recover_orphaned_items`), one saved token at a time.
+
+    ``results``: the connections rebuilt, or whose v1 token moved to an Item the database has
+    (the caller syncs each from the beginning). ``removed``: production item ids whose token
+    Plaid answered ``ITEM_NOT_FOUND`` for: removed at Plaid, so they are noted
+    (:func:`secrets.mark_production_item_removed`) and left out from now on; their tokens stay
+    in Keychain and they still count toward the 10. ``problems``: why other saved tokens weren't
+    re-attached this time, in the user's words (each waits for the next try)."""
+
+    results: tuple[LinkResult, ...] = ()
+    removed: tuple[str, ...] = ()
+    problems: tuple[str, ...] = ()
 
 
 def recover_orphaned_items(
@@ -1038,13 +1408,16 @@ def recover_orphaned_items(
     gateway: PlaidGateway,
     store: secrets.SecretStore,
     settings: Settings,
-) -> list[LinkResult]:
+) -> ReattachOutcome:
     """Re-create the database rows of connections whose token is in Keychain but whose Item row is
     missing: rebuilt from ``/item/get`` and ``/accounts/get``; the caller then syncs from a null
-    cursor (which reconciles). Production re-attaches THE token, and only while no Item exists.
-    Never a new link. Runs under :data:`db.LINK_WORK_KEY` (a second request at the same time — a
-    double click — gets :class:`LinkBusy`). The Item keeps Plaid's ``created_at`` as its link date,
-    so the consent estimate doesn't restart from today when Amex leaves the expiry empty."""
+    cursor (which reconciles). Production re-attaches every orphaned token, one Item per token,
+    and the v1 token: ``/item/get`` names its Item, and the token moves to that Item's own key
+    (for an Item the database already has, that is all). Never a new link. Each token is handled
+    on its own, so one that fails never stops the others (:class:`ReattachOutcome`). Runs under
+    ``db.LINK_WORK_KEY`` (a second request at the same time — a double click — gets
+    :class:`LinkBusy`). The Item keeps Plaid's ``created_at`` as its link date, so the consent
+    estimate doesn't restart from today when Amex leaves the expiry empty."""
     with _link_work_lock(session_factory) as acquired:
         if not acquired:
             raise LinkBusy(
@@ -1058,32 +1431,88 @@ def _recover_locked(
     gateway: PlaidGateway,
     store: secrets.SecretStore,
     settings: Settings,
-) -> list[LinkResult]:
-    if settings.is_production:
-        with session_factory() as s:
-            if _item_count(s):
-                return []
-        token = secrets.get_access_token("production", store=store)
-        candidates = [(None, token)] if token else []
-    else:
-        with session_factory() as s:
+) -> ReattachOutcome:
+    env = settings.plaid_env
+    with session_factory() as s:
+        if settings.is_production:
+            orphans = orphaned_production_items(s, settings, store=store)
+        else:
             orphans = orphaned_sandbox_items(s, store=store)
-        candidates = [(i, secrets.get_access_token("sandbox", i, store=store)) for i in orphans]
-    results = []
+    candidates: list[tuple[str | None, str | None]] = [
+        (i, secrets.get_access_token(env, i, store=store)) for i in orphans
+    ]
+    if settings.is_production:
+        legacy = secrets.legacy_production_token(store=store)
+        if legacy and legacy not in {token for _, token in candidates}:
+            with session_factory() as s:
+                where = legacy_state(s, store=store)
+            if where.state == "copy" and where.item_id is not None:
+                # Only a copy of a token saved under its Item's own key: nothing to re-attach;
+                # delete it if Keychain allows (else a later sync does).
+                secrets.move_legacy_production_token(where.item_id, store=store)
+            else:
+                candidates.append((None, legacy))
+    results: list[LinkResult] = []
+    removed: list[str] = []
+    problems: list[str] = []
     for expected_id, token in candidates:
         if not token:
             continue
         try:
             item_body = gateway.get_item(token)
         except PlaidGatewayError as err:
-            raise LinkFailed(
-                f"Plaid didn't recognise the saved connection ({err.error_code}). Nothing was "
-                "changed."
-            ) from err
+            log.warning(
+                "Re-attach: /item/get failed for %s: %s",
+                expected_id or "the v1 token",
+                err.error_code,
+            )
+            if err.error_code == ITEM_NOT_FOUND and expected_id and settings.is_production:
+                _note_removed(settings, expected_id)
+                removed.append(expected_id)
+            elif isinstance(err, PlaidTransportError):
+                problems.append(
+                    "Plaid couldn't be reached, so a saved connection wasn't re-attached. Try "
+                    "again in a moment."
+                )
+            else:
+                problems.append(
+                    f"Plaid didn't recognise a saved connection ({err.error_code}), so it wasn't "
+                    "re-attached."
+                )
+            continue
         data = item_body.get("item") or {}
         plaid_item_id = data.get("item_id") or expected_id
         if not plaid_item_id or (expected_id and plaid_item_id != expected_id):
-            raise LinkFailed("Plaid's answer didn't match the saved connection; nothing changed.")
+            problems.append(
+                "Plaid's answer didn't match a saved connection, so it wasn't re-attached."
+            )
+            continue
+        if expected_id is None:
+            move = secrets.move_legacy_production_token(plaid_item_id, store=store)
+            if move.status != "moved":
+                problems.append(
+                    "Keychain couldn't save the access token of a saved connection under its new "
+                    f"name ({move.reason}), so it wasn't re-attached; ./run doctor --env "
+                    "production says what to do."
+                )
+                continue
+            with session_factory() as s:
+                known = s.scalars(
+                    select(PlaidItem).where(PlaidItem.plaid_item_id == plaid_item_id)
+                ).one_or_none()
+                if known is not None:
+                    log.info(
+                        "Moved the v1 access token of Item %s to its own Keychain item", known.id
+                    )
+                    count = s.scalar(
+                        select(func.count()).select_from(Account).where(Account.item_id == known.id)
+                    )
+                    results.append(
+                        LinkResult(
+                            known.id, plaid_item_id, known.institution_name, count or 0, False
+                        )
+                    )
+                    continue
         try:
             accounts_body = gateway.get_accounts(token)
         except PlaidGatewayError as err:
@@ -1111,7 +1540,19 @@ def _recover_locked(
                 attach_needed,
             )
         )
-    return results
+    return ReattachOutcome(tuple(results), tuple(removed), tuple(dict.fromkeys(problems)))
+
+
+def _note_removed(settings: Settings, plaid_item_id: str) -> None:
+    """Remember that Plaid removed this connection, so it no longer waits to be re-attached or
+    blocks a link. If the state folder can't be written, it keeps waiting (and the next Re-attach
+    notes it again)."""
+    try:
+        secrets.mark_production_item_removed(settings, plaid_item_id)
+    except OSError:
+        log.warning("Couldn't note that Plaid removed Item %s", plaid_item_id, exc_info=True)
+    else:
+        log.warning("Plaid no longer has Item %s (ITEM_NOT_FOUND); it is left out", plaid_item_id)
 
 
 # --------------------------------------------------------------------------- manual CSV accounts
@@ -1126,7 +1567,8 @@ class AccountOption:
 
 @dataclass(frozen=True, slots=True)
 class AttachChoice:
-    """Manual (CSV-only) accounts and the linked credit cards their history could move to."""
+    """Manual (CSV-only) accounts and the linked American Express cards their history could move
+    to (the CSV files are Amex's, so no other bank's card is offered: BANK-8)."""
 
     manual: tuple[AccountOption, ...]
     linked: tuple[AccountOption, ...]
@@ -1136,20 +1578,24 @@ class AttachChoice:
         return len(self.manual) == 1 and len(self.linked) == 1
 
 
+def amex_cards(session: Session) -> list[Account]:
+    """Linked American Express credit cards (``status.is_amex_card``), oldest first."""
+    accounts = session.scalars(
+        select(Account)
+        .where(Account.item_id.is_not(None), Account.type == CARD)
+        .order_by(Account.id)
+    )
+    return [account for account in accounts if status_service.is_amex_card(account)]
+
+
 def attach_choice(session: Session) -> AttachChoice | None:
-    """``None`` unless manual accounts AND linked credit accounts both exist."""
+    """``None`` unless manual accounts AND linked American Express cards both exist."""
     manual = list(
         session.scalars(select(Account).where(Account.item_id.is_(None)).order_by(Account.id))
     )
     if not manual:
         return None
-    linked = list(
-        session.scalars(
-            select(Account)
-            .where(Account.item_id.is_not(None), Account.type == "credit")
-            .order_by(Account.id)
-        )
-    )
+    linked = amex_cards(session)
     if not linked:
         return None
     counts = dict(
@@ -1175,8 +1621,9 @@ def attach_choice(session: Session) -> AttachChoice | None:
 def attach_after_link(
     session_factory: sessionmaker[Session],
 ) -> tuple[reconcile.AttachResult | None, bool]:
-    """After linking: attach the lone manual account to the lone linked card (§6), else report
-    that the Connection page must ask. Never fails the link itself: a refused or failed attach is
+    """After linking: attach the lone manual account to the lone linked American Express card
+    (§6, BANK-8), else report that the Connection page must ask. Linking a bank or another card
+    leaves the CSV history alone. Never fails the link itself: a refused or failed attach is
     rolled back and left for the Connection page to offer."""
     try:
         with db.transaction(session_factory) as s:
@@ -1187,7 +1634,7 @@ def attach_after_link(
                 return None, True
             db.ledger_lock(s)
             result = reconcile.attach_manual_account(s, choice.manual[0].id, choice.linked[0].id)
-            log.info("Attached the CSV history to the linked card")
+            log.info("Attached the CSV history to the linked American Express card")
             return result, False
     except reconcile.AttachError as exc:
         log.info("Attaching the CSV history after linking was refused: %s", exc)
@@ -1198,13 +1645,19 @@ def attach_after_link(
 
 
 def attach_manual(session: Session, manual_id: int, account_id: int) -> reconcile.AttachResult:
-    """Move a manual CSV account's history onto a linked card (the caller commits)."""
+    """Move a manual CSV account's history onto a linked American Express card (the caller
+    commits)."""
     manual = session.get(Account, manual_id)
     linked = session.get(Account, account_id)
     if manual is None or not manual.is_manual:
         raise LinkRefused("That imported account no longer exists.")
     if linked is None or linked.is_manual:
         raise LinkRefused("Choose one of the linked cards.")
+    if linked.id not in {a.id for a in amex_cards(session)}:
+        raise LinkRefused(
+            "Amex CSV history can move only onto a linked American Express card, not onto "
+            f"{linked.display_name}."
+        )
     db.ledger_lock(session)
     return reconcile.attach_manual_account(session, manual.id, linked.id)
 
@@ -1320,6 +1773,23 @@ class AccountView:
     notice: str | None
     is_hidden: bool
 
+    @property
+    def is_card(self) -> bool:
+        """A credit card: its tiles are balance, statement, minimum payment and limit."""
+        return self.type == CARD
+
+    @property
+    def kind(self) -> str:
+        """``"Checking"``, ``"Savings"``, ``"Credit card"``… (Plaid's subtype, capitalised)."""
+        return (self.subtype or self.type or "account").capitalize()
+
+    @property
+    def no_longer_shared(self) -> bool:
+        """Plaid stopped listing this account (unticked in Add accounts, or closed at the bank):
+        its history stays, and its balance is the last one Plaid sent
+        (:func:`sync.no_longer_shared`)."""
+        return sync_service.is_not_shared_notice(self.notice)
+
 
 @dataclass(frozen=True, slots=True)
 class ItemView:
@@ -1341,18 +1811,55 @@ class ItemView:
     liabilities_status: str | None
     liabilities_consented: bool
     accounts: tuple[AccountView, ...]
+    institution_id: str | None = None
+    is_amex: bool = False
+    #: the Keychain item that holds this connection's access token (a name, never the token):
+    #: ``plaid.access_token.<env>.<Plaid's item id>``, for the copy going-live.md suggests; the
+    #: v1 name ``plaid.access_token.production`` until the token has moved (C6)
+    keychain_item: str | None = None
+    #: while the token still has its v1 name: the item the next sync or link moves it to
+    keychain_moves_to: str | None = None
 
     @property
     def needs_reconnect(self) -> bool:
         return self.status.item_status == "needs_reconnect"
 
     @property
+    def shared_accounts(self) -> tuple[AccountView, ...]:
+        """The accounts Plaid still shares (``accounts`` also keeps those it stopped listing)."""
+        return tuple(a for a in self.accounts if not a.no_longer_shared)
+
+    @property
     def consent_expired(self) -> bool:
-        return self.status.consent_days_left < 0
+        return self.status.consent_expired
+
+    @property
+    def consent_known(self) -> bool:
+        """A renewal date exists: Plaid's, or the American Express estimate (BANK-6). Only then
+        is Renew consent offered."""
+        return self.status.consent_due_at is not None
+
+    @property
+    def has_cards(self) -> bool:
+        """Statement details (Liabilities) apply only to a connection with a credit card."""
+        return any(a.is_card for a in self.accounts)
+
+    @property
+    def statement_details_missing(self) -> bool:
+        """A card connection whose statement details aren't shared: offer to grant them."""
+        return self.has_cards and not self.liabilities_consented
 
     @property
     def name(self) -> str:
-        return self.institution_name or "Plaid connection"
+        """The connection's title: the institution, or with another login at the same bank
+        "Houndstooth Bank (Cash Rewards ··5678)"."""
+        return self.status.display_name or "Bank connection"
+
+    @property
+    def institution(self) -> str:
+        """The institution itself, for sentences about the bank ("Not reported by Houndstooth
+        Bank")."""
+        return self.institution_name or "Bank connection"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1393,6 +1900,9 @@ class ConnectionOverview:
     reattach_available: bool
     orphaned_ids: tuple[str, ...]
     reminder_days: int
+    #: production Items this app has created so far, of :data:`TRIAL_ITEM_LIMIT` (production only)
+    connections_used: int | None = None
+    connection_limit: int = TRIAL_ITEM_LIMIT
 
     @property
     def linked(self) -> bool:
@@ -1404,13 +1914,22 @@ class ConnectionOverview:
 
     @property
     def link_actions(self) -> bool:
-        """Whether the page offers a Plaid Link action (so it needs Plaid's script)."""
-        if not self.items:
-            return self.can_link
-        return any(
-            i.needs_reconnect or i.status.consent_warning or not i.liabilities_consented
-            for i in self.items
-        )
+        """Whether the page offers a Plaid Link action (so it needs Plaid's script): Link a bank
+        or card, or a connection's own Reconnect and Add accounts, which are always there."""
+        return self.can_link or bool(self.items)
+
+    @property
+    def connections_left(self) -> int | None:
+        if self.connections_used is None:
+            return None
+        return max(0, self.connection_limit - self.connections_used)
+
+    @property
+    def sandbox_bank(self) -> str | None:
+        """The test bank to pick in Plaid's window in the Sandbox: the first of
+        :data:`SANDBOX_TEST_BANKS` with no connection yet (``None`` once each one has)."""
+        linked = {item.institution_id for item in self.items}
+        return next((SANDBOX_INSTITUTIONS[i] for i in SANDBOX_TEST_BANKS if i not in linked), None)
 
 
 def _account_view(a: Account) -> AccountView:
@@ -1445,16 +1964,26 @@ def connection_overview(
     store: secrets.SecretStore | None = None,
     now: dt.datetime | None = None,
 ) -> ConnectionOverview:
-    """The Connection page's data: Items with their accounts, the last 20 sync runs, edits that
-    found no replacement, the CSV-attach choice, and — before anything is linked — the link guard
-    (production) or the Sandbox orphans."""
+    """The Connection page's data: every connection with its accounts, the last 20 sync runs,
+    edits that found no replacement, the CSV-attach choice, the production link guard and how
+    many of the 10 Plaid connections are used, and the Sandbox's orphaned test Items."""
     status = status_service.connection_status(session, now=now)
     by_id = {i.item_id: i for i in status.items}
+    # The v1 token (C6) keeps its old name until a sync or link moves it to its Item's own item.
+    legacy = legacy_state(session, store=store) if settings.is_production else None
+    v1_owner = legacy.item_id if legacy is not None and legacy.state == "movable" else None
     items = []
     for item in session.scalars(select(PlaidItem).order_by(PlaidItem.id)):
         accounts = session.scalars(
             select(Account).where(Account.item_id == item.id).order_by(Account.id)
         )
+        try:
+            keychain_item = secrets.access_token_key(settings.plaid_env, item.plaid_item_id)
+        except ValueError:  # an id Keychain names can't hold (never one of Plaid's)
+            keychain_item = None
+        moves_to = None
+        if v1_owner is not None and item.plaid_item_id == v1_owner:
+            keychain_item, moves_to = secrets.LEGACY_PRODUCTION_TOKEN, keychain_item
         items.append(
             ItemView(
                 id=item.id,
@@ -1464,7 +1993,11 @@ def connection_overview(
                 error_code=item.error_code,
                 error_message=item.error_message,
                 error_display_message=item.error_display_message,
-                error_help=sync_service.describe_error(item.error_code),
+                error_help=sync_service.describe_error(
+                    item.error_code,
+                    institution=by_id[item.id].display_name,
+                    amex=status_service.is_amex(item),
+                ),
                 transactions_update_status=item.transactions_update_status,
                 history_complete_at=item.history_complete_at,
                 plaid_last_failed_update_at=item.plaid_last_failed_update_at,
@@ -1473,6 +2006,10 @@ def connection_overview(
                 liabilities_status=item.liabilities_status,
                 liabilities_consented="liabilities" in (item.consented_products or ()),
                 accounts=tuple(_account_view(a) for a in accounts),
+                institution_id=item.institution_id,
+                is_amex=status_service.is_amex(item),
+                keychain_item=keychain_item,
+                keychain_moves_to=moves_to,
             )
         )
     order = {s.item_id: n for n, s in enumerate(status.items)}  # worst first, like the status
@@ -1481,7 +2018,7 @@ def connection_overview(
         RunView(
             run.id,
             run.item_id,
-            name,
+            by_id[run.item_id].display_name if run.item_id in by_id else name,
             run.trigger,
             run.status,
             run.started_at,
@@ -1503,13 +2040,14 @@ def connection_overview(
     blockers: tuple[str, ...] = ()
     reattach = False
     orphans: tuple[str, ...] = ()
-    if not items:
-        if settings.is_production:
-            blockers = link_blocks(settings, store=store)
-            reattach = reattach_available(session, settings, store=store)
-        else:
-            orphans = tuple(orphaned_sandbox_items(session, store=store))
-    can_link = not items and not blockers and not reattach if settings.is_production else True
+    used: int | None = None
+    if settings.is_production:
+        blockers = link_blocks(session, settings, store=store)
+        reattach = reattach_available(session, settings, store=store)
+        used = connections_used(session, settings, store=store)
+    else:
+        orphans = tuple(orphaned_sandbox_items(session, store=store))
+    can_link = not blockers and not reattach if settings.is_production else True
     return ConnectionOverview(
         status=status,
         items=tuple(items),
@@ -1522,4 +2060,5 @@ def connection_overview(
         reattach_available=reattach,
         orphaned_ids=orphans,
         reminder_days=get_app_settings(session).consent_reminder_days,
+        connections_used=used,
     )

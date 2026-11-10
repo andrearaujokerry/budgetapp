@@ -408,6 +408,43 @@ def test_no_secrets_in_the_docs(path: Path) -> None:
     assert "PGPASSWORD" not in text
 
 
+#: Large US banks and card issuers. The repo is public, so examples, fixtures, comments and the demo
+#: use Plaid's fictional Sandbox banks (Tartan Bank, Houndstooth Bank, Windowpane Bank, First
+#: Gingham Credit Union, First Platypus Bank) or the demo's Harbor Bank: a real bank in an example
+#: could read as one the owner uses (final review security-4). American Express is the app's own.
+REAL_BANKS = re.compile(
+    r"\b(?:Chase|JPMorgan|Citibank|Citi|Capital One|Wells Fargo|Bank of America|U\.S\. Bank|PNC|"
+    r"Truist|TD Bank|Navy Federal|Schwab|Discover Card|Synchrony|Barclays|Ally Bank|USAA|"
+    r"Goldman Sachs|Apple Card|HSBC|Santander|Citizens Bank|Fifth Third|KeyBank|Huntington|"
+    r"Regions Bank|BMO|SoFi)\b",
+    re.IGNORECASE,
+)
+#: Plaid's own list, quoted where the guides explain why a login is never linked twice.
+PLAID_QUOTE = "Plaid names Chase, PNC, Navy Federal and Schwab"
+EXAMPLE_FILES = (".py", ".html", ".md", ".js", ".css", ".txt", ".toml")
+
+
+def test_examples_name_no_real_bank() -> None:
+    """No file in the repo names a real bank or card issuer, except Plaid's quoted list."""
+    roots = (REPO / "budgetapp", REPO / "docs", REPO / "tests", README)
+    paths = [p for root in roots for p in ([root] if root.is_file() else root.rglob("*"))]
+    found = []
+    for path in paths:
+        if (
+            not path.is_file()
+            or path.suffix not in EXAMPLE_FILES
+            or path == Path(__file__)
+            or "vendor" in path.parts
+            or "__pycache__" in path.parts
+        ):
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            match = REAL_BANKS.search(line)
+            if match and PLAID_QUOTE not in line:
+                found.append(f"{_id(path)}:{number}: {match.group(0)}")
+    assert not found, found
+
+
 # --------------------------------------------------------------------------- facts from the code
 
 
@@ -590,15 +627,19 @@ def test_settings_defaults_and_limits(db) -> None:
 
 
 def test_keychain_names() -> None:
-    """The Keychain table names exactly the accounts the code uses."""
+    """The Keychain table names exactly the accounts the code uses: one token per production
+    Item and their index (C6), and the v1 name the first sync moves (BANK-4)."""
     text = (REPO / "docs" / "setup.md").read_text()
     section = text.split("### What Keychain holds", 1)[1].split("\n## ", 1)[0]
     named = set(re.findall(r"`((?:plaid|db)\.[\w.<>]+)`", section))
+    per_item = secrets.production_access_token_key("ITEM").replace("ITEM", "<id>")
     expected = {
         secrets.PLAID_CLIENT_ID,
         secrets.plaid_secret_key("sandbox"),
         secrets.plaid_secret_key("production"),
-        secrets.PRODUCTION_ACCESS_TOKEN,
+        per_item,
+        secrets.PRODUCTION_ITEM_INDEX,
+        secrets.LEGACY_PRODUCTION_TOKEN,
         secrets.link_in_progress_key(),
         secrets.sandbox_access_token_key("ITEM").replace("ITEM", "<id>"),
         secrets.SANDBOX_ITEM_INDEX,
@@ -608,7 +649,7 @@ def test_keychain_names() -> None:
     assert named == expected
     assert f"under the name `{secrets.SERVICE}`" in text
     going_live = (REPO / "docs" / "going-live.md").read_text()
-    assert f"`{secrets.PRODUCTION_ACCESS_TOKEN}`" in going_live
+    assert f"`{per_item}`" in going_live and f"`{secrets.LEGACY_PRODUCTION_TOKEN}`" in going_live
     assert secrets.KEYCHAIN_FIX_COMMAND in text_of(REPO / "docs" / "reconnecting.md")
 
 
@@ -666,6 +707,58 @@ def test_recheck_markers_name_what_is_still_unchecked() -> None:
     for path in USER_DOCS:
         for marker in re.findall(r"<!-- RECHECK\((\w+)\)", path.read_text()):
             assert marker == "GOLIVE", (_id(path), marker)
+
+
+def doc_section(path: Path, heading: str) -> str:
+    """The prose under ``heading`` up to the next heading of the same or a higher level, on one
+    line."""
+    prose, _code = split_code(path.read_text())
+    level, lines = 0, []
+    for line in prose:
+        found = re.match(r"^(#+)\s+(.+?)\s*$", line)
+        if not level:
+            level = len(found.group(1)) if found and found.group(2) == heading else 0
+        elif found and len(found.group(1)) <= level:
+            break
+        else:
+            lines.append(line)
+    assert level, f"{path.name} has no heading {heading!r}"
+    return " ".join(" ".join(lines).split())
+
+
+#: What going-live's checklist after the first bank sync must tell the owner, per final-review
+#: finding: what changes for budgets and alerts (reqs-2); that Transfers also holds payments to
+#: and from other people, and that a card paid from checking must be linked (money-1); to check
+#: that the card's payment from checking counts as a card payment, and how to fix it (money-2);
+#: where money in that Plaid didn't classify goes (money-3).
+AFTER_THE_FIRST_BANK_SYNC = {
+    "money-1": (
+        "payments to people (Zelle, Venmo, Cash App), wires, and check or cash deposits",
+        "Link every card you pay from checking.",
+        "rules don't change card payments",
+    ),
+    "money-2": (
+        '**Counts as** should say **"A card payment, not spending"**',
+        "set its category to Card Payments, then use **Always categorize like this**",
+        "**Also apply to past transactions**",
+    ),
+    "money-3": (
+        "counts as Other Income and is marked **Needs review**",
+        "If it is a refund or a transfer, change its category",
+    ),
+    "reqs-2": (
+        "Your overall target and every budget, annual and rollover ones included",
+        "a car loan in Transportation and a student loan in Education",
+        "budget alerts can arrive at once (large-charge alerts skip the history",
+    ),
+}
+
+
+@pytest.mark.parametrize("finding", sorted(AFTER_THE_FIRST_BANK_SYNC))
+def test_going_live_says_what_to_check_after_the_first_bank_sync(finding: str) -> None:
+    section = doc_section(REPO / "docs" / "going-live.md", "After your first bank account syncs")
+    for words in AFTER_THE_FIRST_BANK_SYNC[finding]:
+        assert words in section, (finding, words)
 
 
 # --------------------------------------------------------------------------- on-screen words

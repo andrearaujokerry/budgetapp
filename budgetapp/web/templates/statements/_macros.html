@@ -17,7 +17,7 @@
 {%- macro source_text(c) -%}
 {%- if c.generated -%}estimated closing date
 {%- elif c.closing_date_source == "user" -%}closing date you entered
-{%- else -%}closing date from Amex
+{%- else -%}closing date from Plaid
 {%- endif -%}
 {%- endmacro -%}
 

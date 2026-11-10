@@ -71,7 +71,7 @@
 {{ ui.banner("info", "Rows imported then are skipped now.", title="You imported this exact file on " ~ (p.same_file_imported_at|date_long) ~ ".") }}
 {%- endif %}
 {%- if p.new_account %}
-{{ ui.banner("info", "Once your card is linked, attach this account to it here: the history then shows as one card, and the rows Plaid also has are merged.", title="A CSV-only account “" ~ p.account_label ~ "” will be created.") }}
+{{ ui.banner("info", "Once your American Express card is linked, attach this account to it here: the history then shows as one card, and the rows Plaid also has are merged.", title="A CSV-only account “" ~ p.account_label ~ "” will be created.") }}
 {%- endif %}
 {%- if p.suspects %}
 {%- set held_text = "They fall inside the period Plaid already covers but match no posted Plaid transaction, so they stay out of every total until you keep or delete them on this page." %}

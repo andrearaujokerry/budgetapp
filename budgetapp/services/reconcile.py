@@ -7,7 +7,8 @@ one, so every charge is stored once, and attaches a manual (CSV-only) account to
   import and after attaching a manual account. It takes ``db.ledger_lock`` (re-entrant, so a
   caller that already holds it, like the sync apply transaction, is fine).
   - Candidates: unpaired CSV rows (``source = 'csv'``; a paired CSV row no longer exists) and
-    unpaired, posted Plaid rows (no ``csv_reference``) across all accounts of the Item, with equal
+    unpaired, posted Plaid rows (no ``csv_reference``) across all accounts of the Item except its
+    bank accounts (:func:`item_account_ids`: a CSV file holds card charges), with equal
     amounts, the CSV date within ``[COALESCE(authorized_date, date) − 3 days, date]`` — widened to
     ``[date − 30 days, date]`` when ``authorized_date`` is null. Pending Plaid rows are not
     candidates: a CSV file holds posted charges, and a pending row is replaced when it posts
@@ -37,7 +38,8 @@ one, so every charge is stored once, and attaches a manual (CSV-only) account to
     it yet); unpaired CSV rows dated on or after it become ``duplicate_status = 'suspect'``
     (excluded from every total by ``v_allocations``), never rows the user marked ``kept``.
 * :func:`attach_manual_account` moves a manual account's history (transactions, imports, rules,
-  statements) onto a linked account, then runs the full pass.
+  statements) onto a linked American Express card (``status.is_amex_card``), then runs the full
+  pass.
 
 For the sync (ARCHITECTURE §8), inside the one apply transaction: call
 ``reconcile_item(session, item_id)`` after the inserts and before the cursor compare-and-set, and
@@ -77,7 +79,9 @@ from budgetapp.models import (
     TransactionTombstone,
 )
 from budgetapp.services import userstate
+from budgetapp.services.accounts import BANK
 from budgetapp.services.categorize import Categorizer, apply_carried_state
+from budgetapp.services.status import is_amex_card
 
 #: The CSV date may be this many days before Plaid's authorized date (or posting date).
 WINDOW_BEFORE_AUTHORIZED = dt.timedelta(days=3)
@@ -358,8 +362,18 @@ def _augment(
 
 
 def item_account_ids(session: Session, item_id: int) -> list[int]:
+    """The Item's accounts whose rows CSV rows may pair with: every account but a bank account.
+
+    An Amex CSV file holds card charges (MON-3), so a checking or savings account the same login
+    brought (W3-PLAN BANK-2) is never a candidate: a CSV charge must not merge into a transfer of
+    the same amount.
+    """
     return list(
-        session.scalars(select(Account.id).where(Account.item_id == item_id).order_by(Account.id))
+        session.scalars(
+            select(Account.id)
+            .where(Account.item_id == item_id, Account.type.is_distinct_from(BANK))
+            .order_by(Account.id)
+        )
     )
 
 
@@ -612,8 +626,8 @@ def attach_manual_account(session: Session, manual_id: int, plaid_account_id: in
     target = session.get(Account, plaid_account_id)
     if manual is None or not manual.is_manual:
         raise AttachError("That CSV account no longer exists. Reload the page.")
-    if target is None or target.is_manual or target.item_id is None:
-        raise AttachError("Choose a card linked through Plaid to attach the CSV history to.")
+    if target is None or not is_amex_card(target):  # Amex CSV history: Amex cards only
+        raise AttachError("Choose a linked American Express card to attach the CSV history to.")
 
     others = select(Transaction.csv_reference).where(
         Transaction.account_id != manual.id, Transaction.csv_reference.is_not(None)

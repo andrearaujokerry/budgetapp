@@ -1,5 +1,6 @@
 /* Trends (INS-2): the change cells, the category heading and the month grid (sticky category
-   column, the month in progress tinted). Everything else comes from app.css. */
+   column, the month in progress tinted); the "Show income" switch and the grid's income
+   statement rows (wave 3). Everything else comes from app.css. */
 
 .trends-results > * + * {
   margin-top: 24px;
@@ -28,18 +29,22 @@
 }
 
 .trends-link,
-.trends-amount {
+.trends-amount,
+.trends-income {
   color: inherit;
 }
 
-.trends-amount {
+/* An amount that opens its transactions (an income amount's list shows money in as negative). */
+.trends-amount,
+.trends-income {
   text-decoration: underline;
   text-decoration-color: var(--border-strong);
   text-underline-offset: 3px;
 }
 
 .trends-link:hover .cat__name,
-.trends-amount:hover {
+.trends-amount:hover,
+.trends-income:hover {
   text-decoration: underline;
   text-decoration-color: currentColor;
   text-underline-offset: 3px;
@@ -93,7 +98,7 @@
   position: sticky;
   left: 0;
   z-index: 1;
-  max-width: 13rem;
+  max-width: 14rem; /* with its padding: room for "Subscriptions & Streaming" */
   background: var(--surface);
   text-align: left;
   font-weight: var(--fw-medium);
@@ -107,10 +112,8 @@
   background: var(--surface-sunken);
 }
 
-.trends-grid .trends-grid__name .cat {
-  max-width: 12rem;
-}
-
+/* A category badge keeps app.css's max-width: 100%, the cell's content box: a long name ends in
+   an ellipsis inside the cell's padding instead of running into the next column. */
 .trends-grid .trends-grid__name .cat__name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -137,13 +140,85 @@
   color: var(--text-muted);
 }
 
-@media (max-width: 599px) {
+/* Income and net (INC-4): All spending closes the spending rows, an "Income" heading opens the
+   income rows, All income and Net close them. */
+.trends-grid .trends-grid__totals th,
+.trends-grid .trends-grid__totals td,
+.trends-grid .trends-grid__subtotal th,
+.trends-grid .trends-grid__subtotal td {
+  background: var(--surface-sunken);
+  font-weight: var(--fw-semibold);
+}
+
+.trends-grid .trends-grid__group th {
+  padding-top: var(--sp-4);
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.trends-grid .trends-grid__group td {
+  padding: 0;
+}
+
+.trends-grid__note {
+  margin-left: var(--sp-1);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+}
+
+/* The "Show income" switch in the page header (the Dashboard has the same). */
+.income-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 32px;
+  margin: 0;
+}
+
+.income-switch__control {
+  align-items: center;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
+.income-switch__control .switch {
+  margin: 0;
+}
+
+/* Above the income chart when the bank history starts later than the spending's. */
+.trends-income-start {
+  margin: 0 0 var(--sp-3);
+}
+
+/* Under the Net tile while no bank account exists: only card credits are income yet. */
+.income-hint {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+@media (max-width: 599.98px) {
   #trends-kpis {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .trends-grid .trends-grid__name,
-  .trends-grid .trends-grid__name .cat {
+  /* The sticky name column stays narrow and clips what it holds, so nothing in it prints over
+     the months scrolling under it. A small right padding leaves names the room they had; a
+     longer one ends in an ellipsis, and the Net row's note takes a line of its own. */
+  .trends-grid .trends-grid__name {
     max-width: 8.5rem;
+    padding-right: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .trends-grid__note {
+    display: block;
+    margin-left: 0;
+    white-space: normal;
   }
 }

@@ -1,4 +1,5 @@
-"""The demo persona: one Amex Blue Cash Preferred card in San Francisco and where it is used.
+"""The demo persona: an Amex Blue Cash Preferred card and a Harbor Bank checking and savings
+account in San Francisco, and where they are used.
 
 Every merchant carries what Plaid would send for it (``name``, ``merchant_name``, the raw
 statement text, PFC v2 codes, channel, MCC, website, a store location) and the Amex CSV
@@ -29,6 +30,32 @@ CARD_MEMBER = "ALEX RIVERA"
 ADDITIONAL_CARD_MEMBER = "SAM RIVERA"
 #: The one category the persona added: (name, colour, icon).
 CUSTOM_CATEGORY = ("Pets", "#9f1239", "🐾")
+#: Every category the persona added: (name, colour, icon, sort order). Rent comes from checking
+#: (a rule sends the landlord's ACH debit there); it has no budget, only the overall target.
+CUSTOM_CATEGORIES: tuple[tuple[str, str, str, int], ...] = (
+    (*CUSTOM_CATEGORY, 145),
+    ("Rent", "cat-15", "🔑", 105),
+)
+
+# --------------------------------------------------------------------------- Harbor Bank (MON-5)
+# A made-up bank (no real institution): one more Plaid Item with a checking and a savings account.
+BANK_INSTITUTION_ID = "ins_demo_harbor"
+BANK_INSTITUTION_NAME = "Harbor Bank"
+#: (key, name, official name, mask, subtype)
+BANK_ACCOUNTS: tuple[tuple[str, str, str, str, str], ...] = (
+    ("checking", "Everyday Checking", "Harbor Everyday Checking", "4417", "checking"),
+    ("savings", "High Yield Savings", "Harbor High Yield Savings", "7702", "savings"),
+)
+EMPLOYER = "ACME ROBOTICS"
+#: Net pay every other Friday, before and after the raise.
+PAYCHECK = (Decimal("3412.18"), Decimal("3586.40"))
+RAISE_MONTHS_AGO = 5
+#: Rent on the 1st, before and after the lease renewal.
+RENT = (Decimal("2395.00"), Decimal("2450.00"))
+RENEWAL_MONTHS_AGO = 7
+LANDLORD = "Bayview Property Management"
+SAVINGS_TRANSFER = Decimal("1500.00")
+SAVINGS_APY = Decimal("0.041")
 
 
 @dataclass(frozen=True, slots=True)
@@ -689,6 +716,26 @@ def is_home_store(merchant: Merchant) -> bool:
 
 MERCHANTS: dict[str, Merchant] = {m.key: m for m in _MERCHANTS + _TRIP_MERCHANTS}
 
+# fmt: off
+#: Where the persona pays with the Harbor Bank debit card (groceries: Groceries, as on the card).
+BANK_MERCHANTS: dict[str, Merchant] = {m.key: m for m in (
+    _m("farmers_market", "Ferry Plaza Farmers Market", "CUESA FERRY PLAZA FARMERS",
+       "CUESA FERRY PLAZA FARMERS SAN FRANCISCO CA", "Groceries", "FOOD_AND_DRINK_GROCERIES",
+       GROCERIES, "18.00", "46.00", mcc="5499",
+       place=_sf("1 Ferry Building", "94111", "37.7955", "-122.3937")),
+    _m("rainbow", "Rainbow Grocery", "RAINBOW GROCERY COOP",
+       "RAINBOW GROCERY COOP SAN FRANCISCO CA", "Groceries", "FOOD_AND_DRINK_GROCERIES",
+       GROCERIES, "24.00", "78.00", mcc="5411",
+       place=_sf("1745 Folsom St", "94103", "37.7695", "-122.4155")),
+    _m("sfpuc", "SFPUC", "SFPUC WATER SEWER", "SF PUBLIC UTILITIES COMM WATER SEWER",
+       "Utilities & Bills", "RENT_AND_UTILITIES_WATER", "Business Services-Utilities", "58.00",
+       "78.00", channel="online", mcc="4900", website="sfpuc.org"),
+    _m("bayview", LANDLORD, "BAYVIEW PROPERTY MGMT", "BAYVIEW PROPERTY MGMT DES:RENT WEB",
+       "Rent", "RENT_AND_UTILITIES_RENT", "Other-Miscellaneous", "2450.00", "2450.00",
+       channel="online", mcc=None),
+)}
+# fmt: on
+
 # Monthly budgets the persona keeps (current amounts), close to its usual spending.
 MONTHLY_BUDGETS: dict[str, Decimal] = {
     "Groceries": Decimal("700.00"),
@@ -700,14 +747,17 @@ MONTHLY_BUDGETS: dict[str, Decimal] = {
     "Health & Fitness": Decimal("300.00"),
     "Personal Care": Decimal("120.00"),
     "Home": Decimal("150.00"),
-    "Utilities & Bills": Decimal("325.00"),
+    "Utilities & Bills": Decimal("450.00"),  # with the water bill from checking
     "Pets": Decimal("120.00"),
 }
 ANNUAL_BUDGETS: dict[str, Decimal] = {
     "Travel": Decimal("6000.00"),
     "Gifts & Donations": Decimal("800.00"),
 }
-OVERALL_TARGET = Decimal("3800.00")
+#: Every category without an annual budget: the card's spending and checking's (rent included).
+OVERALL_TARGET = Decimal("7000.00")
+#: The overall target from the link month until four months ago.
+EARLIER_OVERALL_TARGET = Decimal("6600.00")
 #: This month: the gym (billed on the 1st, $255) is 85 % of Health & Fitness's $300 budget.
 NEARLY_FULL = "Health & Fitness"
 #: This month: concert tickets put Entertainment over budget.
@@ -746,6 +796,7 @@ RULES: tuple[RuleSpec, ...] = (
              match_type="regex"),
     RuleSpec("Gym", "Health & Fitness", 60, merchant_pattern="equinox"),
     RuleSpec("PG&E", "Utilities & Bills", 60, merchant_pattern="pg&e"),
+    RuleSpec("Rent", "Rent", 30, merchant_pattern="bayview property"),
     RuleSpec("Uber rides on trips", "Travel", 100, merchant_pattern="uber", is_active=False),
 )
 # fmt: on

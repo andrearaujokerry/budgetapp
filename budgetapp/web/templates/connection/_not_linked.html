@@ -1,43 +1,28 @@
-{#- Nothing linked yet (included by connection/index.html). Production: the link guard's reasons,
-    re-attach, the Dashboard checklist with the live institution check, and a confirm dialog
-    before the one-time link. Sandbox: Plaid Link or a test Item without Link. -#}
+{#- Nothing linked yet (included by connection/index.html, which also shows the "Linking is
+    paused" and re-attach banners and the confirm dialog). What linking does, then — production —
+    the Dashboard checklist with the live check that Plaid answers, or — Sandbox — test Items
+    without Plaid Link. -#}
 {%- import "components/ui.html" as ui -%}
 {%- import "components/forms.html" as form -%}
 {%- set o = overview -%}
 
-{%- if o.production and o.reattach_available %}
-{% call ui.banner("warn", "Keychain still holds the access token of your American Express connection, but this database has no record of it (it was restored or rebuilt). Re-attach it: no new Plaid connection is used.", title="A saved connection was found.") %}
-<form method="post" action="/connection/recover">{{ ui.button("Re-attach existing connection", variant="primary", size="sm", type="submit", icon="link", disabled=not link_enabled) }}</form>
-{% endcall %}
-{%- elif o.production and o.link_blockers %}
-{{ ui.banner("warn", o.link_blockers|join(" "), title="Linking is paused.") }}
-{%- endif %}
-{%- if o.orphaned_ids %}
-{% call ui.banner("info", "Keychain holds " ~ (o.orphaned_ids|length|pluralize("Sandbox test connection")) ~ " that this database doesn't know (it was recreated). Recover them to sync their data again; nothing new is linked.", title="Saved test connections found.") %}
-<form method="post" action="/connection/recover">{{ ui.button("Recover", size="sm", type="submit", icon="refresh", disabled=not link_enabled) }}</form>
-{% endcall %}
-{%- endif %}
-
 <div class="grid grid--sidebar">
-{% call ui.card("Link American Express", id="link-card") %}
+{% call ui.card("Link a bank or card", id="link-card") %}
 <div class="stack">
-<p>Plaid opens a secure window where you sign in to American Express. The app never sees your password; Plaid gives it read-only access to your card.</p>
+<p>Plaid opens a secure window where you pick your bank or card company and sign in. The app never sees your password; Plaid gives it read-only access to the accounts you choose.</p>
 <ul class="link-facts">
+<li>{{ ui.icon("credit-card") }}<span><strong>Checking, savings and credit cards</strong> from any bank Plaid supports. Investment and loan accounts are left out.</span></li>
 <li>{{ ui.icon("list") }}<span><strong>Transactions</strong> from the last two years, then new ones four times a day.</span></li>
-<li>{{ ui.icon("credit-card") }}<span><strong>Balance and statement details</strong>: what you owe, the minimum payment and when it's due.</span></li>
-<li>{{ ui.icon("lock") }}<span><strong>Read-only.</strong> Nothing here can pay, move money or change your card.</span></li>
-<li>{{ ui.icon("calendar") }}<span><strong>Once a year</strong> American Express asks you to confirm access; the app reminds you in time.</span></li>
+<li>{{ ui.icon("receipt") }}<span><strong>Balances</strong>, and for cards the statement details: what you owe, the minimum payment and when it's due.</span></li>
+<li>{{ ui.icon("lock") }}<span><strong>Read-only.</strong> Nothing here can pay, move money or change your accounts.</span></li>
+<li>{{ ui.icon("calendar") }}<span><strong>Some banks ask you to confirm access</strong> from time to time (American Express once a year); the app reminds you in time.</span></li>
 <li>{{ ui.icon("home") }}<span><strong>Stays on this Mac.</strong> Your data goes only between Plaid and this app.</span></li>
 </ul>
 {%- if o.production %}
-{{ ui.banner("warn", "It stays used even if the connection is removed later, and linking American Express a second time can break the first link. Finish the checklist first.", title="This uses 1 of your 10 Plaid connections.") }}
+{{ ui.banner("warn", "It stays used even if the connection is removed later, and linking the same login a second time can break the first link. Finish the checklist first.", title="Each bank you link uses 1 of your 10 Plaid connections.") }}
 {%- endif %}
 <div class="cluster">
-{%- if o.production %}
-{{ ui.button("Link American Express", variant="primary", icon="link", data_dialog_open="confirm-link", disabled=not (link_enabled and o.can_link)) }}
-{%- else %}
-{{ ui.button("Link with Plaid Link", variant="primary", icon="link", data_link_mode="new", disabled=not link_enabled) }}
-{%- endif %}
+{{ ui.button("Link a bank or card", variant="primary", icon="link", data_dialog_open="confirm-link", id="link-open", disabled=not (link_enabled and o.can_link)) }}
 </div>
 </div>
 {% endcall %}
@@ -50,13 +35,13 @@
 <li><span class="link-checklist__label">{{ c.label }}</span><span class="link-checklist__detail">{{ c.detail }}</span><a href="{{ c.href }}" target="_blank" rel="noopener noreferrer">Open Plaid's Dashboard {{ ui.icon("external", size="xs") }}</a></li>
 {%- endfor %}
 </ol>
-<div id="preflight" class="preflight" hx-get="/connection/preflight" hx-trigger="load" hx-swap="outerHTML">{{ ui.loading("Asking Plaid about American Express…") }}</div>
+<div id="preflight" class="preflight" hx-get="/connection/preflight" hx-trigger="load" hx-swap="outerHTML">{{ ui.loading("Asking Plaid…") }}</div>
 </div>
 {% endcall %}
 {%- else %}
 {% call ui.card("Sandbox", subtitle="Test data only: nothing real is linked") %}
 <div class="stack">
-<p class="text-secondary">In Plaid Link, pick First Platypus Bank and sign in with <code>user_good</code> and <code>pass_good</code>. Or create a test Item directly:</p>
+<p class="text-secondary">With <strong>Link a bank or card</strong>, pick First Platypus Bank in Plaid's window and sign in with <code>user_good</code> and <code>pass_good</code>. Or create a test Item directly:</p>
 <form method="post" action="/connection/sandbox-item" class="stack stack--sm">
 {{ form.select_field("user", "Test data", sandbox_users, value="custom", id="sandbox-user") }}
 <div>{{ ui.button("Create a test Item without Link", type="submit", icon="plus", disabled=not link_enabled) }}</div>
@@ -65,21 +50,3 @@
 {% endcall %}
 {%- endif %}
 </div>
-
-{%- if o.production %}
-{% call ui.dialog("confirm-link", "Link American Express?", size="sm") %}
-<div class="stack">
-<p><strong>This uses 1 of your 10 Plaid connections, permanently.</strong> Make sure the checklist is done: tick each item once it is set in Plaid's Dashboard.</p>
-<fieldset class="stack stack--sm link-confirm" data-link-checklist>
-<legend class="sr-only">Checklist</legend>
-{%- for c in checklist %}
-{{ form.checkbox_field("confirm_" ~ c.key, c.label, id="confirm-" ~ c.key) }}
-{%- endfor %}
-</fieldset>
-<div class="dialog__footer">
-{{ ui.button("Cancel", variant="ghost", data_dialog_close=true) }}
-{{ ui.button("Link American Express", variant="primary", icon="link", data_link_mode="new", data_needs_checklist=true, disabled=true) }}
-</div>
-</div>
-{% endcall %}
-{%- endif %}

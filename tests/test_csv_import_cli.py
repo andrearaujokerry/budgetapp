@@ -130,6 +130,33 @@ def test_an_ambiguous_target_lists_the_choices(db):
     assert f"  --account {first.id}  Gold Card ··1001" in lines[0]
 
 
+def test_the_help_names_the_card_a_file_goes_to(capsys):
+    """Final review reqs-3 (C9, MON-3): ``--help`` said "the only linked credit-card account",
+    but an Amex file goes only to an American Express card (the tests below)."""
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["import-csv", "--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "Without ``--account`` the file goes to your only linked American Express card" in (
+        help_text
+    )
+    assert "credit-card account" not in help_text
+    assert "Bank accounts and other banks' cards never take an Amex file." in help_text
+
+
+def test_with_amex_and_another_banks_card_the_file_goes_to_the_amex_card(db):
+    amex = make_account(db, make_item(db))  # American Express, ins_10
+    tartan = make_item(db, institution_id="ins_109511", institution_name="Tartan Bank")
+    make_account(db, tartan, name="Tartan Rewards", official_name=None)
+    assert import_csv.choose_account(db, None, production=False) == amex.id
+
+
+def test_another_banks_card_never_takes_the_file(db):
+    """With no Amex card linked, the file goes to a new "American Express (CSV)" account."""
+    tartan = make_item(db, institution_id="ins_109511", institution_name="Tartan Bank")
+    make_account(db, tartan, name="Tartan Rewards", official_name=None)
+    assert import_csv.choose_account(db, None, production=False) is None
+
+
 def test_the_basic_download_is_refused(db):
     code, lines = run(db, fixture("activity_basic.csv"))
     assert code == 1 and "basic download" in lines[0]

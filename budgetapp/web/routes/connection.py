@@ -1,4 +1,5 @@
-"""Connection page (SYNC-1 … SYNC-7): linking, the connection's status, update mode, Sync now.
+"""Connection page (SYNC-1 … SYNC-7, BANK-1 … BANK-6): linking banks and cards, each
+connection's status and accounts, update mode, Sync now.
 
 * ``GET /connection``: the page; with ``HX-Request`` only its live region (``#connection-live``,
   polled while a sync or the backfill after linking runs, and refreshed on the
@@ -11,10 +12,11 @@
   answer with ``components/sync_status.html`` (components README §2.4); a plain form post gets a
   303 to this page.
 * JSON endpoints for ``static/js/link.js`` (Plaid Link): ``POST /connection/link-token``
-  (``{link_token, attempt}``), ``/connection/exchange`` (a new link),
-  ``/connection/update-complete`` (update mode: its public token is never exchanged) and
-  ``/connection/link-exit`` (Link's onExit, which clears its own attempt's marker, and the
-  CLOSE_OAUTH / FAIL_OAUTH events, logged only).
+  (``{mode: new|update|liabilities|accounts, item_id?}`` → ``{link_token, attempt}``),
+  ``/connection/exchange`` (a new link: ``{public_token, metadata, attempt, different_login}``;
+  a duplicate login is refused before the exchange), ``/connection/update-complete`` (update
+  mode: its public token is never exchanged) and ``/connection/link-exit`` (Link's onExit, which
+  clears its own attempt's marker, and the CLOSE_OAUTH / FAIL_OAUTH events, logged only).
 * Forms: ``POST /connection/sandbox-item`` (Sandbox: a test Item without Link),
   ``/connection/recover`` (re-attach a connection whose token is in Keychain but whose database
   row is missing), ``/connection/attach`` (move imported CSV history onto a linked card) and
@@ -68,7 +70,9 @@ router = APIRouter()
 
 PAGE = "/connection"
 NAV = "connection"
-LINK_MODES = ("new", "update", "liabilities")
+#: ``new`` (Link a bank or card), ``update`` (Reconnect, Renew consent), ``liabilities`` (statement
+#: details, cards only) and ``accounts`` (Add accounts: update mode with account selection).
+LINK_MODES = ("new", "update", "liabilities", "accounts")
 
 DEMO_MESSAGE = (
     "Not available with demo data: this server shows a demo database and never calls Plaid."
@@ -87,6 +91,7 @@ NOT_STARTED = "The app is stopping, so the sync didn't start. Try again in a mom
 #: The Sandbox test users offered for "Create a test Item without Link" (linking.SANDBOX_USERS).
 SANDBOX_USER_OPTIONS = [
     ("custom", "Amex-like card, known totals"),
+    ("bank", "Bank login: checking, savings and a card"),
     ("user_transactions_dynamic", "Dynamic: pending charges post"),
     ("user_good", "Plaid's standard test user"),
 ]
@@ -356,20 +361,24 @@ def sync_now(
     jobs: JobsDep,
 ) -> Response:
     """Sync now (SYNC-2): ``/transactions/refresh``, a sync now and three follow-ups, in the
-    background. Answers at once with the status pill saying "Syncing…"."""
+    background. Answers at once with the status pill saying "Syncing…". A connection that needs
+    reconnecting is left out while another can sync (only Reconnect can fix it, and the top bar
+    keeps Sync now for the others); when every connection needs it, all are tried as before."""
     if is_demo(request):
         return _sync_answer(request, session, "info", DEMO_MESSAGE)
     conn = connection_status(session)
     if not conn.linked:
         return _sync_answer(
-            request, session, "info", "Nothing is linked yet. Link your card first."
+            request, session, "info", "Nothing is linked yet. Link a bank or card first."
         )
     if conn.syncing:
         return _sync_answer(request, session, "info", "A sync is already running.", running=True)
     gateway, problem = plaid_gateway(request)
     if gateway is None:
         return _sync_answer(request, session, "error", problem or KEYS_MISSING)
-    for item in conn.items:
+    targets = [i for i in conn.items if i.item_status != "needs_reconnect"] or list(conn.items)
+    waiting = [i.name for i in conn.items if i not in targets]
+    for item in targets:
         run_id = sync_service.prepare_run(session, item.item_id, "manual").id
         session.commit()
         task = sync_service.RefreshThenSync(
@@ -384,7 +393,11 @@ def sync_now(
         if not jobs.submit(refresh_key(item.item_id), task, replace=True):
             _abandon_run(session_factory, run_id)
             return _sync_answer(request, session, "error", NOT_STARTED)
-    return _sync_answer(request, session, "info", "Sync started", running=True)
+    text = "Sync started"
+    if waiting:
+        who = waiting[0] if len(waiting) == 1 else f"{', '.join(waiting[:-1])} and {waiting[-1]}"
+        text += f". {who} {'waits' if len(waiting) == 1 else 'wait'} for you to reconnect first."
+    return _sync_answer(request, session, "info", text, running=True)
 
 
 @router.get("/connection/sync-status")
@@ -407,9 +420,9 @@ def link_token(
     body: JsonDep,
 ) -> Response:
     """A Link token: ``mode`` "new" (guarded in production), "update" (Reconnect / Renew
-    consent) or "liabilities" (update mode asking for statement details). Answers
-    ``{link_token, attempt}``; ``attempt`` (production new links only) goes back with Link's exit
-    report and the exchange."""
+    consent), "liabilities" (update mode asking for statement details) or "accounts" (Add
+    accounts). Answers ``{link_token, attempt}``; ``attempt`` (production new links only) goes
+    back with Link's exit report and the exchange."""
     if is_demo(request):
         return _json_error(409, DEMO_MESSAGE)
     mode = body.get("mode")
@@ -433,6 +446,7 @@ def link_token(
                 gateway,
                 item_id,
                 add_liabilities=mode == "liabilities",
+                add_accounts=mode == "accounts",
                 store=store,
                 settings=settings,
             )
@@ -460,6 +474,8 @@ def exchange(
     body: JsonDep,
 ) -> Response:
     """Link's ``onSuccess`` for a NEW link: save the connection, then sync its history.
+    ``different_login`` (only ``true`` counts) is the confirm dialog's "a different login at a
+    bank I've already linked"; without it a bank that is already linked is refused (BANK-3).
 
     The one answer that carries an access token: :class:`linking.TokenNotSaved` (no Keychain and
     no recovery file could keep it), whose token link.js shows once for the user to copy."""
@@ -477,6 +493,7 @@ def exchange(
             body.get("public_token"),  # type: ignore[arg-type]  (checked by exchange)
             body.get("metadata"),
             attempt=_short(body.get("attempt")),
+            different_login=body.get("different_login") is True,
         )
     except linking.LinkRefused as exc:
         return _json_error(409, str(exc))
@@ -489,13 +506,13 @@ def exchange(
     start_backfill(
         jobs, session_factory, gateway, store, settings, notifier, result.item_id, trigger="link"
     )
-    name = result.institution_name or "Your card"
+    name = result.institution_name or "Your bank"
     text = (
         f"{name} is linked. Plaid is sending your transactions; two years of history can take a "
         "few minutes."
     )
     if result.attach_needed:
-        text += " Choose below which card your imported CSV history belongs to."
+        text += " Choose below which American Express card your imported CSV history belongs to."
     elif result.attached is not None:
         moved = result.attached.moved_transactions
         noun = "transaction" if moved == 1 else "transactions"
@@ -536,14 +553,20 @@ def update_complete(
     start_backfill(
         jobs, session_factory, gateway, store, settings, notifier, item_id, trigger="update"
     )
+    name = result.institution_name or "bank"
     if body.get("mode") == "liabilities":
         text = (
             "Statement details are now shared; they show after this sync."
             if result.liabilities_consented
             else "Plaid didn't add statement details for this card. Transactions keep syncing."
         )
+    elif body.get("mode") == "accounts":
+        text = (
+            f"Your account choice at {name} is saved. Syncing now: accounts you added appear "
+            "once Plaid sends them."
+        )
     else:
-        text = "Your Amex connection is working again. Syncing now."
+        text = f"Your {name} connection is working again. Syncing now."
         if result.consent_expires_at is not None:
             due = result.consent_expires_at.astimezone().date()
             text += f" Access is renewed until {due:%b} {due.day}, {due.year}."
@@ -629,28 +652,23 @@ def recover(
     jobs: JobsDep,
 ) -> Response:
     """Re-attach connections whose access token is in Keychain but whose row is missing (never a
-    new link), then sync each from the beginning."""
+    new link), then sync each from the beginning. Each saved token is handled on its own: the
+    answer says what was re-attached, which connections Plaid removed (left out from now on) and
+    why any other wasn't re-attached this time."""
     if is_demo(request):
         return redirect(request, PAGE, "info", DEMO_MESSAGE)
     gateway, problem = plaid_gateway(request)
     if gateway is None:
         return redirect(request, PAGE, "error", problem or KEYS_MISSING)
     try:
-        results = linking.recover_orphaned_items(session_factory, gateway, store, settings)
+        outcome = linking.recover_orphaned_items(session_factory, gateway, store, settings)
     except linking.LinkBusy as exc:  # e.g. a double click: the first request is still working
         return redirect(request, PAGE, "info", str(exc))
     except linking.LinkError as exc:
         return redirect(request, PAGE, "error", str(exc))
     except secrets.KeychainApprovalNeeded:
         return redirect(request, PAGE, "error", KEYCHAIN_MESSAGE)
-    if not results:
-        return redirect(
-            request,
-            PAGE,
-            "info",
-            "Nothing to re-attach: the saved connection is already here, or none was found.",
-        )
-    for result in results:
+    for result in outcome.results:
         start_backfill(
             jobs,
             session_factory,
@@ -661,11 +679,43 @@ def recover(
             result.item_id,
             trigger="link",
         )
-    count = len(results)
-    noun = "connection" if count == 1 else "connections"
-    return redirect(
-        request, PAGE, "success", f"Re-attached {count} {noun}. Syncing from the beginning now."
-    )
+    messages: list[tuple[str, str]] = []
+    count = sum(1 for r in outcome.results if r.created)
+    if count:
+        noun = "connection" if count == 1 else "connections"
+        messages.append(("success", f"Re-attached {count} {noun}. Syncing from the beginning now."))
+    elif outcome.results:  # only the v1 token moved to an Item the database already has
+        messages.append(("success", "The saved connection is in place again. Syncing now."))
+    if len(outcome.removed) == 1:
+        messages.append(
+            (
+                "info",
+                "Plaid no longer has 1 saved connection (it was removed at Plaid), so it can't be "
+                "re-attached. Its access token stays in Keychain, and it still counts toward your "
+                "10 Plaid connections.",
+            )
+        )
+    elif outcome.removed:
+        messages.append(
+            (
+                "info",
+                f"Plaid no longer has {len(outcome.removed)} saved connections (they were removed "
+                "at Plaid), so they can't be re-attached. Their access tokens stay in Keychain, "
+                "and they still count toward your 10 Plaid connections.",
+            )
+        )
+    messages += [("error", text) for text in outcome.problems]
+    if not messages:
+        messages.append(
+            (
+                "info",
+                "Nothing to re-attach: every saved connection is already here, or none was found.",
+            )
+        )
+    response = redirect(request, PAGE, *messages[0])
+    for level, text in messages[1:]:
+        flash(response, level, text)
+    return response
 
 
 @router.post("/connection/attach")

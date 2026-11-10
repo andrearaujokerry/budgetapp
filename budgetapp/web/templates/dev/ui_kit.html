@@ -56,7 +56,7 @@
 <section class="section" id="components">
 <div class="section__header"><div><h2 class="section__title">Banners</h2><p class="section__subtitle">banner(tone, text, title, action_href, action_label) — info, warn, over (alias danger), ok, sandbox</p></div></div>
 <div class="stack stack--sm">
-{{ ui.banner('info', 'Plaid refreshes Amex data 1–4 times a day, so new charges can take a few hours to appear.', title='Heads up.') }}
+{{ ui.banner('info', 'Plaid refreshes your banks’ data 1–4 times a day, so new transactions can take a few hours to appear.', title='Heads up.') }}
 {{ ui.banner('warn', 'Amex asks you to renew access every 12 months. It takes a minute and keeps syncing uninterrupted.', title='Renew your Amex connection by Nov 27, 2026 (30 days left).', action_href='#', action_label='Renew now') }}
 {{ ui.banner('over', 'Syncing is paused until you sign in to Amex again through Plaid. Your existing data is safe.', title='Your Amex connection needs attention.', action_href='#', action_label='Reconnect') }}
 {{ ui.banner('ok', '214 transactions imported, 37 duplicates skipped, 12 matched to Plaid.', title='Import finished.') }}
@@ -256,7 +256,7 @@
 <div class="stack">
 {% call ui.card("Budget settings") %}
 <div class="form">
-{{ form.segmented('period', [('calendar', 'Calendar month'), ('statement', 'Statement cycle')], value='calendar', label='Budget period', help='Statement cycles follow your Amex closing date.') }}
+{{ form.segmented('period', [('calendar', 'Calendar month'), ('statement', 'Statement cycle')], value='calendar', label='Budget period', help='Statement cycles follow your card’s closing date.') }}
 {{ form.money_field('overall', 'Overall monthly target', value=3000, help='Leave empty for no overall target.', id='kit-overall') }}
 {{ form.switch_field('include_pending', 'Count pending charges in budgets', checked=true, help='Pending charges move to their posted amount automatically.', id='kit-pending') }}
 {{ form.field('large', 'Large-charge alert', value='', type='text', placeholder='Off', disabled=true, help='Disabled example.', id='kit-large') }}
@@ -323,7 +323,7 @@
 <div class="section__header"><div><h2 class="section__title">Empty states</h2><p class="section__subtitle">empty_state(title, message, icon, action_href, action_label, compact, heading, tone)</p></div></div>
 <div class="grid grid--3">
 <div class="card">
-{% call ui.empty_state("No transactions yet", "Link your Amex card to sync charges automatically, or import a CSV download from americanexpress.com.", icon="credit-card") %}
+{% call ui.empty_state("No transactions yet", "Link a bank or card to sync transactions automatically, or import an Amex CSV download from americanexpress.com.", icon="credit-card") %}
 <a class="btn btn--primary" href="#">{{ ui.icon('link') }}<span>Link account</span></a>
 <a class="btn" href="#">{{ ui.icon('upload') }}<span>Import CSV</span></a>
 {% endcall %}
@@ -332,7 +332,7 @@
 {{ ui.empty_state("No matches", "Nothing matches these filters. Try a wider date range or clear the search.", icon="search", compact=true) }}
 </div>
 <div class="card">
-{{ ui.empty_state("Plaid couldn't do that", "Amex isn't responding right now. Nothing was changed; try again in a few minutes.", icon="alert", tone="warn", compact=true) }}
+{{ ui.empty_state("Plaid couldn't do that", "The bank isn't responding right now. Nothing was changed; try again in a few minutes.", icon="alert", tone="warn", compact=true) }}
 </div>
 </div>
 </section>

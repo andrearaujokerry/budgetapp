@@ -10,9 +10,9 @@ Rules page needs on top of them, without a second copy of the matching logic:
   :func:`move_rule` (up/down; priorities are then renumbered 10, 20, 30, … in run order).
 * :func:`preview`: what saving a rule (new or edited) with "also apply to past transactions" would
   change, without saving anything. The full precedence runs, so a card payment (step 0, which no
-  rule can override) stays a card payment, a category you set yourself never changes, and an
-  earlier rule still wins. Its counts are exactly what :func:`create` / :func:`update_rule` then
-  change.
+  rule can override, or a card payment from a bank account, which rules skip) stays a card
+  payment, a category you set yourself never changes, and an earlier rule still wins. Its counts
+  are exactly what :func:`create` / :func:`update_rule` then change.
 * :func:`reapply` (CAT-4): steps 0 and 2–4 again for every transaction in scope (all time, since a
   date, or only Uncategorized) whose category you didn't set yourself — dry run first. Rows you
   edited are never changed and are counted as skipped. Amex CSV rows are re-categorized through the
@@ -197,7 +197,7 @@ def clean_rule(session: Session, draft: RuleDraft, *, current: Rule | None = Non
     if name is not None and len(name) > MAX_NAME_LENGTH:
         errors["name"] = f"Keep the name under {MAX_NAME_LENGTH} characters."
     category_id = _int_field(draft.category_id, "category_id", "Choose a category.", errors)
-    account_id = _int_field(draft.account_id, "account_id", "Choose a card.", errors)
+    account_id = _int_field(draft.account_id, "account_id", "Choose an account.", errors)
     priority = _int_field(
         draft.priority,
         "priority",
@@ -287,7 +287,7 @@ def summarize(rule: Any, account_label: str | None = None) -> str:
     elif high is not None:
         parts.append(f"Amount ≤ {_amount_text(high)}")
     if rule.account_id is not None:
-        parts.append(f"Card {account_label or '#' + str(rule.account_id)}")
+        parts.append(f"Account {account_label or '#' + str(rule.account_id)}")
     if not parts:
         return "No conditions"
     return " · ".join([parts[0], *(p[:1].lower() + p[1:] for p in parts[1:])])
@@ -495,7 +495,7 @@ _TXN_COLUMNS = (
 
 
 def _rows(session: Session, rule: Any, *, also_rule_id: int | None = None):
-    """Transactions the rule can match (amount and card filtered in SQL), newest first, plus
+    """Transactions the rule can match (amount and account filtered in SQL), newest first, plus
     those ``also_rule_id`` categorized. Text conditions are checked by ``rule_matches``."""
     conditions = []
     if rule.account_id is not None:
@@ -628,7 +628,7 @@ def preview(
             if decision.category_id != row.category_id:
                 changed += 1
                 proposed = categories[decision.category_id]
-            if decision.source == "system":
+            if decision.source == "system" or (matches and categorizer.card_payment_from_bank(row)):
                 payments += 1
                 status, note = "payment", "A card payment: rules never change it."
             elif decision.source == "rule" and decision.rule_id != candidate.id:

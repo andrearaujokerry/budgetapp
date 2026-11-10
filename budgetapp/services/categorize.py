@@ -2,23 +2,43 @@
 
 For a new transaction, the first step that applies wins:
 
-0. **Payments** (fixed; rules cannot override): Card Payments (``category_source='system'``) when
-   ``amount < 0`` and any of: ``transaction_code = 'payment'``; ``pfc_detailed`` is
-   ``LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`` or ``LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT``;
-   ``pfc_primary = 'TRANSFER_IN'``; the name or original description matches
-   ``PAYMENT.*(THANK YOU|RECEIVED)|AUTOPAY``; or a CSV row with a blank Amex category. A positive
-   ``PAYMENT … RETURNED/REVERSED`` (not a fee) is also Card Payments.
+0. **Payments** (fixed; rules cannot override), **on a card only**: Card Payments
+   (``category_source='system'``) when ``amount < 0`` and any of: ``transaction_code =
+   'payment'``; ``pfc_detailed`` is ``LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`` or
+   ``LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT``; ``pfc_primary = 'TRANSFER_IN'``; the name or original
+   description matches ``PAYMENT.*(THANK YOU|RECEIVED)|AUTOPAY``; or a CSV row with a blank Amex
+   category. A positive ``PAYMENT … RETURNED/REVERSED`` (not a fee) is also Card Payments.
 1. User state carried over from the transaction this one replaces (``category_source='user'``).
 2. The first matching active rule by ``(priority, id)`` (``'rule'``).
 3. The Plaid PFC v2 mapping (detailed, then primary; ``'plaid'``) or, for CSV rows, the Amex
    category mapping (``Group-Subgroup``, then ``Group``; ``'amex'``). The mapping is sign-aware:
    for a negative amount the ``<key>|credit`` mappings are tried first (Amex puts cash back and
    billing-inquiry credits in "Fees & Adjustments", which must not reduce fee spending), except
-   for a fee reversal, which stays with the fee; and a positive amount never reaches a
+   for a fee reversal, which stays with the fee; and on a card a positive amount never reaches a
    ``transfer`` category through a mapping (it is a charge; step 0 already caught real payment
    reversals, and a row Plaid codes as a card payment stays a payment): it goes to Uncategorized,
    which counts as spending.
 4. Uncategorized (``'default'``).
+
+**Bank accounts** (checking, savings, money market: ``Account.type == "depository"``, see
+``services/accounts.py``; W3-PLAN C3): step 0 doesn't apply, so a transfer between your own accounts
+is never forced into Card Payments and a rule can still turn one into income. In step 3 the
+``<key>|bank`` mappings (:data:`BANK_KEY_SUFFIX`, detailed then primary; migration
+``0005_bank_categories``) are tried before the card keys: paychecks go to Paycheck, interest and
+dividends to Interest, other income to Other Income, transfers in and out to Transfers, an ATM
+withdrawal to Cash & ATM, a card payment from checking (positive on the bank side) to Card
+Payments, any other loan payment to spending (the car, mortgage, student loan, personal loan and
+buy-now-pay-later codes to their card category, the rest to Other) and money a lender deposits
+(``LOAN_DISBURSEMENTS``) to Transfers. Every other code maps as for cards, and a positive bank row
+may land in a ``transfer`` category (money leaving for savings or the card is a transfer, not a
+charge). Money coming in that Plaid didn't classify (no category, or ``OTHER``) is a deposit, not a
+refund: it tries :data:`MONEY_IN_KEYS` first, the bank mapping of other income
+(``'default'``; final review money-3, a deviation from C3's "maps as for cards"), and sync marks it
+for review. Rules never apply to a bank row Plaid codes as a card payment
+(:func:`is_bank_card_payment`): paying the card from checking is never spending or income and
+never counted twice (W3-PLAN §0), even when a rule written for card rows matches its text; it
+keeps its bank mapping, and a category set on the row itself still wins. Anything that is not on
+a bank account (a card, the manual CSV account, an account Plaid hasn't typed yet) is a card.
 
 Refund rule: a row with ``transaction_code = 'refund'`` never lands in an ``income`` or
 ``transfer`` category; it takes the most recent expense category used for the same merchant, else
@@ -50,7 +70,7 @@ from typing import Any, Protocol
 
 import regex
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from budgetapp.db import ledger_lock
 from budgetapp.models import (
@@ -63,14 +83,15 @@ from budgetapp.models import (
 )
 from budgetapp.money import to_money
 from budgetapp.services import userstate
+from budgetapp.services.accounts import BANK, is_bank
 from budgetapp.services.userstate import UserState
 from budgetapp.textutil import strip_control_chars
 
 log = logging.getLogger(__name__)
 
-PAYMENT_PFC_DETAILED = frozenset(
-    {"LOAN_PAYMENTS_CREDIT_CARD_PAYMENT", "LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT"}
-)
+#: Plaid's code for a payment made to a credit card (RESEARCH T1.6), on either side of it.
+CARD_PAYMENT_PFC = "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"
+PAYMENT_PFC_DETAILED = frozenset({CARD_PAYMENT_PFC, "LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT"})
 PAYMENT_TEXT = re.compile(r"PAYMENT.*(THANK YOU|RECEIVED)|AUTOPAY", re.IGNORECASE)
 PAYMENT_REVERSAL_TEXT = re.compile(
     r"\bPAYMENT\b.*\b(RETURNED|REVERSED|REVERSAL)\b|\b(RETURNED|REVERSED)\b.*\bPAYMENT\b",
@@ -98,6 +119,21 @@ _REGEX_PROBES = (
 CHANGE_SAMPLE_LIMIT = 200
 #: Suffix of mapping keys tried first for negative amounts, e.g. ``"Fees & Adjustments|credit"``.
 CREDIT_KEY_SUFFIX = "|credit"
+#: Suffix of Plaid mapping keys tried first for a row on a bank account (``"INCOME_SALARY|bank"``).
+BANK_KEY_SUFFIX = "|bank"
+#: Plaid's codes for money it couldn't classify (PFC v2 ``OTHER``); its category may also be
+#: missing altogether (``personal_finance_category`` is nullable, RESEARCH T1.5).
+UNCLASSIFIED_PFC = frozenset({"OTHER", "OTHER_OTHER"})
+#: Keys tried first for money coming in to a bank account that Plaid didn't classify: the bank
+#: mapping of other income, then of the income group (migration 0005: Other Income). On a card
+#: such a credit is most likely a refund; on a bank account it is a deposit (final review money-3).
+MONEY_IN_KEYS = (f"INCOME_OTHER{BANK_KEY_SUFFIX}", f"INCOME{BANK_KEY_SUFFIX}")
+UNCLASSIFIED_MONEY_IN = "money in that Plaid didn't classify"
+#: The review note sync puts on such a row when it arrives.
+UNCLASSIFIED_MONEY_IN_REVIEW = (
+    "Plaid didn't say what this money coming in is, so it was filed as other income. If it is a "
+    "refund or a transfer, change its category."
+)
 
 
 class TransactionLike(Protocol):
@@ -249,8 +285,34 @@ def looks_like_fee(txn: TransactionLike) -> bool:
     return any(FEE_TEXT.search(t) for t in (txn.name, txn.original_description) if t)
 
 
-def is_payment(txn: TransactionLike) -> bool:
-    """Step 0: is this a card payment (or a returned payment)?"""
+def on_bank_account(txn: TransactionLike) -> bool:
+    """Whether ``txn``, a stored or new ``Transaction``, is on a bank account (C3).
+
+    Reads the row's account through its session (or the account it was given). Anything else, a
+    row without an account, or an account Plaid hasn't typed yet, counts as a card. The
+    :class:`Categorizer` knows every account itself; this is for the paths that see one row.
+    """
+    if not isinstance(txn, Transaction):
+        return False
+    account = txn.__dict__.get("account")
+    if account is None and txn.account_id is not None:
+        session = object_session(txn)
+        if session is not None:
+            with session.no_autoflush:
+                account = session.get(Account, txn.account_id)
+    return account is not None and is_bank(account)
+
+
+def is_payment(txn: TransactionLike, *, bank: bool | None = None) -> bool:
+    """Step 0: is this a card payment (or a returned payment)? Never on a bank account.
+
+    ``bank`` says whether the row is on a bank account; ``None`` works it out for a
+    ``Transaction`` (:func:`on_bank_account`) and treats any other object as a card row.
+    """
+    if bank is None:
+        bank = on_bank_account(txn)
+    if bank:
+        return False
     code = (txn.transaction_code or "").strip().lower()
     if code == "refund":
         return False
@@ -267,6 +329,29 @@ def is_payment(txn: TransactionLike) -> bool:
     if amount > 0 and code not in FEE_CODES:
         return any(PAYMENT_REVERSAL_TEXT.search(t) and not FEE_TEXT.search(t) for t in texts)
     return False
+
+
+def is_bank_card_payment(txn: TransactionLike, *, bank: bool | None = None) -> bool:
+    """A card payment from a bank account: a checking or savings row Plaid codes as a payment to a
+    credit card (:data:`CARD_PAYMENT_PFC`). Rules never apply to it, so a rule written for card
+    rows (where step 0 shields payments) can't turn the card's payment from checking into
+    spending or income; its bank mapping (Card Payments) decides (W3-PLAN §0, C3).
+
+    ``bank`` says whether the row is on a bank account; ``None`` works it out as
+    :func:`is_payment` does.
+    """
+    if txn.pfc_detailed != CARD_PAYMENT_PFC:
+        return False
+    return on_bank_account(txn) if bank is None else bank
+
+
+def money_in_keys(txn: TransactionLike, *, bank: bool) -> tuple[str, ...]:
+    """:data:`MONEY_IN_KEYS` for money coming in to a bank account (a negative amount on a Plaid
+    row) that Plaid didn't classify (no category, or ``OTHER``); ``()`` for any other row."""
+    if not bank or txn.source == "csv" or to_money(txn.amount) >= 0:
+        return ()
+    codes = (txn.pfc_primary, txn.pfc_detailed)
+    return MONEY_IN_KEYS if all(not c or c in UNCLASSIFIED_PFC for c in codes) else ()
 
 
 _AMEX_SEPARATOR = re.compile(r"\s*(?:-|–|—|>)\s*")
@@ -308,6 +393,8 @@ class Categorizer:
     """Categorizes transactions with the rules and mappings loaded once (one per batch).
 
     Build with :meth:`load`; reuse it for every row of a sync batch, an import or a re-apply.
+    It knows which accounts are bank accounts (loaded once; an account added later, such as one a
+    sync just stored, is looked up the first time a row names it).
     """
 
     def __init__(
@@ -320,6 +407,7 @@ class Categorizer:
         kinds: dict[int, str],
         uncategorized_id: int,
         card_payments_id: int,
+        account_types: dict[int, str | None] | None = None,
     ) -> None:
         self.session = session
         self.rules = rules
@@ -328,11 +416,12 @@ class Categorizer:
         self.kinds = kinds
         self.uncategorized_id = uncategorized_id
         self.card_payments_id = card_payments_id
+        self.account_types: dict[int, str | None] = dict(account_types or {})
         self._refund_cache: dict[str, int] = {}
 
     @classmethod
     def load(cls, session: Session) -> Categorizer:
-        """Load active rules (by priority, id), both mappings and category kinds."""
+        """Load active rules (by priority, id), both mappings, category kinds and account types."""
         with session.no_autoflush:
             rules = list(
                 session.scalars(
@@ -353,6 +442,9 @@ class Categorizer:
                 else:
                     amex_map[key.casefold()] = category_id
             kinds = {cid: kind for cid, kind in session.execute(select(Category.id, Category.kind))}
+            account_types = {
+                aid: kind for aid, kind in session.execute(select(Account.id, Account.type))
+            }
         return cls(
             session,
             rules=rules,
@@ -361,6 +453,7 @@ class Categorizer:
             kinds=kinds,
             uncategorized_id=system_category_id(session, "uncategorized"),
             card_payments_id=system_category_id(session, "card_payments"),
+            account_types=account_types,
         )
 
     def kind_of(self, category_id: int) -> str:
@@ -370,34 +463,66 @@ class Categorizer:
             self.kinds[category_id] = kind or "expense"
         return self.kinds[category_id]
 
+    def on_bank(self, txn: TransactionLike) -> bool:
+        """Whether ``txn`` is on a checking, savings or money market account (C3)."""
+        account_id = getattr(txn, "account_id", None)
+        if account_id is None:
+            return on_bank_account(txn)
+        if account_id not in self.account_types:
+            with self.session.no_autoflush:
+                account = self.session.get(Account, account_id)
+            self.account_types[account_id] = account.type if account is not None else None
+        return self.account_types[account_id] == BANK
+
+    def filed_as_unclassified_money_in(self, txn: Transaction) -> bool:
+        """Whether ``txn``'s category is the one :data:`MONEY_IN_KEYS` gave it (money in to a bank
+        account that Plaid didn't classify), not a rule's, the user's or the refund rule's: sync
+        marks such a row for review when it arrives (final review money-3)."""
+        if txn.category_source != "default" or not money_in_keys(txn, bank=self.on_bank(txn)):
+            return False
+        found = self._mapped(txn, True)
+        return found is not None and found[1] == "default" and found[0] == txn.category_id
+
+    def card_payment_from_bank(self, txn: TransactionLike) -> bool:
+        """Whether rules skip ``txn``: a card payment from a bank account
+        (:func:`is_bank_card_payment`)."""
+        return is_bank_card_payment(txn, bank=self.on_bank(txn))
+
     def decide(self, txn: TransactionLike, *, inherited: UserState | None = None) -> Decision:
         """Apply the precedence (module docstring) to ``txn``.
 
         ``inherited`` is the user state carried over from the row ``txn`` replaces (step 1); step 0
-        (card payments) ranks above it, as ARCHITECTURE §6 orders them. To categorize a row AND
-        move the carried state onto it, use :func:`apply_carried_state`.
+        (card payments, on cards only) ranks above it, as ARCHITECTURE §6 orders them. To
+        categorize a row AND move the carried state onto it, use :func:`apply_carried_state`.
         """
-        if is_payment(txn):
+        bank = self.on_bank(txn)
+        if is_payment(txn, bank=bank):
             return Decision(self.card_payments_id, "system", reason="card payment")
         if inherited is not None and inherited.category_id is not None:
             return Decision(
                 inherited.category_id, "user", reason="carried over from the replaced row"
             )
-        return self._refund_rule(txn, self.automatic(txn))
+        return self._refund_rule(txn, self._automatic(txn, bank))
 
     def automatic(self, txn: TransactionLike) -> Decision:
         """Steps 2–4 only (rules, mapping, Uncategorized), without the refund rule.
 
-        The mapping (step 3) is sign-aware, see the module docstring.
+        The mapping (step 3) is sign-aware and account-aware, and rules skip a card payment from a
+        bank account; see the module docstring.
         """
-        for rule in self.rules:
-            if rule_matches(rule, txn):
-                return Decision(rule.category_id, "rule", rule.id, reason=f"rule {rule.id}")
-        found = self._mapped(txn)
+        return self._automatic(txn, self.on_bank(txn))
+
+    def _automatic(self, txn: TransactionLike, bank: bool) -> Decision:
+        if not is_bank_card_payment(txn, bank=bank):
+            for rule in self.rules:
+                if rule_matches(rule, txn):
+                    return Decision(rule.category_id, "rule", rule.id, reason=f"rule {rule.id}")
+        found = self._mapped(txn, bank)
         if found is not None:
             category_id, source, label = found
             if (
-                to_money(txn.amount) > 0
+                not bank
+                and to_money(txn.amount) > 0
                 and self.kind_of(category_id) == "transfer"
                 and not _payment_coded(txn)
             ):
@@ -409,8 +534,13 @@ class Categorizer:
             return Decision(category_id, source, reason=label)
         return Decision(self.uncategorized_id, "default", reason="no rule or mapping")
 
-    def _mapped(self, txn: TransactionLike) -> tuple[int, str, str] | None:
-        """``(category_id, source, label)`` from the Plaid or Amex mapping, or ``None``."""
+    def _mapped(self, txn: TransactionLike, bank: bool = False) -> tuple[int, str, str] | None:
+        """``(category_id, source, label)`` from the Plaid or Amex mapping, or ``None``.
+
+        A Plaid row on a bank account tries the ``|bank`` keys first (detailed, then primary),
+        and before them, for money in that Plaid didn't classify, :data:`MONEY_IN_KEYS`
+        (``'default'``: no mapping of its own code decided); Amex CSV rows are always card rows.
+        """
         if txn.source == "csv":
             keys = amex_category_keys(txn.external_category)
             mapping, source, kind = self.amex_map, "amex", "Amex category"
@@ -420,10 +550,18 @@ class Categorizer:
         candidates = list(keys)
         if to_money(txn.amount) < 0 and not looks_like_fee(txn):
             candidates = [k + CREDIT_KEY_SUFFIX for k in keys] + candidates
+        money_in = money_in_keys(txn, bank=bank)
+        if bank and source == "plaid":
+            candidates = [*money_in, *(k + BANK_KEY_SUFFIX for k in keys), *candidates]
         for key in candidates:
             category_id = mapping.get(key.casefold() if source == "amex" else key)
             if category_id is not None:
-                return category_id, source, f"{kind} {key}"
+                if key in money_in:
+                    return category_id, "default", UNCLASSIFIED_MONEY_IN
+                label = f"{kind} {key}"
+                if key.endswith(BANK_KEY_SUFFIX):
+                    label = f"{kind} {key[: -len(BANK_KEY_SUFFIX)]} (bank accounts)"
+                return category_id, source, label
         return None
 
     def _refund_rule(self, txn: TransactionLike, decision: Decision) -> Decision:
@@ -660,11 +798,13 @@ def validate_rule(
         and "amount_min" not in errors
         and "amount_max" not in errors
     ):
-        errors["conditions"] = "Add at least one condition (merchant, description, amount or card)."
+        errors["conditions"] = (
+            "Add at least one condition (merchant, description, amount or account)."
+        )
     if category_id is None or session.get(Category, category_id) is None:
         errors["category_id"] = "Choose a category."
     if account_id is not None and session.get(Account, account_id) is None:
-        errors["account_id"] = "That card does not exist."
+        errors["account_id"] = "That account does not exist."
     if errors:
         raise RuleValidationError(errors)
     return {

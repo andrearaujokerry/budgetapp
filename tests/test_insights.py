@@ -8,9 +8,13 @@ from decimal import Decimal
 
 import pytest
 
+from budgetapp.models import get_app_settings
+from budgetapp.money import to_money
 from budgetapp.periods import month_period
 from budgetapp.services import budgets, insights, spending
+from budgetapp.services import sync as sync_service
 from budgetapp.services.insights import Change, change, month_param
+from tests.bank_factories import make_bank_account, make_bank_item
 from tests.factories import (
     card_payments,
     get_category,
@@ -576,3 +580,349 @@ class TestTrends:
         assert series[-1].color == "other"
         assert series[-1].amounts[-2] == D(92 + 93 + 94)
         assert [c.color for c in [series[0]]] == [cat("Groceries").color]  # colour follows entity
+
+
+# --------------------------------------------------------------------------- income (wave 3)
+
+
+def income_category(db, name: str):
+    """An income category by name: MONEY's migration seeds Paycheck, Interest and Other Income
+    (W3-PLAN C2); without it the test creates the category."""
+    try:
+        category = get_category(db, name)
+    except LookupError:
+        category = make_category(db, name, kind="income", color="other")
+    assert category.kind == "income"
+    return category
+
+
+@pytest.fixture
+def bank(db):
+    return make_bank_item(db, institution_id="ins_109508", institution_name="First Platypus Bank")
+
+
+@pytest.fixture
+def checking(db, bank):
+    return make_bank_account(db, bank, name="Plaid Checking", mask="0000")
+
+
+@pytest.fixture
+def paycheck(db):
+    return income_category(db, "Paycheck")
+
+
+class TestIncomeSwitch:
+    def test_offered_once_money_is_booked_to_an_income_category(self, db, cat, spend):
+        spend(cat("Groceries"), "40.00", "2026-10-02")
+        switch = insights.income_switch(db)
+        assert (switch.available, switch.on, switch.showing) == (False, True, False)
+        spend(cat("Credits & Rewards"), "-25.00", "2026-10-03")  # an Amex statement credit
+        assert insights.income_switch(db) == insights.IncomeSwitch(available=True, on=True)
+        assert insights.income_switch(db).showing
+
+    def test_the_choice_is_saved(self, db, cat, spend):
+        spend(cat("Credits & Rewards"), "-25.00", "2026-10-03")
+        switch = insights.set_show_income(db, False)
+        assert (switch.available, switch.on, switch.showing) == (True, False, False)
+        assert get_app_settings(db).show_income is False
+        assert insights.set_show_income(db, True).showing
+
+    def test_suspect_duplicates_and_income_kinds_only(self, db, cat):
+        manual = make_account(db, manual=True)
+        make_transaction(db, manual, source="csv", amount="-25.00", date="2026-10-03",
+                         category=cat("Credits & Rewards"), duplicate_status="suspect")  # fmt: skip
+        make_transaction(db, manual, source="csv", amount="-500.00", date="2026-10-03",
+                         category=card_payments(db))  # a transfer, not income  # fmt: skip
+        assert not insights.has_income(db)
+
+    def test_a_split_part_in_an_income_category_counts(self, db, cat, spend):
+        txn = spend(cat("Shopping"), "120.00", "2026-10-06")
+        make_split(db, txn, cat("Shopping"), "100.00")
+        make_split(db, txn, cat("Credits & Rewards"), "20.00")
+        assert insights.has_income(db)
+
+
+class TestDashboardIncome:
+    def test_income_and_net_this_period(self, db, cat, spend, checking, paycheck):
+        travel = cat("Travel")
+        make_budget(db, travel, "6000.00", effective_from=day("2026-01-01"), period="annual")
+        spend(cat("Groceries"), "300.00", "2026-10-03")
+        spend(travel, "400.00", "2026-10-05")  # annual budget: not in the target's Spent
+        spend(cat("Credits & Rewards"), "-25.00", "2026-10-06")
+        make_transaction(db, checking, amount="-2400.00", category=paycheck, date="2026-10-09")
+        make_transaction(db, checking, amount="-2400.00", category=paycheck, date="2026-09-25")
+        d = insights.dashboard(db, today=day("2026-10-20"))
+        assert d.income_switch.showing
+        inc = d.income
+        assert inc.income == spending.period_income(db, OCT)
+        assert (inc.total, inc.spent, inc.net) == (D("2425.00"), D("700.00"), D("1725.00"))
+        assert inc.spent == d.overview.spending.total  # all spending, annual included
+        assert inc.largest.name == "Paycheck"
+        assert inc.category_ids == tuple(sorted((paycheck.id, cat("Credits & Rewards").id)))
+        assert not inc.cards_only  # a bank account is linked
+
+    @pytest.mark.parametrize("hidden", [False, True])
+    def test_card_credits_only_until_a_bank_account_exists(self, db, cat, spend, bank, hidden):
+        """Without a bank account the only income is card credits, which the page says next to
+        the net; any bank account ends that, a hidden one too (its money still counts)."""
+        spend(cat("Groceries"), "300.00", "2026-10-03")
+        spend(cat("Credits & Rewards"), "-25.00", "2026-10-06")
+        inc = insights.dashboard(db, today=day("2026-10-20")).income
+        assert inc.cards_only and (inc.total, inc.net) == (D("25.00"), D("-275.00"))
+        assert insights.has_bank_account(db) is False
+        make_bank_account(db, bank, subtype="savings", name="Plaid Saving", is_hidden=hidden)
+        assert insights.has_bank_account(db) is True
+        assert not insights.dashboard(db, today=day("2026-10-20")).income.cards_only
+
+    def test_switched_off_or_no_income(self, db, cat, spend):
+        spend(cat("Groceries"), "300.00", "2026-10-03")
+        d = insights.dashboard(db, today=day("2026-10-20"))
+        assert d.income is None and not d.income_switch.available
+        spend(cat("Credits & Rewards"), "-25.00", "2026-10-06")
+        insights.set_show_income(db, False)
+        d = insights.dashboard(db, today=day("2026-10-20"))
+        assert d.income is None and d.income_switch == insights.IncomeSwitch(True, False)
+
+    def test_no_income_this_period_is_zero(self, db, cat, spend):
+        spend(cat("Credits & Rewards"), "-25.00", "2026-09-06")
+        spend(cat("Home"), "80.00", "2026-10-02")
+        inc = insights.dashboard(db, today=day("2026-10-20")).income
+        assert (inc.total, inc.net, inc.largest, inc.category_ids) == (0, D("-80.00"), None, ())
+
+    def test_statement_cycles_count_income_by_posting_date(self, db, account, cat, checking,
+                                                           paycheck):  # fmt: skip
+        set_app_settings(db, budget_period_mode="statement", budget_cycle_account_id=account.id)
+        make_statement(db, account, "2026-09-27")
+        make_statement(db, account, "2026-10-27")
+        # Bought on the old cycle's last day, posted in this one: this cycle counts it.
+        make_transaction(db, checking, amount="-900.00", category=paycheck, date="2026-10-28",
+                         authorized_date=day("2026-10-27"))  # fmt: skip
+        make_transaction(db, checking, amount="-50.00", category=paycheck, date="2026-10-20")
+        inc = insights.dashboard(db, today=day("2026-11-02")).income
+        assert inc.income.basis == spending.BASIS_POSTED_DATE
+        assert inc.total == D("900.00")
+
+    def test_pending_income_follows_the_budget_setting(self, db, checking, paycheck):
+        make_transaction(db, checking, amount="-2400.00", category=paycheck, date="2026-10-16",
+                         pending=True)  # fmt: skip
+        assert insights.dashboard(db, today=day("2026-10-20")).income.total == D("2400.00")
+        set_app_settings(db, include_pending_in_budgets=False)
+        assert insights.dashboard(db, today=day("2026-10-20")).income.total == 0
+
+
+class TestAccountBalances:
+    def test_banks_then_cards_with_cash_and_owed(self, db, bank, freeze_today):
+        now = dt.datetime(2026, 10, 20, 12, tzinfo=dt.UTC)
+        freeze_today("2026-10-20", now=now)
+        checking = make_bank_account(db, bank, name="Plaid Checking", mask="0000",
+                                     current_balance=D("110.00"),
+                                available_balance=D("100.00"),
+                                balances_as_of=now - dt.timedelta(hours=2))  # fmt: skip
+        savings = make_bank_account(db, bank, name="Plaid Saving", mask="1111",
+                                    subtype="savings", current_balance=D("210.00"),
+                               balances_as_of=now - dt.timedelta(hours=5))  # fmt: skip
+        card = make_account(db, name="Blue Cash Preferred®", mask="3005",
+                            current_balance=D("1234.56"), balances_as_of=now)  # fmt: skip
+        credit = make_account(db, bank, name="Plaid Credit Card", mask="3333",
+                              current_balance=D("-12.00"))  # a credit in your favour  # fmt: skip
+        manual = make_account(db, manual=True)  # an Amex CSV account: no balance
+        make_bank_account(db, bank, name="Hidden", current_balance=D("999.00"), is_hidden=True)
+        # A loan is never linked by this app (filtered in Plaid Link) and never shown.
+        make_account(db, bank, name="Plaid Student Loan", type="loan", subtype="student",
+                     current_balance=D("65000.00"))  # fmt: skip
+        a = insights.account_balances(db)
+        assert [x.id for x in a.banks] == [checking.id, savings.id]
+        assert [x.id for x in a.cards] == [card.id, credit.id, manual.id]
+        assert (a.cash, a.owed) == (D("320.00"), D("1222.56"))
+        assert (a.banks_without_balance, a.cards_without_balance) == (0, 1)
+        assert a.as_of == now - dt.timedelta(hours=5)  # the oldest balance shown
+        first = a.banks[0]
+        assert (first.name, first.mask, first.institution, first.is_card) == (
+            "Plaid Checking", "0000", "First Platypus Bank", False,
+        )  # fmt: skip
+        assert (first.current, first.available) == (D("110.00"), D("100.00"))
+        assert a.cards[0].institution == "American Express"
+        assert a.cards[2].is_manual and a.cards[2].institution is None
+        assert a.any
+
+    def test_no_accounts(self, db):
+        a = insights.account_balances(db)
+        assert not a.any and (a.cash, a.owed, a.as_of) == (None, None, None)
+
+    def test_a_total_with_no_balance_to_add_up_is_unknown(self, db, bank):
+        """ux-2: a group whose accounts have no balance (an Amex CSV account, a bank account
+        before its first sync) has no total, not $0.00; once one has a balance the total is
+        that balance and the others are counted as left out."""
+        manual = make_account(db, manual=True)
+        checking = make_bank_account(db, bank, name="Plaid Checking", mask="0000")
+        a = insights.account_balances(db)
+        assert (a.cash, a.owed) == (None, None)
+        assert (a.banks_without_balance, a.cards_without_balance) == (1, 1)
+        assert [x.id for x in a.cards] == [manual.id] and a.cards[0].current is None
+        checking.current_balance = D("0.00")  # a known zero is a total
+        make_account(db, name="Platinum Card", current_balance=D("12.34"))
+        db.flush()
+        a = insights.account_balances(db)
+        assert (a.cash, a.owed) == (D("0.00"), D("12.34"))
+        assert (a.banks_without_balance, a.cards_without_balance) == (0, 1)
+
+    def test_a_group_of_accounts_plaid_no_longer_shares_has_no_total(self, db, bank):
+        card = make_account(db, bank, name="Plaid Credit Card", current_balance=D("410.00"))
+        assert sync_service.mark_not_shared(card, dt.datetime(2026, 10, 20, tzinfo=dt.UTC))
+        db.flush()
+        a = insights.account_balances(db)
+        assert a.cards[0].no_longer_shared and a.owed is None and a.cards_without_balance == 0
+
+    def test_the_dashboard_carries_them(self, db, account):
+        assert insights.dashboard(db, today=day("2026-10-20")).accounts.cards[0].id == account.id
+
+
+class TestTrendsIncome:
+    @pytest.fixture
+    def earnings(self, db, cat, spend, checking, paycheck, history):
+        """Paychecks from Dec 2025; interest in Sep and Oct; an Amex credit in Oct. The checking
+        account's history starts with the card's (Nov 10, 2025: a card payment, neither spending
+        nor income), so every month of the history has income data."""
+        make_transaction(db, checking, amount="100.00", category=card_payments(db),
+                         date="2025-11-10", name="AMEX PAYMENT")  # fmt: skip
+        interest = income_category(db, "Interest")
+        for month in (12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+            year = 2025 if month == 12 else 2026
+            make_transaction(db, checking, amount="-2000.00", category=paycheck,
+                             date=f"{year}-{month:02d}-15")  # fmt: skip
+        make_transaction(db, checking, amount="-500.00", category=paycheck, date="2026-10-30")
+        make_transaction(db, checking, amount="-3.00", category=interest, date="2026-09-30")
+        make_transaction(db, checking, amount="-4.00", category=interest, date="2026-10-31")
+        spend(cat("Credits & Rewards"), "-25.00", "2026-10-12")
+        make_transaction(db, checking, amount="-2000.00", category=paycheck, date="2026-11-01",
+                         pending=True)  # fmt: skip
+        return {"paycheck": paycheck, "interest": interest, "credits": cat("Credits & Rewards")}
+
+    def test_off_by_default(self, db, earnings):
+        assert insights.trends(db, today=day("2026-11-05")).income is None
+
+    def test_income_and_net_per_month(self, db, earnings):
+        t = insights.trends(db, today=day("2026-11-05"), income=True)
+        inc = t.income
+        assert [m.period.start for m in t.months][0] == day("2025-12-01")
+        assert inc.totals.amounts == (
+            *(D("2000.00"),) * 9,
+            D("2003.00"),
+            D("2529.00"),
+            D("2000.00"),
+        )  # Dec … Aug, Sep (+ interest), Oct (+ a second paycheck, interest, credit), Nov
+        assert [line.category.name for line in inc.categories] == [
+            "Paycheck", "Credits & Rewards", "Interest",
+        ]  # fmt: skip
+        paycheck = inc.categories[0]
+        assert paycheck.total == D("24500.00") and paycheck.counts[-2] == 2
+        assert inc.net == tuple(
+            earned - spent
+            for earned, spent in zip(inc.totals.amounts, t.totals.amounts, strict=True)
+        )
+        assert inc.net[-2] == D("2529.00") - D("205.00")
+        # Averages count complete months only (Dec – Oct), like spending's.
+        assert inc.totals.average == D("2048.36")
+        assert inc.net_average == to_money(
+            sum(n for n, m in zip(inc.net, t.months, strict=True) if m.status == insights.COMPLETE)
+            / 11
+        )
+        assert inc.change == insights.change(D("2529.00"), D("2003.00"))
+        assert inc.category_ids == tuple(sorted(c.id for c in earnings.values()))
+        assert inc.largest_in(len(t.months) - 2).category.name == "Paycheck"
+        assert t.amount_in(t.totals, t.ended) == D("205.00")  # spending is unchanged
+        assert not inc.cards_only  # a bank account is linked
+
+    def test_card_credits_only_until_a_bank_account_exists(self, db, cat, spend, history, bank):
+        spend(cat("Credits & Rewards"), "-25.00", "2026-10-12")
+        t = insights.trends(db, today=day("2026-11-05"), income=True)
+        assert t.income.cards_only and t.income.totals.amounts[-2] == D("25.00")
+        assert (t.income.starts, t.income.partial) == (None, False)  # card credits: every month
+        make_bank_account(db, bank, name="Plaid Checking", is_hidden=True)
+        assert not insights.trends(db, today=day("2026-11-05"), income=True).income.cards_only
+
+    def test_pending_income_follows_the_budget_setting(self, db, earnings):
+        assert insights.trends(db, today=day("2026-11-05"), income=True).income.totals.amounts[
+            -1
+        ] == D("2000.00")
+        set_app_settings(db, include_pending_in_budgets=False)
+        t = insights.trends(db, today=day("2026-11-05"), income=True)
+        assert t.income.totals.amounts[-1] == D("0.00")
+
+    def test_months_before_the_history_have_no_income(self, db, cat, spend, checking, paycheck):
+        spend(cat("Home"), "40.00", "2026-06-15")
+        # The checking account's history starts the same day (a card payment: neither).
+        make_transaction(db, checking, amount="40.00", category=card_payments(db),
+                         date="2026-06-15", name="AMEX PAYMENT")  # fmt: skip
+        make_transaction(db, checking, amount="-1000.00", category=paycheck, date="2026-07-15")
+        t = insights.trends(db, through=day("2026-07-01"), today=day("2026-08-10"), income=True)
+        assert [m.status for m in t.months] == [insights.FIRST, insights.COMPLETE]
+        assert t.income.totals.amounts == (D("0.00"), D("1000.00"))
+        assert t.income.net == (D("-40.00"), D("1000.00"))
+        assert t.income.change.kind == insights.NEW  # July against June: nothing came in then
+        june = insights.trends(db, through=day("2026-06-01"), today=day("2026-08-10"), income=True)
+        assert june.income.change is None  # the history's first month has none before it
+        early = insights.trends(db, through=day("2025-12-01"), today=day("2026-08-10"),
+                                income=True)  # fmt: skip
+        assert set(early.income.totals.amounts) == {None} and set(early.income.net) == {None}
+        assert early.income.categories == () and early.income.net_average is None
+
+    @pytest.mark.parametrize("hidden", [False, True])
+    def test_months_before_the_bank_history_have_no_income(
+        self, db, cat, spend, bank, paycheck, hidden
+    ):
+        """ux-3: the card's history starts in January, the bank's (where paychecks arrive) on
+        Apr 15, a hidden account's too. January to March have no income data: no income and no
+        net (not −all spending), and none of their card credits; April is the income's partial
+        first month; averages, complete months and the change count May only."""
+        checking = make_bank_account(db, bank, name="Plaid Checking", is_hidden=hidden)
+        for month in range(1, 7):
+            spend(cat("Groceries"), "900.00", f"2026-{month:02d}-10")
+        spend(cat("Credits & Rewards"), "-25.00", "2026-02-12")  # before the bank's history
+        for month in range(4, 7):
+            make_transaction(db, checking, amount="-3000.00", category=paycheck,
+                             date=f"2026-{month:02d}-15")  # fmt: skip
+        t = insights.trends(db, through=day("2026-06-01"), today=day("2026-06-20"), income=True)
+        inc = t.income
+        assert [m.period.start.month for m in t.months] == [1, 2, 3, 4, 5, 6]
+        assert [m.status for m in t.months] == [insights.FIRST, *[insights.COMPLETE] * 4,
+                                                insights.CURRENT]  # fmt: skip
+        assert inc.totals.amounts == (None, None, None, *(D("3000.00"),) * 3)
+        assert inc.net == (None, None, None, *(D("2100.00"),) * 3)
+        assert (inc.starts, inc.partial) == (day("2026-04-15"), True)
+        assert inc.complete_months == 1 and t.complete_months == 4
+        assert (inc.totals.average, inc.net_average) == (D("3000.00"), D("2100.00"))
+        assert (inc.totals.total, inc.net_total) == (D("9000.00"), D("6300.00"))
+        assert inc.change == insights.change(D("3000.00"), D("3000.00"))  # May against April
+        assert [line.category.name for line in inc.categories] == ["Paycheck"]
+        assert not inc.cards_only
+        assert t.totals.amounts[:3] == (D("900.00"),) * 3  # the spending months stay
+
+        # Before the bank's history: no income at all.
+        march = insights.trends(db, through=day("2026-03-01"), today=day("2026-06-20"),
+                                income=True)  # fmt: skip
+        assert set(march.income.totals.amounts) == {None} and set(march.income.net) == {None}
+        assert (march.income.totals.total, march.income.net_total) == (None, None)
+        assert march.income.partial and march.income.categories == ()
+
+    def test_a_bank_account_whose_history_hasnt_arrived(self, db, cat, spend, bank, history):
+        spend(cat("Credits & Rewards"), "-25.00", "2026-10-12")
+        make_bank_account(db, bank, name="Plaid Checking")  # linked, no transactions yet
+        inc = insights.trends(db, today=day("2026-11-05"), income=True).income
+        assert set(inc.totals.amounts) == {None} and set(inc.net) == {None}
+        assert (inc.starts, inc.partial, inc.cards_only) == (None, True, False)
+        assert inc.net_average is None and inc.change is None and inc.complete_months == 0
+
+    def test_income_alone_is_history_too(self, db, checking, paycheck):
+        make_transaction(db, checking, amount="-1000.00", category=paycheck, date="2026-10-15")
+        t = insights.trends(db, today=day("2026-11-05"), income=True)
+        assert t.has_data and t.categories == ()
+        assert t.income.totals.amounts == (D("1000.00"), D("0.00"))
+        assert t.income.net == (D("1000.00"), D("0.00"))
+
+    def test_largest_in_a_month_without_income(self, db, earnings):
+        t = insights.trends(db, through=day("2026-11-01"), today=day("2026-11-05"), income=True)
+        set_app_settings(db, include_pending_in_budgets=False)
+        quiet = insights.trends(db, today=day("2026-11-05"), income=True)
+        assert quiet.income.largest_in(len(quiet.months) - 1) is None
+        assert t.income.largest_in(len(t.months) - 1).category.name == "Paycheck"

@@ -66,8 +66,14 @@ from budgetapp.plaid_gateway import (
     item_status_for,
 )
 from budgetapp.services import alerts, reconcile, statements, userstate
+from budgetapp.services.accounts import CARD, is_card
 from budgetapp.services.background import run_steps
-from budgetapp.services.categorize import Categorizer, apply_carried_state, apply_decision
+from budgetapp.services.categorize import (
+    UNCLASSIFIED_MONEY_IN_REVIEW,
+    Categorizer,
+    apply_carried_state,
+    apply_decision,
+)
 from budgetapp.services.events import PendingRaise, SyncOutcome
 from budgetapp.services.notify import Notifier
 
@@ -103,6 +109,9 @@ BACKFILL_CAP = 3600.0
 UPDATE_DELAYS: tuple[float, ...] = (60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0)
 
 _RATE_LIMIT_TYPE = "RATE_LIMIT_EXCEEDED"
+#: ``refresh_liabilities``'s answer for a connection without credit cards (BANK-7): nothing to
+#: ask Plaid, nothing to warn about. Not stored: ``liabilities_status`` stays null.
+NOT_APPLICABLE = "not_applicable"
 _LIABILITIES_STATUS = {
     "ADDITIONAL_CONSENT_REQUIRED": "not_consented",
     "ACCESS_NOT_GRANTED": "not_consented",
@@ -181,15 +190,102 @@ def _set(obj: Any, name: str, value: Any) -> bool:
     return True
 
 
-def access_token_for(settings: Settings, plaid_item_id: str, store: secrets.SecretStore) -> str:
-    """The Item's access token from the secret store, or :class:`MissingAccessToken`."""
+def _item_ids(source: Session | sessionmaker[Session]) -> list[str]:
+    """Every Item's Plaid ``item_id`` in the database, oldest first."""
+    query = select(PlaidItem.plaid_item_id).order_by(PlaidItem.id)
+    if isinstance(source, Session):
+        return list(source.scalars(query))
+    with source() as s:
+        return list(s.scalars(query))
+
+
+def access_token_for(
+    settings: Settings,
+    plaid_item_id: str,
+    store: secrets.SecretStore,
+    *,
+    source: Session | sessionmaker[Session] | None = None,
+) -> str:
+    """The Item's access token, or :class:`MissingAccessToken` (BANK-4, C6).
+
+    Each Item's token has its own Keychain key, so no token ever reaches another Item. In
+    production, when that key is missing but the v1 key ``plaid.access_token.production`` still
+    holds THE token and the database (``source``) has exactly this one Item, the v1 token is
+    this Item's: it is moved to the Item's key (write, read back, then delete the old key) and
+    used; if the move fails the old key stays and keeps working (``./run doctor`` explains).
+    When the Item's own key exists and the v1 key still holds the same token (a move whose
+    delete failed, say for want of Keychain approval in an agent), the old copy is deleted now,
+    best effort: ``./run sync --env production`` in Terminal is what doctor suggests for it.
+    """
     token = secrets.get_access_token(settings.plaid_env, plaid_item_id, store=store)
-    if not token:
-        raise MissingAccessToken(
-            f"No access token for Item {plaid_item_id} in Keychain. Restore it with ./run setup "
-            f"--env {settings.plaid_env} --access-token (never link a new connection)."
+    if token:
+        if settings.is_production:
+            _log_copy(secrets.delete_legacy_copy(plaid_item_id, token, store=store))
+        return token
+    if settings.is_production and source is not None:
+        legacy = secrets.legacy_production_token(store=store)
+        if legacy:
+            where = secrets.legacy_token_state(_item_ids(source), store=store)
+            if where.state == "movable" and where.item_id == plaid_item_id:
+                _log_move(secrets.move_legacy_production_token(plaid_item_id, store=store))
+                return legacy
+    raise MissingAccessToken(
+        f"No access token for Item {plaid_item_id} in Keychain. Restore it with ./run setup "
+        f"--env {settings.plaid_env} --access-token (never link a new connection)."
+    )
+
+
+def migrate_legacy_token(
+    source: Session | sessionmaker[Session], settings: Settings, store: secrets.SecretStore
+) -> secrets.LegacyTokenMove:
+    """Production: move the v1 token to its Item's key now, when exactly one Item exists (the
+    first run of the wave-3 code does it; later calls find nothing to do), or delete the v1 key
+    when it is only a copy of a token already saved under its Item's own key (a move whose last
+    step failed). With no Item or with several, a v1 token that matches no Item's own token is
+    left for Re-attach, which asks Plaid whose token it is."""
+    if not settings.is_production or not secrets.legacy_production_token(store=store):
+        return secrets.LegacyTokenMove("none")
+    ids = _item_ids(source)
+    where = secrets.legacy_token_state(ids, store=store)
+    if where.state in ("copy", "movable") and where.item_id is not None:
+        move = secrets.move_legacy_production_token(where.item_id, store=store)
+        _log_move(move)
+        return move
+    if len(ids) != 1:
+        reason = f"the database has {len(ids)} connections, so Plaid must say whose it is"
+    else:
+        reason = "a different token is already saved under the new name"
+    move = secrets.LegacyTokenMove("kept", None, reason)
+    _log_move(move)
+    return move
+
+
+def _log_move(move: secrets.LegacyTokenMove) -> None:
+    if move.status == "moved":
+        log.info(
+            "Moved the v1 production access token to Item %s's own Keychain item%s",
+            move.item_id,
+            f" ({move.reason})" if move.reason else "",
         )
-    return token
+    elif move.status == "kept":
+        log.warning(
+            "Kept the v1 production access token under its old Keychain name: %s", move.reason
+        )
+
+
+def _log_copy(move: secrets.LegacyTokenMove) -> None:
+    """What :func:`secrets.delete_legacy_copy` did (nothing to say when there was no copy)."""
+    if move.status != "moved":
+        return
+    if move.reason:
+        log.info(
+            "The old copy of Item %s's access token under the v1 Keychain name stays for now (%s); "
+            "./run sync --env production in Terminal deletes it",
+            move.item_id,
+            move.reason,
+        )
+    else:
+        log.info("Deleted the old copy of Item %s's access token (v1 Keychain name)", move.item_id)
 
 
 def ensure_database(settings: Settings, bind: Any) -> None:
@@ -202,19 +298,39 @@ def ensure_database(settings: Settings, bind: Any) -> None:
     db.schema_guard(bind)
 
 
-def describe_error(error_code: str | None, error_type: str | None = None) -> str | None:
-    """A plain sentence about a stored sync error, for the Connection page."""
+def describe_error(
+    error_code: str | None,
+    error_type: str | None = None,
+    institution: str | None = None,
+    *,
+    amex: bool = False,
+) -> str | None:
+    """A plain sentence about a stored sync error, for the Connection page and alerts; it names
+    the ``institution`` ("Tartan Bank needs you to sign in again…") when known (BANK-7, C9).
+
+    A sign-in Plaid needs again is about consent for American Express (``amex``: its consent
+    runs out every 12 months); at another bank it can as well follow a password change or
+    access withdrawn at the bank (RESEARCH T2.4, ITEM_LOGIN_REQUIRED's causes)."""
     if not error_code:
         return None
+    bank = institution or "The bank"
     if error_code in ("ITEM_LOGIN_REQUIRED", "PENDING_EXPIRATION", "PENDING_DISCONNECT"):
+        if amex:
+            return (
+                f"{bank} needs you to sign in again through Plaid (the consent expired or was "
+                "revoked). Reconnect fixes it and keeps this connection."
+            )
         return (
-            "Amex needs you to sign in again through Plaid (the consent expired or was revoked). "
-            "Reconnect fixes it and keeps this connection."
+            f"{bank} needs you to sign in again through Plaid (for example after a password "
+            "change, an expired consent or access you withdrew at the bank). Reconnect fixes it "
+            "and keeps this connection."
         )
     if error_code in ("ACCESS_NOT_GRANTED", "USER_PERMISSION_REVOKED", "USER_SETUP_REQUIRED"):
-        return "Amex stopped sharing data with Plaid. Reconnect and allow access to your card."
+        return (
+            f"{bank} stopped sharing data with Plaid. Reconnect and allow access to your accounts."
+        )
     if error_code in ("INVALID_CREDENTIALS", "ITEM_LOCKED"):
-        return "Amex didn't accept the sign-in. Reconnect to sign in again."
+        return f"{bank} didn't accept the sign-in. Reconnect to sign in again."
     if error_code == "ITEM_NOT_FOUND":
         return (
             "Plaid no longer has this connection (it was removed). Syncing can't continue; "
@@ -246,7 +362,7 @@ def describe_error(error_code: str | None, error_type: str | None = None) -> str
     if error_type == _RATE_LIMIT_TYPE or error_code.endswith("_LIMIT"):
         return "Plaid asked the app to slow down. The next sync will try again."
     if error_code.startswith("INSTITUTION_") or error_type == "INSTITUTION_ERROR":
-        return "Amex isn't answering Plaid right now. The next sync will try again."
+        return f"{bank} isn't answering Plaid right now. The next sync will try again."
     if error_code in ("INTERNAL_SERVER_ERROR", "PLANNED_MAINTENANCE"):
         return "Plaid had a problem on its side. The next sync will try again."
     return None
@@ -818,6 +934,14 @@ class _Applier:
         self.s.flush()
         return carried
 
+    def flag_unclassified_money_in(self) -> None:
+        """Mark each new row filed as money in that Plaid didn't classify for review (final review
+        money-3), once its category is final: after step 5, so a row that took the user's category
+        from the row it replaces is left alone."""
+        for txn in self.inserted:
+            if self.categorizer.filed_as_unclassified_money_in(txn):
+                _flag(txn, UNCLASSIFIED_MONEY_IN_REVIEW)
+
     def stored_postings(self, tombs: Sequence[TransactionTombstone]) -> list[Transaction]:
         """Posted Plaid rows an earlier sync stored in the last 30 days that could still be the
         posting of one of ``tombs`` (pending rows removed now): on their accounts, spend dates
@@ -900,16 +1024,57 @@ def churned_account(
 def reissue_account(account: Account, new_id: str, now: dt.datetime) -> None:
     """Point ``account`` at the id Plaid re-issued it under, and tell the user (``notice``)."""
     account.plaid_account_id = new_id
+    if is_card(account):
+        what, why, noun = "this card's account", "a card replacement", "card"
+    else:
+        what, why, noun = "this account", "an account number change", "account"
     account.notice = (
-        f"Plaid re-issued this card's account on {now.astimezone():%b %-d, %Y} (American "
-        "Express can do this after a card replacement). Its history was matched to this card; "
-        "check that nothing is missing or doubled."
+        f"Plaid re-issued {what} on {now.astimezone():%b %-d, %Y} (a bank can do this after "
+        f"{why}). Its history was matched to this {noun}; check that nothing is missing or "
+        "doubled."
     )
 
 
+#: How the notice of an account Plaid stopped listing begins. De-selected (unticked in Add
+#: accounts) or revoked accounts are treated like closed ones: "Plaid will stop returning the
+#: account" (RESEARCH.md T2 gotchas; T2.4: "Any de-selected accounts will no longer be shared"),
+#: so its history stays and its balance stops changing.
+NOT_SHARED_NOTICE = "Plaid stopped sharing this account"
+
+
+def is_not_shared_notice(text: str | None) -> bool:
+    """``Account.notice`` says Plaid stopped listing the account (:func:`mark_not_shared`)."""
+    return bool(text) and str(text).startswith(NOT_SHARED_NOTICE)
+
+
+def no_longer_shared(account: Account) -> bool:
+    """A linked account Plaid no longer lists (unticked in Add accounts, or closed at the bank):
+    what it synced stays, but its balance is the last one Plaid sent, so totals of current
+    balances (the Dashboard's Accounts card) should leave it out."""
+    return account.item_id is not None and is_not_shared_notice(account.notice)
+
+
+def mark_not_shared(account: Account, now: dt.datetime) -> bool:
+    """Tell the user (``notice``) that ``/accounts/get`` no longer lists ``account``; True when
+    the notice is new. Nothing is deleted. The next listing of the account clears it again
+    (:func:`update_account`)."""
+    if is_not_shared_notice(account.notice):
+        return False
+    account.notice = (
+        f"{NOT_SHARED_NOTICE} on {now.astimezone():%b %-d, %Y}: it was unticked in Add accounts, "
+        "or closed or removed at the bank. What it synced stays here; the balance shown is the "
+        "last one Plaid sent. If the account is still open, Add accounts can share it again."
+    )
+    return True
+
+
 def update_account(account: Account, data: Mapping[str, Any], now: dt.datetime) -> bool:
-    """Copy an AccountBase (``/accounts/get`` or a sync page) onto ``account``; True if changed."""
+    """Copy an AccountBase (``/accounts/get`` or a sync page) onto ``account``; True if changed.
+    An account Plaid lists is shared again, so a "stopped sharing" notice goes."""
     changed = False
+    if is_not_shared_notice(account.notice):
+        account.notice = None
+        changed = True
     for name in ("name", "official_name", "mask", "type", "subtype"):
         value = _text(data.get(name))
         if value is not None:
@@ -1082,7 +1247,9 @@ def _side_error(
 def refresh_accounts(
     session_factory: sessionmaker[Session], gateway: PlaidGateway, token: str, item_id: int
 ) -> bool:
-    """``/accounts/get`` → names, masks and balances of every account (SYNC-7)."""
+    """``/accounts/get`` → names, masks and balances of every account (SYNC-7). An account of the
+    Item that Plaid no longer lists (and that no re-issued id replaces) keeps its history and
+    gets a notice that it isn't shared any more (:func:`mark_not_shared`)."""
     try:
         body = gateway.get_accounts(token)
     except PlaidGatewayError as err:
@@ -1114,6 +1281,10 @@ def refresh_accounts(
                 s.add(account)
             known[pid] = account
             update_account(account, data, now)
+        if entries:  # an empty answer can't say which accounts went away
+            for pid, account in known.items():
+                if pid not in listed and mark_not_shared(account, now):
+                    log.info("Item %s: Plaid no longer lists account %s", item_id, account.id)
     return True
 
 
@@ -1208,11 +1379,23 @@ def refresh_liabilities(
     session_factory: sessionmaker[Session], gateway: PlaidGateway, token: str, item_id: int
 ) -> str | None:
     """``/liabilities/get`` when consented → statement balance, due date, minimum payment and a
-    statement snapshot per card (SYNC-7); records ``liabilities_status``. Returns the status."""
+    statement snapshot per card (SYNC-7); records ``liabilities_status``. Returns the status.
+
+    A connection without credit cards (a bank login with checking and savings) has no statement
+    details: Plaid isn't asked, ``liabilities_status`` is cleared and :data:`NOT_APPLICABLE` is
+    returned, never ``unsupported`` and never a warning (BANK-7)."""
     with session_factory() as s:
         consented = s.scalar(select(PlaidItem.consented_products).where(PlaidItem.id == item_id))
+        cards = s.scalar(
+            select(func.count())
+            .select_from(Account)
+            .where(Account.item_id == item_id, Account.type == CARD)
+        )
     if consented is None:
         return None
+    if not cards:
+        _set_liabilities_status(session_factory, item_id, None)
+        return NOT_APPLICABLE
     if "liabilities" not in consented:
         status = "not_consented"
         _set_liabilities_status(session_factory, item_id, status)
@@ -1260,7 +1443,7 @@ def refresh_liabilities(
 
 
 def _set_liabilities_status(
-    session_factory: sessionmaker[Session], item_id: int, status: str
+    session_factory: sessionmaker[Session], item_id: int, status: str | None
 ) -> None:
     with db.transaction(session_factory) as s:
         item = s.get(PlaidItem, item_id)
@@ -1299,6 +1482,7 @@ def _apply_batch(
         applier.apply_upserts()
         applier.apply_deletes()
         applier.apply_replacements()
+        applier.flag_unclassified_money_in()
         completed_now = applier.update_history(batch.update_status)
         if applier.inserted or completed_now:
             result = reconcile.reconcile_item(s, item.id)
@@ -1428,7 +1612,7 @@ def _sync_locked(
     )
     base = {"sync_run_id": run_id, "started_at": started}
     try:
-        token = access_token_for(settings, plaid_item_id, store)
+        token = access_token_for(settings, plaid_item_id, store, source=session_factory)
         applied: _Applied | None = None
         update_status: str | None = None
         for attempt in range(MAX_CURSOR_RETRIES + 1):
@@ -1642,7 +1826,11 @@ def sync_all(
 ) -> SyncAllResult:
     """Sync every Item (or ``item_ids``). ``if_due`` skips Items whose last success is newer
     than ``min_age`` (5 h: the launchd schedule). An unexpected exception in one Item does not
-    stop the others; the first one is re-raised at the end."""
+    stop the others: it is logged with its traceback and becomes that Item's ``INTERNAL``
+    outcome (``sync_item`` has recorded it on the Item and the run, and alerted), so the caller
+    reports every Item (final review 3 ops-6). A database that isn't ready, a schema mismatch,
+    Keychain approval or a missing key stops the run (re-raised: the caller says what to do), as
+    no other Item could sync either."""
     wanted = set(item_ids) if item_ids is not None else None
     with session_factory() as s:
         rows = s.execute(
@@ -1655,7 +1843,6 @@ def sync_all(
     now = clock.now()
     outcomes: list[SyncOutcome] = []
     not_due: list[int] = []
-    first_error: BaseException | None = None
     for row in rows:
         if wanted is not None and row.id not in wanted:
             continue
@@ -1679,12 +1866,26 @@ def sync_all(
                     sleep=sleep,
                 )
             )
-        except db.DatabaseUnavailable, db.SchemaMismatch, secrets.KeychainApprovalNeeded:
+        except (
+            db.DatabaseUnavailable,
+            db.SchemaMismatch,
+            secrets.KeychainApprovalNeeded,
+            secrets.MissingSecretError,
+        ):
             raise
         except Exception as exc:
-            first_error = first_error or exc
-    if first_error is not None:
-        raise first_error
+            log.exception("The sync of Item %s failed unexpectedly; syncing the others", row.id)
+            outcomes.append(
+                SyncOutcome(
+                    row.id,
+                    trigger,
+                    "error",
+                    item_status="error",
+                    error_code=INTERNAL,
+                    error_message=type(exc).__name__,
+                    internal_error=True,
+                )
+            )
     return SyncAllResult(tuple(outcomes), tuple(not_due))
 
 
@@ -1692,12 +1893,17 @@ def sync_all(
 
 
 def request_refresh(
-    gateway: PlaidGateway, store: secrets.SecretStore, settings: Settings, plaid_item_id: str
+    gateway: PlaidGateway,
+    store: secrets.SecretStore,
+    settings: Settings,
+    plaid_item_id: str,
+    *,
+    source: Session | sessionmaker[Session] | None = None,
 ) -> PlaidGatewayError | None:
     """``/transactions/refresh`` for "Sync now"; a failure (e.g. the 2-per-minute limit) is
     returned, never raised: the sync runs anyway and records any real problem."""
     try:
-        token = access_token_for(settings, plaid_item_id, store)
+        token = access_token_for(settings, plaid_item_id, store, source=source)
     except MissingAccessToken, secrets.SecretStoreError:
         return None
     try:
@@ -1753,7 +1959,9 @@ class RefreshThenSync:
                     select(PlaidItem.plaid_item_id).where(PlaidItem.id == item_id)
                 )
             if plaid_item_id is not None:
-                self.refresh_error = request_refresh(gateway, store, settings, plaid_item_id)
+                self.refresh_error = request_refresh(
+                    gateway, store, settings, plaid_item_id, source=session_factory
+                )
         outcome = sync_item(
             session_factory,
             gateway,

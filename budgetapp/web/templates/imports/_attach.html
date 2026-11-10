@@ -11,7 +11,7 @@
 {%- if single %}
 <input type="hidden" name="account_id" value="{{ offer.targets[0][0] }}">
 {%- else %}
-{{ form.select_field("account_id", "Linked card", offer.targets, value=offer.default_target, placeholder=none if offer.default_target else "Choose a card", id="attach-account-" ~ offer.manual_id, required=true, compact=true) }}
+{{ form.select_field("account_id", "Linked American Express card", offer.targets, value=offer.default_target, placeholder=none if offer.default_target else "Choose a card", id="attach-account-" ~ offer.manual_id, required=true, compact=true) }}
 {%- endif %}
 {{ ui.button("Attach to " ~ target_label, variant="primary", type="submit", icon="link") }}
 </div>

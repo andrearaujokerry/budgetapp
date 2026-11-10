@@ -27,11 +27,11 @@ open, after **Sync now** or a change you make. Demo data never sends any.
 | Alert | The notification says, for example | When | How often |
 | --- | --- | --- | --- |
 | **Budget reached** | "Groceries: 80% of budget used", "Groceries: over budget", "Travel: 80% of the 2026 budget used", "Overall budget: 80% used" | a budget reaches one of your percentages this period, or this year for an annual budget (80% and 100% unless you change them) | once per budget, period and percentage |
-| **Sync failed** | "American Express sync failed" | a sync of your Amex fails (Plaid, Amex or the app had a problem); the message names the error code | once per error code and day |
-| **Reconnect needed** | "Reconnect American Express" | Amex needs you to sign in again ([Reconnecting](reconnecting.md#reconnect)) | once each time it happens |
-| **Data is stale** | "American Express data is out of date" | no successful sync for 36 hours | once a day (folded into the failure or reconnect alert when one goes out in the same sync) |
-| **Consent renewal due** | "Renew your American Express connection" | the yearly Amex consent runs out within your reminder days (30 unless you change it) | once per due date; not while the connection needs reconnecting (reconnecting renews the consent too) |
-| **Large charge** | "$612.40 at Delta" | a new charge over the amount you set, or a pending charge that posts above it | once per charge; more than three in one sync arrive as one summary ("5 new charges over $500.00") |
+| **Sync failed** | "American Express sync failed" | a sync of one of your connections fails (Plaid, the bank or the app had a problem); the title names the bank and the message the error code | once per connection, error code and day |
+| **Reconnect needed** | "Reconnect Tartan Bank" | a bank needs you to sign in again ([Reconnecting](reconnecting.md#reconnect)) | once each time it happens |
+| **Data is stale** | "American Express data is out of date" | no successful sync of that connection for 36 hours | once a day (folded into the failure or reconnect alert when one goes out in the same sync) |
+| **Consent renewal due** | "Renew your American Express connection" | a bank's consent runs out within your reminder days (30 unless you change it): American Express asks every year; another bank only when Plaid reports an end date | once per due date; not while the connection needs reconnecting (reconnecting renews the consent too) |
+| **Large charge** | "$612.40 at Delta" | new spending over the amount you set, on a card or a bank account, or a pending charge that posts above it | once per charge; more than three in one sync arrive as one summary ("5 new charges over $500.00") |
 | **Keychain approval needed** | "Budget Tracker needs Keychain approval" | macOS asks before the background agents may read the app's Keychain items | once a day |
 | **Keychain item missing** | "Budget Tracker can't sync" | the sync agent can't find the database password or the Plaid keys in Keychain (setup isn't finished, or the login Keychain was reset); the message names the command that saves it: `./run setup` for the password, `./run setup --keys-only` for the keys | once a day |
 | **Backup failed or stale** | "Budget Tracker backup problem" | the nightly backup failed, or the newest backup is over 26 hours old | once a day |
@@ -52,11 +52,14 @@ Details:
   transaction), **Re-apply rules to past transactions**, `./run recategorize`, or a merge. A new
   budget amount, new percentages or another budget period count from the next sync, within about
   six hours.
-- **Large charges** are checked for new charges from a sync that are strictly over your amount,
-  dated at most 7 days before the previous successful sync (so the first sync after a break,
-  such as a trip with the Mac off or a reconnect fixed late, still announces the break's
-  charges), and not while Plaid sends your history right after linking. Each charge is announced
-  once: a pending charge that posts isn't announced a second time. A pending charge at or under
+- **Large charges** are checked for new spending from a sync that is strictly over your amount
+  (a charge in a spending category, on a card or from a bank account, such as rent or an ATM
+  withdrawal; paying your card from checking, transfers, also the payments to people that Plaid
+  files as transfers (a Zelle payment, a wire), and income never count), dated at most 7 days
+  before the previous successful sync (so the first sync after a break, such as a trip with the
+  Mac off or a reconnect fixed late, still announces the break's charges), and not while Plaid
+  sends your history right after linking. Each charge is announced once: a pending charge that
+  posts isn't announced a second time. A pending charge at or under
   your amount that goes above it (a tip or hotel incidentals added when it posts, or Plaid
   raising the pending amount) is announced once, when it goes above. CSV imports never raise
   one.
@@ -77,8 +80,8 @@ Settings → **Alerts**:
 | Budget alerts | on | budget alerts at all |
 | Alert at these percentages | 80, 100 | whole percentages from 1 to 200, up to five, separated by commas |
 | Sync problem alerts | on | sync failures, stale data and reconnect alerts (the consent reminder comes either way) |
-| Large-charge alert (optional) | blank (off) | the amount above which a charge is announced, once per charge |
-| Consent renewal reminder | 30 days | how long before the yearly consent runs out to start reminding you (1–120) |
+| Large-charge alert (optional) | blank (off) | the amount above which spending (a charge, rent, an ATM withdrawal) is announced, once per charge; card payments, transfers and income never are |
+| Consent renewal reminder | 30 days | how long before a connection's consent runs out (American Express asks once a year) to start reminding you (1–120) |
 
 Turning budget alerts off keeps your percentages for when you turn them back on. The consent
 banner in the app starts the same number of days before the due date as the reminder.

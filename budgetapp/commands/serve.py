@@ -52,7 +52,7 @@ RESERVED_PORTS = frozenset({8765, 8766})
 
 LIVE_BANNER = """\
 ******************************************************************
-  LIVE DATA: this is your real American Express account.
+  LIVE DATA: your real bank and card accounts.
   Production database '{db}' · {url}
 ******************************************************************"""
 

@@ -1,0 +1,31 @@
+{#- Income and spending per month (INC-4, INC-5): income bars (one palette colour) next to the
+    spending bars (the ink accent) and the net as a dashed line (routes/trends.py
+    income_chart_config). The same numbers are in the chart's description for screen readers
+    and in the Income and Net rows of "Every month". With no bank account (inc.cards_only) the
+    note under the chart adds that the only income is card credits. Once one exists, income is
+    known from the bank history's first day (inc.starts): when some month in range has no
+    income data or only part of it (inc.partial), a note above the chart says so and those
+    months show no income or net. -#}
+{%- import "components/ui.html" as ui -%}
+{%- import "dashboard/_income_switch.html" as income -%}
+{%- set inc = t.income -%}
+{% call ui.card('Income and spending', subtitle=chart_sub, id='trends-income-card') %}
+{%- if inc.partial %}
+<p class="trends-income-start muted text-sm" id="trends-income-start">
+{%- if inc.starts %}Your bank history starts on {{ inc.starts|date_long }}, so income and net start in {{ inc.starts|month_label }}{{ ' (a partial month)' if inc.starts.day > 1 }}: earlier months have no income data.
+{%- else %}Income and net start when your bank account’s transactions arrive.{% endif %}</p>
+{%- endif %}
+{% call ui.chart('trends-income-chart', income_chart, height=300, label='Bar chart of income and spending per month, with the net as a dashed line, ' ~ range_label) %}
+<table><caption>Income, spending and net, {{ range_label }}</caption>
+<thead><tr><th scope="col">Month</th><th scope="col">Income</th><th scope="col">Spending</th><th scope="col">Net</th></tr></thead>
+<tbody>
+{%- for m in t.months %}
+<tr><th scope="row">{{ m.period.start|month_label }}{{ ' (so far)' if m.status == 'current' }}</th>
+{%- if m.has_data and inc.totals.amounts[loop.index0] is none %}<td>no income data</td><td>{{ ui.money_text(t.totals.amounts[loop.index0]) }}</td><td>no income data</td>
+{%- elif m.has_data %}<td>{{ ui.money_text(inc.totals.amounts[loop.index0]) }}</td><td>{{ ui.money_text(t.totals.amounts[loop.index0]) }}</td><td>{{ ui.money_text(inc.net[loop.index0], signed=true) }}</td>
+{%- else %}<td>no data</td><td>no data</td><td>no data</td>{% endif %}</tr>
+{%- endfor %}
+</tbody></table>
+{% endcall %}
+<p class="trends-footnote muted text-xs" id="trends-income-note">Income is money in to your income categories, from any account. Net is income minus all spending: above zero, money you kept. Card payments and transfers are neither.{% if inc.cards_only %} {{ income.cards_only_hint() }}{% endif %}</p>
+{% endcall %}

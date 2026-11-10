@@ -1,6 +1,7 @@
-"""The Connection page's states (SYNC-1, SYNC-5 … SYNC-7): not linked (Sandbox and production),
-linked and healthy, reconnect needed, consent warning, statement details not shared, sync errors,
-the recent runs, edits that couldn't be carried over, the CSV-attach choice and demo data.
+"""The Connection page's states (SYNC-1, SYNC-5 … SYNC-7, BANK-1 … BANK-6): not linked (Sandbox
+and production), linked and healthy, several connections (cards and bank accounts), reconnect
+needed, consent warning, statement details not shared, sync errors, the recent runs, edits that
+couldn't be carried over, the CSV-attach choice and demo data.
 
 Production pages use ``load_settings("production", <temp paths>)`` with the test database, the
 in-memory secret store and ``FakePlaidGateway``: nothing reads the real Keychain or calls Plaid.
@@ -97,9 +98,14 @@ def test_not_linked_in_the_sandbox_explains_linking_and_offers_both_ways(client)
     response = client.get("/connection")
     html = main(page(client))
     words = text(html)
-    assert "Plaid opens a secure window where you sign in to American Express" in words
-    assert "Read-only. Nothing here can pay, move money or change your card." in words
-    assert 'data-link-mode="new"' in html and "Link with Plaid Link" in html
+    assert "Plaid opens a secure window where you pick your bank or card company" in words
+    assert "Checking, savings and credit cards from any bank Plaid supports." in words
+    assert "Read-only. Nothing here can pay, move money or change your accounts." in words
+    assert 'data-dialog-open="confirm-link"' in html  # Link a bank or card opens the dialog …
+    dialog = html[html.index('<dialog id="confirm-link"') :]
+    assert 'data-link-mode="new"' in dialog and "Link a bank or card" in dialog
+    assert "data-needs-checklist" not in dialog  # … with no checklist in the Sandbox
+    assert 'id="link-different-login"' in dialog  # BANK-3: the explicit choice
     assert '<form method="post" action="/connection/sandbox-item"' in html
     assert '<option value="custom" selected>' in html
     assert "1 of your 10" not in words  # Sandbox links are free
@@ -110,14 +116,67 @@ def test_not_linked_in_the_sandbox_explains_linking_and_offers_both_ways(client)
     assert '<script src="/static/js/link.js" defer></script>' in response.text
 
 
+SANDBOX_TEST_BANKS = [
+    ("ins_109508", "First Platypus Bank"),
+    ("ins_109511", "Tartan Bank"),
+    ("ins_109509", "First Gingham Credit Union"),
+    ("ins_109512", "Houndstooth Bank"),
+]
+
+
+def test_the_sandbox_names_a_test_bank_that_isnt_linked_yet(db, client):
+    """ux-5: linking a test bank again is refused like a real bank (BANK-3: same institution,
+    and with the different-login choice user_good's same account names and masks), so the
+    dialog and the Sandbox tools name the first non-OAuth Sandbox bank (RESEARCH T3.1) that
+    has no connection yet, never one already linked."""
+
+    def advice(html: str) -> tuple[str, str]:
+        dialog = html[html.index('<dialog id="confirm-link"') :]
+        tools = re.search(r'<section[^>]*id="sandbox-tools".*?</section>', html, re.S)
+        return text(dialog[: dialog.index("</dialog>")]), text(tools.group(0)) if tools else ""
+
+    dialog, tools = advice(page(client))
+    assert "pick First Platypus Bank and sign in with user_good and pass_good" in dialog
+    assert tools == ""  # not linked: the Sandbox card says the same, untouched
+    nexts = [name for _, name in SANDBOX_TEST_BANKS[1:]] + ["a test bank you haven't linked yet"]
+    for (institution_id, name), suggested in zip(SANDBOX_TEST_BANKS, nexts, strict=True):
+        item = make_item(db, institution_id=institution_id, institution_name=name,
+                         consent_expires_at=None)  # fmt: skip
+        make_account(db, item, name="Plaid Checking", mask="0000", type="depository",
+                     subtype="checking")  # fmt: skip
+        dialog, tools = advice(page(client))
+        assert f"pick {suggested} and sign in with user_good and pass_good" in dialog, name
+        assert f"pick {suggested} and sign in with user_good and pass_good" in tools, name
+        assert f"pick {name}" not in dialog + tools
+        assert "Linking a test bank again is refused, as it would be for a real bank." in tools
+        assert "unless you tick" not in tools
+
+
+def test_the_different_login_choice_is_named_by_its_label_alone(client):
+    """ux-7: the dialog's decision point is read as "A different login at a bank I've already
+    linked", checkbox; its help is read once, as the description, not inside the name too."""
+    html = page(client)
+    control = re.search(r'<input id="link-different-login"[^>]*>', html).group(0)
+    assert 'aria-labelledby="link-different-login-label"' in control
+    assert 'aria-describedby="link-different-login-help"' in control
+    name = re.search(r'<span id="link-different-login-label">(.*?)</span>', html).group(1)
+    assert text(name) == "A different login at a bank I've already linked"
+    help_text = re.search(r'<span class="check__help" id="link-different-login-help">(.*?)</span>',
+                          html).group(1)  # fmt: skip
+    assert text(help_text).startswith("For example someone else's login at the same bank.")
+
+
 def test_production_shows_the_checklist_and_confirms_the_one_time_link(prod_client):
     response = prod_client.get("/connection")
     html = main(page(prod_client))
     words = text(html)
-    assert "This uses 1 of your 10 Plaid connections." in words
+    assert "Each bank you link uses 1 of your 10 Plaid connections." in words
+    assert "0 of your 10 Plaid connections used." in words
+    checklist = text(html[html.index("Before you link") : html.index('<dialog id="confirm-link"')])
+    assert "American Express" not in checklist  # BANK-2: the checklist is about no one bank
     for label in (
         "A Data Transparency use case is selected",
-        "Plaid gives your team access to American Express",
+        "Your team may use banks that sign in through their own window (OAuth)",
     ):
         assert words.count(label) == 2  # the checklist card and the confirm dialog's boxes
     assert html.count('href="https://dashboard.plaid.com/') == 2
@@ -125,11 +184,12 @@ def test_production_shows_the_checklist_and_confirms_the_one_time_link(prod_clie
     assert 'data-dialog-open="confirm-link"' in html  # the page's button opens the dialog …
     dialog = html[html.index('<dialog id="confirm-link"') :]
     assert (
-        "This uses 1 of your 10 Plaid connections, permanently. Make sure the checklist is done"
-        in text(dialog)
+        "This uses 1 of your 10 Plaid connections, permanently. The app has created 0 of 10 so "
+        "far. Make sure the checklist is done" in text(dialog)
     )
     # … whose Link button stays disabled until every box is ticked (static/js/link.js)
-    assert re.search(r'data-link-mode="new" data-needs-checklist disabled', dialog)
+    assert re.search(r'data-link-mode="new" id="link-new" data-needs-checklist disabled', dialog)
+    assert "A different login at a bank I've already linked" in text(dialog)
     assert "/connection/sandbox-item" not in html
     assert (
         "connect-src 'self' https://production.plaid.com/;"
@@ -141,15 +201,15 @@ def test_production_blocks_a_new_link_while_one_is_in_progress(prod_client, secr
     app_secrets.set_link_in_progress(store=secrets)
     html = main(page(prod_client))
     assert "Linking is paused." in text(html)
-    assert re.search(r'data-dialog-open="confirm-link" disabled', html)
+    assert re.search(r'data-dialog-open="confirm-link" id="link-open" disabled', html)
 
 
 def test_production_offers_to_re_attach_a_saved_token_instead_of_a_new_link(prod_client, secrets):
-    secrets.set(app_secrets.PRODUCTION_ACCESS_TOKEN, "access-production-kept")
+    secrets.set(app_secrets.LEGACY_PRODUCTION_TOKEN, "access-production-kept")
     html = main(page(prod_client))
     assert "A saved connection was found." in text(html)
     assert '<form method="post" action="/connection/recover">' in html
-    assert re.search(r'data-dialog-open="confirm-link" disabled', html)
+    assert re.search(r'data-dialog-open="confirm-link" id="link-open" disabled', html)
 
 
 def test_the_sandbox_offers_to_recover_test_items_the_database_lost(
@@ -165,9 +225,9 @@ def test_the_sandbox_offers_to_recover_test_items_the_database_lost(
 def test_the_preflight_check_reports_what_plaid_says(prod_client, prod_plaid):
     response = prod_client.get("/connection/preflight", headers=HTMX)
     assert response.template.name == "connection/_preflight.html"
-    assert "Plaid lists American Express with statement details" in response.text
+    assert "Plaid answers with your Production keys" in response.text
     assert prod_plaid.calls_to("search_institutions") == [
-        {"query": "American Express", "products": ("liabilities",)}
+        {"query": "Bank", "products": ("transactions",)}
     ]
     prod_plaid.queue_error("search_institutions", prod_plaid.transport_error())
     failed = prod_client.get("/connection/preflight", headers=HTMX)
@@ -226,7 +286,7 @@ def test_a_healthy_connection_shows_its_status_cards_and_runs(db, client):
     assert '<h2 class="section__title" id="item-' in html and "American Express" in words
     assert '<span class="pill pill--healthy">' in html and "Synced 3 h ago" in words
     assert "Last successful sync Oct 20, 2026," in words and "(3 h ago)" in words
-    assert "Plaid's last update from Amex Oct 20, 2026," in words
+    assert "Plaid's last update from American Express Oct 20, 2026," in words
     assert "History All received (Sep 30, 2026)" in words
     assert "Consent Renew by May 8, 2027 (200 days left)" in words
     assert "Statement details Shared" in words
@@ -237,7 +297,11 @@ def test_a_healthy_connection_shows_its_status_cards_and_runs(db, client):
     assert "$10,000" in words and "Last payment $500.00 on Oct 1" in words
     assert "Balances as of Oct 20, 2026," in words and "Statement details as of" in words
     assert html.count('<tr>\n<td class="table__date">') == 20  # the last 20 runs only
-    assert 'data-link-mode="update"' not in html and "Renew consent" not in words
+    # BANK-5: the connection's own actions, each a Plaid update-mode session (no new connection)
+    actions = re.search(r'<div class="cluster connection-actions">.*?</div>', html, re.S).group(0)
+    assert f'data-link-mode="accounts" data-item-id="{item.id}" id="accounts-{item.id}"' in actions
+    assert f'id="renew-{item.id}"' in actions and f'id="reconnect-{item.id}"' in actions
+    assert "Reconnect needed." not in words and "Renew by" not in actions
     assert 'data-link-mode="liabilities"' not in html
     live = re.search(r'<div id="connection-live"[^>]*>', html).group(0)
     assert 'hx-trigger="connection-changed from:body"' in live  # nothing to poll for
@@ -280,7 +344,8 @@ def test_reconnect_needed_shows_plaids_message_and_update_mode(db, client):
 
 def test_reconnect_falls_back_to_plain_words_without_a_display_message(db, client):
     linked_item(db, status="needs_reconnect", error_code="ITEM_LOGIN_REQUIRED")
-    assert "Amex needs you to sign in again through Plaid" in text(main(page(client)))
+    words = text(main(page(client)))
+    assert "American Express needs you to sign in again through Plaid" in words
 
 
 @pytest.mark.parametrize(
@@ -328,7 +393,7 @@ def test_statement_details_not_shared_offer_update_mode_with_liabilities(db, cli
 @pytest.mark.parametrize(
     ("status", "words"),
     [
-        ("unsupported", "American Express doesn't provide them for this card"),
+        ("unsupported", "American Express doesn't provide them"),
         ("error", "Couldn't be read last time; the next sync tries again"),
         (None, "Shared; read on the next sync"),
     ],
@@ -347,7 +412,7 @@ def test_a_failed_sync_shows_the_error(db, client):
     )
     words = text(main(page(client)))
     assert "The last sync failed (INSTITUTION_NOT_RESPONDING)." in words
-    assert "Amex isn't answering Plaid right now" in words
+    assert "American Express isn't answering Plaid right now" in words
 
 
 def test_rejected_plaid_keys_say_how_to_fix_them(db, client):
@@ -407,24 +472,26 @@ def test_no_runs_yet(db, client):
     assert "No syncs yet" in text(main(page(client)))
 
 
-def test_production_loads_plaid_only_when_an_update_mode_action_is_offered(db, prod_client):
+def test_production_loads_plaid_whenever_the_page_offers_a_link_action(
+    db, prod_client, make_app, make_client, production
+):
+    """BANK-5: every connection offers Add accounts and Reconnect, so a linked page always loads
+    Plaid's script (with its CSP); a page that can't open Link (no keys yet, demo) never does."""
     linked_item(db)
     healthy = prod_client.get("/connection")
-    assert PLAID_SCRIPT not in healthy.text
-    assert "plaid" not in healthy.headers["content-security-policy"]
-    assert "sandbox-tools" not in healthy.text
-    db.expire_all()
-    from budgetapp.models import PlaidItem
-
-    item = db.query(PlaidItem).one()
-    item.status = "needs_reconnect"
-    db.flush()
-    broken = prod_client.get("/connection")
-    assert PLAID_SCRIPT in broken.text
+    assert PLAID_SCRIPT in healthy.text
     assert (
         "connect-src 'self' https://production.plaid.com/;"
-        in (broken.headers["content-security-policy"])
+        in (healthy.headers["content-security-policy"])
     )
+    assert "sandbox-tools" not in healthy.text
+
+    def no_keys(_settings):
+        raise app_secrets.MissingSecretError(app_secrets.PLAID_CLIENT_ID)
+
+    keyless = make_client(make_app(production, gateway_factory=no_keys)).get("/connection")
+    assert PLAID_SCRIPT not in keyless.text
+    assert "plaid" not in keyless.headers["content-security-policy"]
 
 
 # --------------------------------------------------------------------------- edits, attaching
@@ -476,6 +543,7 @@ def test_demo_data_shows_the_page_but_never_reaches_plaid(db, demo_client):
     response = demo_client.get("/connection")
     html = main(response.text)
     assert "Demo data." in text(html)
+    assert "Keychain item" not in text(html)  # demo data never saves a token
     assert PLAID_SCRIPT not in response.text
     assert "plaid" not in response.headers["content-security-policy"]
     assert re.search(r'data-link-mode="update" data-item-id="\d+" id="renew-\d+" disabled', html)
@@ -495,7 +563,7 @@ def test_missing_plaid_keys_are_explained_and_linking_disabled(make_app, make_cl
     response = client.get("/connection")
     html = main(response.text)
     assert "./run setup --keys-only" in text(html)
-    assert re.search(r'data-link-mode="new" disabled', html)
+    assert re.search(r'data-dialog-open="confirm-link" id="link-open" disabled', html)
     assert PLAID_SCRIPT not in response.text
 
 
@@ -547,6 +615,102 @@ def test_the_paused_banner_explains_itself_in_plain_words_and_local_time(
     assert "UTC" not in banner and "marker" not in banner
 
 
+def amex_with_its_token(db, prod_plaid, store):
+    """A production Amex connection whose token and index are in ``store``."""
+    fake = prod_plaid.add_item(item_id="item-amex")
+    item, _ = linked_item(db, plaid_item_id="item-amex")
+    store.values[app_secrets.production_access_token_key("item-amex")] = fake.access_token
+    store.values[app_secrets.PRODUCTION_ITEM_INDEX] = '["item-amex"]'
+    return item
+
+
+def test_an_unreadable_link_marker_pauses_linking_but_keeps_the_page(
+    db, prod_client, prod_plaid, secrets
+):
+    """Final review 3 ops-1 (major): after a brew upgrade of Python every Keychain item needs
+    one Always Allow, which the web agent can't ask for. A link-in-progress marker it can't read
+    (left by a link whose tab was closed) turned the whole page into "needs Keychain approval",
+    and with it Reconnect, Renew consent and Add accounts. Only a new link waits now (fail safe),
+    and the banner says how to give the approval."""
+    item = amex_with_its_token(db, prod_plaid, secrets)
+    marker = app_secrets.link_in_progress_key()
+    app_secrets.set_link_in_progress(store=secrets)
+    secrets.fail_on[("get", marker)] = app_secrets.KeychainApprovalNeeded(marker, -25308)
+    html = main(page(prod_client))
+    banner = text(html)
+    assert "Linking is paused." in banner
+    assert "macOS Keychain needs your approval" in banner
+    assert "Run ./run doctor --env production in Terminal and click Always Allow." in banner
+    assert re.search(r'data-dialog-open="confirm-link" id="link-open" disabled', html)
+    for control in ("reconnect", "renew", "accounts"):
+        (button,) = re.findall(rf'<button[^>]*id="{control}-{item.id}"[^>]*>', html)
+        assert "disabled" not in button, button
+    refused = prod_client.post("/connection/link-token", json={"mode": "new"})
+    assert refused.status_code == 409 and "Always Allow" in refused.json()["error"]
+    renew = prod_client.post("/connection/link-token", json={"mode": "update", "item_id": item.id})
+    assert renew.status_code == 200 and renew.json()["link_token"]
+
+
+class AfterPythonUpgrade:
+    """Keychain after a ``brew upgrade`` of Python (setup.md, ARCHITECTURE §3): every item
+    needs one Always Allow. The web agent, which can't ask, gets KeychainApprovalNeeded; doctor
+    run in Terminal makes macOS ask, and the owner clicks Always Allow for each item it reads."""
+
+    def __init__(self, store: app_secrets.MemoryStore) -> None:
+        self.store = store
+        self.approved: set[str] = set()
+        self.in_terminal = False
+
+    def get(self, account: str) -> str | None:
+        if account in self.store.values and account not in self.approved:
+            if not self.in_terminal:
+                raise app_secrets.KeychainApprovalNeeded(account, -25308)
+            self.approved.add(account)
+        return self.store.get(account)
+
+    def set(self, account: str, value: str) -> None:
+        self.store.set(account, value)
+        self.approved.add(account)  # the new Python wrote it, so it trusts it
+
+    def delete(self, account: str) -> None:
+        self.store.delete(account)
+
+
+def test_doctor_after_a_python_upgrade_unlocks_a_page_with_a_leftover_link_marker(
+    db, session_factory, make_app, make_client, production, prod_plaid, secrets, tmp_path
+):
+    """Final review 3 ops-1 (major): the documented fix for "needs Keychain approval" is
+    ./run doctor --env production in Terminal, which reads every item so macOS asks about each.
+    It never read the link-in-progress marker, so a marker left by an unfinished link kept the
+    Connection page locked after the owner had clicked Always Allow for everything doctor
+    asked."""
+    from tests.test_doctor import ALL_ITEMS, Doctor, short_socket_dir
+
+    amex_with_its_token(db, prod_plaid, secrets)
+    for account in ALL_ITEMS:
+        secrets.values[account] = f"value-of-{account}"
+    linking.new_link_token(db, prod_plaid, production, store=secrets)  # then its tab is closed
+    db.commit()
+    keychain = AfterPythonUpgrade(secrets)
+    app = make_app(production, gateway_factory=lambda _settings: prod_plaid, secret_store=keychain)
+    client = make_client(app)
+    locked = client.get("/connection")
+    assert locked.status_code == 503 and "./run doctor --env production" in locked.text
+    doctor_settings = load_settings(
+        "production",
+        data_dir=tmp_path / "App Support" / "budgetapp",
+        logs_dir=tmp_path / "Logs" / "budgetapp",
+        pg_socket_dir=short_socket_dir(),
+    )
+    keychain.in_terminal = True
+    Doctor(doctor_settings, tmp_path, session_factory).run(store=keychain)
+    keychain.in_terminal = False
+    assert app_secrets.link_in_progress_key() in keychain.approved
+    banner = text(main(page(client)))
+    assert "may still be in progress" in banner  # the marker is readable again
+    assert "needs your approval" not in banner
+
+
 @pytest.mark.parametrize(
     ("values", "ids"),
     [
@@ -558,9 +722,10 @@ def test_the_paused_banner_explains_itself_in_plain_words_and_local_time(
             },
             ("reconnect", "grant"),
         ),
-        ({"consent_expires_at": NOW + dt.timedelta(days=5)}, ("renew",)),
+        ({"consent_expires_at": NOW + dt.timedelta(days=5)}, ("renew", "accounts")),
+        ({}, ("accounts", "renew", "reconnect")),
     ],
-    ids=["reconnect-and-grant", "renew"],
+    ids=["reconnect-and-grant", "renew", "actions"],
 )
 def test_every_control_of_the_live_region_keeps_one_id_across_polls(db, client, values, ids):
     """htmx puts keyboard focus back after a swap only on an element with the same id; without
@@ -576,27 +741,35 @@ def test_every_control_of_the_live_region_keeps_one_id_across_polls(db, client, 
 
 
 def test_a_link_action_arriving_by_polling_reloads_a_page_without_plaid(
-    db, prod_client, production, prod_plaid, secrets
+    db, make_app, make_client, production, prod_plaid
 ):
-    """A linked, healthy production page loads no Plaid script, and its CSP forbids loading one
-    later. When a poll finds that Reconnect is needed, the page reloads (HX-Refresh) instead of
-    swapping in a button that can't open Link."""
-    fake = prod_plaid.add_item(item_id="item-amex")
-    app_secrets.store_access_token(production, "item-amex", fake.access_token, store=secrets)
-    item, _ = linked_item(db, plaid_item_id="item-amex")
-    full = page(prod_client)
+    """A page loaded while Link couldn't open (the Plaid keys weren't saved yet) has no Plaid
+    script, and its CSP forbids loading one later. Once a poll finds Link actions available
+    (Reconnect, Add accounts), the page reloads (HX-Refresh) instead of swapping in buttons that
+    can't open Link."""
+    keys = {"saved": False}
+
+    def gateway_factory(_settings):
+        if not keys["saved"]:
+            raise app_secrets.MissingSecretError(app_secrets.PLAID_CLIENT_ID)
+        return prod_plaid
+
+    client = make_client(make_app(production, gateway_factory=gateway_factory))
+    item, _ = linked_item(db)
+    full = page(client)
     assert PLAID_SCRIPT not in full and """hx-vals='{"plaid": "0"}'""" in full
-    quiet = prod_client.get("/connection?plaid=0", headers=HTMX)
+    quiet = client.get("/connection?plaid=0", headers=HTMX)
     assert quiet.template.name == "connection/_live.html" and "HX-Refresh" not in quiet.headers
-    item.status, item.error_code = "needs_reconnect", "ITEM_LOGIN_REQUIRED"
-    db.flush()
-    swap = prod_client.get("/connection?plaid=0", headers=HTMX)
+    keys["saved"] = True
+    swap = client.get("/connection?plaid=0", headers=HTMX)
     assert swap.headers.get("HX-Refresh") == "true" and swap.text == ""
-    reloaded = page(prod_client)
+    reloaded = page(client)
     assert PLAID_SCRIPT in reloaded and """hx-vals='{"plaid": "1"}'""" in reloaded
-    polled = prod_client.get("/connection?plaid=1", headers=HTMX)
+    polled = client.get("/connection?plaid=1", headers=HTMX)
     assert polled.template.name == "connection/_live.html"
-    assert re.search(r'data-link-mode="update" data-item-id="\d+" id="reconnect-\d+">', polled.text)
+    assert f'data-link-mode="update" data-item-id="{item.id}" id="reconnect-{item.id}"' in (
+        polled.text
+    )
 
 
 def test_the_link_dialog_shows_nothing_behind_its_modal(prod_client):
@@ -613,3 +786,142 @@ def test_the_link_dialog_shows_nothing_behind_its_modal(prod_client):
     start = source[source.index("function start(button)") :]
     assert start.index("dialog.close()") < start.index("showError(")
     assert "setBusy([button, opener]" in start
+
+
+# ---------------------------------------------------------- W3-BANK review fixes (safety, UX)
+
+
+def test_a_v1_copy_left_behind_still_lets_the_owner_link_another_bank(
+    db, prod_client, prod_plaid, secrets
+):
+    """Safety review (major): the v1 token moved, but its old copy couldn't be deleted (the web
+    agent runs without Keychain prompts). The page offers Link, and clicking it works (it used
+    to be refused with a reason that blamed a failed save)."""
+    fake = prod_plaid.add_item(item_id="item-amex")
+    item = make_item(db, plaid_item_id="item-amex")
+    make_account(db, item, plaid_account_id=fake.default_account_id, mask="1005")
+    secrets.values[app_secrets.production_access_token_key("item-amex")] = fake.access_token
+    secrets.values[app_secrets.PRODUCTION_ITEM_INDEX] = '["item-amex"]'
+    legacy = app_secrets.LEGACY_PRODUCTION_TOKEN
+    secrets.values[legacy] = fake.access_token
+    secrets.fail_on[("delete", legacy)] = app_secrets.KeychainApprovalNeeded(legacy, -25308)
+    html = main(page(prod_client))
+    assert re.search(r'data-dialog-open="confirm-link" id="link-open">', html)
+    assert "Linking is paused." not in text(html) and "A saved connection" not in text(html)
+    answer = prod_client.post("/connection/link-token", json={"mode": "new"})
+    assert answer.status_code == 200 and answer.json()["attempt"]
+
+
+def test_an_account_plaid_no_longer_shares_is_marked_on_its_tile(
+    db, client, fake_plaid, secrets, settings, session_factory, notifier
+):
+    """UX review: an account unticked in Add accounts dropped out of Plaid's answers but still
+    looked live. After the next sync its tile says so, and the summary counts it apart."""
+    from budgetapp.services import sync as sync_service
+    from tests.factories import plaid_account
+
+    def bank_account(account_id, name, mask, subtype, current):
+        return plaid_account(
+            account_id=account_id,
+            name=name,
+            official_name=None,
+            mask=mask,
+            type="depository",
+            subtype=subtype,
+            current=current,
+            available=current,
+        )
+
+    fake = fake_plaid.add_item(
+        item_id="tartan",
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        consented_products=("transactions",),
+        accounts=[
+            bank_account("tartan-chk", "Checking", "4417", "checking", "100.00"),
+            bank_account("tartan-sav", "Savings", "9902", "savings", "5000.00"),
+        ],
+    )
+    result = linking.exchange(
+        session_factory,
+        fake_plaid,
+        secrets,
+        settings,
+        fake_plaid.public_token_for(fake),
+        {"institution": {"institution_id": "ins_109511", "name": "Tartan Bank"}},
+    )
+
+    def sync_tartan():
+        sync_service.sync_item(
+            session_factory,
+            fake_plaid,
+            secrets,
+            settings,
+            result.item_id,
+            trigger="update",
+            notifier=notifier,
+            sleep=lambda _s: None,
+        )
+
+    sync_tartan()
+    fake.accounts = [a for a in fake.accounts if a["account_id"] != "tartan-sav"]
+    sync_tartan()
+    html = main(page(client))
+    words = text(html)
+    assert "1 bank account (1 no longer shared) · linked" in words
+    tile = html[html.index('id="account-') :]
+    tile = text(tile[tile.index("Savings ··9902") :])
+    assert tile.startswith("Savings ··9902 Savings No longer shared. Plaid stopped sharing")
+    assert "the balance shown is the last one Plaid sent" in tile
+
+
+def test_each_connection_names_its_keychain_item(db, prod_client, production, secrets):
+    """UX review: going-live.md asks for a copy of each connection's token; the page says which
+    Keychain item is which connection (its name only, never the token)."""
+    for pid, name, inst in (
+        ("item-amex", "American Express", "ins_10"),
+        ("item-tartan", "Tartan Bank", "ins_109511"),
+    ):
+        make_item(db, plaid_item_id=pid, institution_name=name, institution_id=inst)
+        app_secrets.store_access_token(production, pid, f"access-production-{pid}", store=secrets)
+    html = main(page(prod_client))
+    for pid in ("item-amex", "item-tartan"):
+        assert f'<code class="keychain-item">plaid.access_token.production.{pid}</code>' in html
+    assert "access-production-item-" not in html
+
+
+def test_until_the_upgrade_moves_it_the_keychain_item_line_names_the_v1_item(
+    db, prod_client, production, secrets
+):
+    """Final review (ops-7, reqs-1): right after ./run live upgrades the Amex-only version, the
+    token keeps its v1 name until the first sync moves it. The line used to name the Item's own
+    item, which an owner following going-live.md's "Keep a copy" couldn't find."""
+    from budgetapp.services import sync as sync_service
+
+    item = make_item(db, plaid_item_id="item-amex")
+    make_account(db, item)
+    legacy = app_secrets.LEGACY_PRODUCTION_TOKEN
+    secrets.values[legacy] = "access-production-v1"
+    html = main(page(prod_client))
+    assert f'<code class="keychain-item">{legacy}</code>' in html
+    words = text(html)
+    assert f"the next sync moves it to {legacy}.item-amex" in words
+    assert "./run doctor --env production explains if it stays" in words
+    assert "access-production-v1" not in html
+    assert sync_service.migrate_legacy_token(db, production, secrets).status == "moved"
+    html = main(page(prod_client))
+    assert f'<code class="keychain-item">{legacy}.item-amex</code>' in html
+    assert "the next sync moves it" not in text(html)
+
+
+def test_two_logins_at_one_bank_have_their_own_titles(db, client):
+    first = make_item(db, institution_name="Houndstooth Bank", institution_id="ins_109512")
+    make_account(db, first, name="Travel Rewards", mask="1234")
+    second = make_item(db, institution_name="Houndstooth Bank", institution_id="ins_109512")
+    make_account(db, second, name="Cash Rewards", mask="5678")
+    html = main(page(client))
+    assert f'id="item-{first.id}-title">Houndstooth Bank (Travel Rewards ··1234)</h2>' in html
+    assert f'id="item-{second.id}-title">Houndstooth Bank (Cash Rewards ··5678)</h2>' in html
+    assert "Plaid's last update from Houndstooth Bank" in text(
+        html
+    )  # sentences name the bank itself

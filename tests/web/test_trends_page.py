@@ -13,7 +13,9 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from tests.bank_factories import make_bank_account, make_bank_item
 from tests.factories import (
+    card_payments,
     get_category,
     make_account,
     make_category,
@@ -72,6 +74,11 @@ def text_of(fragment: str) -> str:
     return " ".join(html.unescape(plain).split())
 
 
+def shown(fragment: str) -> str:
+    """The text a sighted reader sees: :func:`text_of` without the screen-reader-only words."""
+    return text_of(re.sub(r'<span class="sr-only">[^<]*</span>', "", fragment))
+
+
 def section(page: str, element_id: str) -> str:
     match = re.search(
         rf'<(section|div) class="card[^"]*"[^>]*id="{element_id}".*?</\1>', page, re.S
@@ -128,7 +135,7 @@ def test_linked_but_nothing_has_arrived(client, db):
 
     make_item(db)
     page = client.get("/trends").text
-    assert "Your card is linked, but no transactions have arrived yet." in page
+    assert "Your accounts are linked, but no transactions have arrived yet." in page
     assert 'href="/import"' not in re.search(
         r'id="trends-empty".*?</div>\n</div>', page, re.S
     ).group(0)
@@ -142,7 +149,7 @@ def test_the_first_month_of_history(client, cat, spend):
     text = tiles(page)
     assert "Last month — no complete month in this range yet" in text
     assert "Nov 2026 so far $40 the first month of your history" in text
-    assert "Monthly average — needs one complete month" in text
+    assert "Monthly spending average — needs one complete month" in text
     assert chart_config(page)["data"]["labels"] == ["Nov 2026"]
     assert csp_problems(page, rendered=True) == []
 
@@ -191,7 +198,7 @@ def test_the_historys_first_month_on_its_own(client, cat, spend):
     page = client.get("/trends?through=2025-11").text
     text = tiles(page)
     assert "Spent in Nov 2025 $560 from Nov 28, when your history starts" in text
-    assert "In Nov 2025 $560 all categories" in text and "In these 1 months" not in text
+    assert "Spent in Nov 2025 $560 all categories" in text and "these 1 months" not in text
     changes = changes_card(page)
     assert changes.startswith("No month to compare yet")
     assert changes.endswith("Choose a later month under “Through” to see a change.")
@@ -221,8 +228,8 @@ class TestAllCategories:
         assert "/static/vendor/chart.umd.min.js" in page
         text = tiles(page)
         assert "Spent in Oct 2026 $205 $105 more than Sep (+105%)" in text
-        assert "Nov 2026 so far $35 $45 by Oct 5 (−$10)" in text
-        assert "Monthly average $191 over 11 complete months" in text
+        assert "Spent in Nov 2026 so far $35 $45 by Oct 5 (−$10)" in text
+        assert "Monthly spending average $191 over 11 complete months" in text
         assert "Biggest increase +$60 Groceries: $100 → $160" in text
         changes = section(page, "trends-changes")
         assert "Oct 2026 compared with Sep 2026" in changes
@@ -418,3 +425,436 @@ def test_the_through_picker_lists_the_history(client, history):
     options = re.findall(r'<option value="([^"]+)"', picker)
     assert options[0] == "2026-11" and options[-1] == "2025-11" and len(options) == 13
     assert "Nov 2026 (this month)" in picker
+
+
+# --------------------------------------------------------------------------- income (wave 3)
+
+
+def income_category(db, name: str):
+    """An income category by name: MONEY's migration seeds Paycheck, Interest and Other Income
+    (W3-PLAN C2); without it the test creates the category."""
+    try:
+        category = get_category(db, name)
+    except LookupError:
+        category = make_category(db, name, kind="income", color="other")
+    assert category.kind == "income"
+    return category
+
+
+@pytest.fixture
+def checking(db):
+    bank = make_bank_item(db, institution_id="ins_109508", institution_name="First Platypus Bank")
+    return make_bank_account(db, bank, name="Plaid Checking")
+
+
+@pytest.fixture
+def earnings(db, cat, spend, checking, history):
+    """On top of the spending history: a paycheck every month from Dec 2025 ($2,000; two in
+    Oct), savings interest in Sep and Oct, and an Amex credit in Oct. The checking account's
+    history starts with the card's (Nov 10, 2025: a card payment, neither spending nor income),
+    so every month of the history has income data."""
+    make_transaction(db, checking, amount="100.00", category=card_payments(db), date="2025-11-10",
+                     name="AMEX PAYMENT")  # fmt: skip
+    paycheck = income_category(db, "Paycheck")
+    interest = income_category(db, "Interest")
+    for year, month in [(2025, 12)] + [(2026, m) for m in range(1, 11)]:
+        make_transaction(db, checking, amount="-2000.00", category=paycheck,
+                         date=f"{year}-{month:02d}-15", name="ACME PAYROLL")  # fmt: skip
+    make_transaction(db, checking, amount="-500.00", category=paycheck, date="2026-10-30",
+                     name="ACME PAYROLL")  # fmt: skip
+    make_transaction(db, checking, amount="-3.00", category=interest, date="2026-09-30")
+    make_transaction(db, checking, amount="-4.00", category=interest, date="2026-10-31")
+    spend(cat("Credits & Rewards"), "-25.00", "2026-10-12", name="AMEX OFFER CREDIT")
+    return {"paycheck": paycheck, "interest": interest, "credits": cat("Credits & Rewards")}
+
+
+def income_chart(page: str) -> dict:
+    match = re.search(
+        r'<script type="application/json" id="trends-income-chart-config">(.*?)</script>',
+        page,
+        re.S,
+    )
+    assert match, "no income chart"
+    return json.loads(match.group(1))
+
+
+def income_links(page: str) -> list[tuple[str, Decimal]]:
+    """``(href, figure)`` of every income amount that opens its transactions (the figure is the
+    visible amount; the words after it are for screen readers)."""
+    found = []
+    for href, body in re.findall(r'<a class="trends-income" href="([^"]+)"[^>]*>(.*?)</a>',
+                                 page, re.S):  # fmt: skip
+        amount = re.search(r'<span class="amount[^"]*">(.*?)</span>', body).group(1)
+        shown = text_of(amount).replace("−", "-").replace("$", "").replace(",", "")
+        found.append((html.unescape(href), Decimal(shown)))
+    return found
+
+
+@pytest.fixture
+def card_credits(db, cat, spend, history):
+    """Only the card is linked: Amex statement credits (Credits & Rewards, an income category)
+    are the only money in, on top of the spending history."""
+    spend(cat("Credits & Rewards"), "-15.00", "2026-09-12", name="AMEX OFFER CREDIT")
+    spend(cat("Credits & Rewards"), "-25.00", "2026-10-12", name="AMEX OFFER CREDIT")
+
+
+CARDS_ONLY_HINT = "Only card credits count as income: link a bank account to add your paychecks."
+
+
+class TestIncome:
+    def test_no_switch_without_income(self, client, history):
+        page = client.get("/trends").text
+        assert "income-switch" not in page and "trends-income-chart" not in page
+        assert '<div class="grid grid--4" id="trends-kpis">' in page
+
+    def test_the_switch_sends_the_filters(self, client, earnings):
+        page = client.get("/trends?months=24&through=2026-10").text
+        form = re.search(r'<form class="income-switch".*?</form>', page, re.S).group(0)
+        assert 'method="post" action="/trends/show-income"' in form
+        assert 'hx-post="/trends/show-income"' in form and 'hx-trigger="change"' in form
+        assert 'hx-target="#trends-results"' in form and 'hx-swap="innerHTML"' in form
+        assert 'hx-include="#trends-filters"' in form
+        assert 'name="next" value="/trends?months=24&amp;through=2026-10"' in form
+        assert re.search(r'<input class="switch" type="checkbox" role="switch" id="show-income" '
+                         r'name="show_income" value="1" checked>', form)  # fmt: skip
+        assert 'id="trends-filters"' in page  # what hx-include names
+        assert csp_problems(page, rendered=True) == []
+
+    def test_tiles_for_the_last_month(self, client, earnings):
+        page = client.get("/trends").text
+        assert '<div class="grid grid--3" id="trends-kpis">' in page
+        text = tiles(page)
+        assert "Spent in Oct 2026 $205 $105 more than Sep (+105%)" in text
+        assert "Income in Oct 2026 $2,529 $526 more than Sep (+26%)" in text
+        # Net: the Dec–Oct average of income − spending (Aug: $900 of travel), so
+        # (8 × 1,900 + 1,000 + 1,903 + 2,324) / 11.
+        assert "Net in Oct 2026 +$2,324 average +$1,857 over 11 complete months" in text
+        order = re.findall(r'id="(trend-[a-z-]+)"', page)
+        assert order[:6] == ["trend-compare", "trend-income", "trend-net", "trend-so-far",
+                             "trend-average", "trend-increase"]  # fmt: skip
+        assert csp_problems(page, rendered=True) == []
+
+    def test_spending_tiles_say_spending_next_to_income(self, client, cat, earnings):
+        """ux-4: the tiles that hold all spending say so, so next to the Income and Net tiles
+        (on a phone they pair up two by two: Net beside the month so far) none reads as income
+        or net. One category's view names its category instead."""
+
+        def labels(page: str) -> dict[str, str]:
+            found = re.findall(r'id="(trend-[a-z-]+)">\s*<div class="stat__label">(.*?)</div>',
+                               page, re.S)  # fmt: skip
+            return {tile: text_of(label) for tile, label in found}
+
+        tiles = labels(client.get("/trends").text)
+        assert tiles == {
+            "trend-compare": "Spent in Oct 2026",
+            "trend-income": "Income in Oct 2026",
+            "trend-net": "Net in Oct 2026",
+            "trend-so-far": "Spent in Nov 2026 so far",
+            "trend-average": "Monthly spending average",
+            "trend-increase": "Biggest increase",  # its line names the category
+        }
+        ended = labels(client.get("/trends?through=2026-09").text)  # no month in progress
+        assert ended["trend-total"] == "Spent in these 11 months"
+        assert ended["trend-average"] == "Monthly spending average"
+        one = labels(client.get(f"/trends?category={cat('Groceries').id}").text)
+        assert one["trend-compare"] == "Groceries in Oct 2026"
+        assert (one["trend-so-far"], one["trend-average"]) == ("Nov 2026 so far", "Monthly average")
+
+    def test_the_income_and_spending_chart(self, client, earnings):
+        page = client.get("/trends").text
+        config = income_chart(page)
+        assert config["type"] == "bar" and "stacked" not in config
+        net, income, spent = config["data"]["datasets"]
+        # The net line is listed first so Chart.js draws it over the bars. It wears a neutral
+        # token, never a palette slot: every slot is some category's colour in the "Spending by
+        # month" chart below (cat-1 is Travel's), so a coloured line would look like one.
+        assert (net["type"], net["dashed"], net["color"]) == ("line", True, "muted")
+        below = {d["color"] for d in chart_config(page)["data"]["datasets"]}
+        assert net["color"] not in below and not net["color"].startswith("cat-")
+        assert net["label"] == "Net (income − spending)"
+        assert (income["label"], income["color"]) == ("Income", "cat-16")
+        assert (spent["label"], spent["color"]) == ("Spending", "accent")
+        assert "type" not in income and "type" not in spent
+        assert config["data"]["labels"][0] == "Dec 2025" and len(config["data"]["labels"]) == 12
+        assert income["data"][-2] == "2529.00" and spent["data"][-2] == "205.00"
+        assert net["data"][-2] == "2324.00" and income["data"][-1] == "0.00"
+        described = section(page, "trends-income-card")
+        assert "Oct 2026 $2,529.00 $205.00 +$2,324.00" in text_of(described)
+        assert page.index('id="trends-income-card"') < page.index('id="trends-chart-card"')
+
+    def test_the_monthly_income_statement(self, client, earnings):
+        page = client.get("/trends").text
+        grid = section(page, "trends-grid-card")
+        spending_total = text_of(row(grid, "grid-spending"))
+        assert spending_total.startswith("All spending $2,140 $191 $100") and (
+            spending_total.endswith("$205 $35")
+        )
+        assert "<tfoot>" in grid and "All spending" not in text_of(
+            re.search(r"<tfoot>.*?</tfoot>", grid, re.S).group(0)
+        )
+        heading = re.search(r'<th scope="rowgroup"[^>]*>Income</th>', grid)
+        assert heading
+        ids = re.findall(r'<tr id="grid-income-(\d+)"', grid)
+        assert ids == [str(earnings[k].id) for k in ("paycheck", "credits", "interest")]
+        paycheck = shown(row(grid, f"grid-income-{earnings['paycheck'].id}"))
+        assert paycheck.startswith("Paycheck $22,500 $2,045 $2,000") and (
+            paycheck.endswith("$2,500 $0")
+        )
+        credits = shown(row(grid, f"grid-income-{earnings['credits'].id}"))
+        assert credits.startswith("Credits & Rewards $25 $2 $0")  # its own line
+        total = shown(row(grid, "grid-income-total"))
+        assert total.startswith("All income $22,532 $2,048 $2,000") and total.endswith("$2,529 $0")
+        net = text_of(row(grid, "grid-net"))
+        assert net.startswith("Net income − spending +$20,392 +$1,857 +$1,900")
+        assert net.endswith("+$2,324 −$35")
+
+    def test_income_links_list_what_they_count(self, client, earnings):
+        page = client.get("/trends").text
+        links = income_links(page)
+        assert len(links) >= 20
+        hrefs = {href for href, _ in links}
+        october = [(h, f) for h, f in links if "from=2026-10-01" in h]
+        assert {f for _, f in october} >= {Decimal("2500"), Decimal("25"), Decimal("4"),
+                                           Decimal("2529")}  # fmt: skip
+        for href, figure in links:
+            listed = client.get(href).context["page"]
+            assert listed.pages == 1, href
+            # The list signs money in as Plaid does (negative): its Net is −figure, in cents.
+            assert abs(listed.sums.net + figure) < 1, (href, listed.sums.net, figure)
+        tile = re.search(r'<a class="stat" href="([^"]+)" id="trend-income">', page).group(1)
+        assert html.unescape(tile) in hrefs
+        assert client.get(html.unescape(tile)).context["page"].sums.net == Decimal("-2529.00")
+
+    def test_an_income_amounts_name_starts_with_what_it_shows(self, client, earnings):
+        """WCAG 2.5.3 (Label in Name): the grid shows whole dollars, so a link's accessible
+        name starts with that visible amount; what it is and where it leads follow for screen
+        readers only, never an aria-label naming a different (cents) figure."""
+        page = client.get("/trends").text
+        anchors = re.findall(r'<a class="trends-income"[^>]*>.*?</a>', page, re.S)
+        assert len(anchors) >= 20
+        for anchor in anchors:
+            assert "aria-label" not in anchor, anchor
+            visible = re.search(r'<span class="amount[^"]*">([^<]*)</span>', anchor).group(1)
+            name = text_of(anchor)
+            assert name.startswith(visible + " ") and name.endswith(": see the transactions")
+            extra = re.search(r'<span class="sr-only">([^<]*)</span>', anchor).group(1)
+            assert visible not in extra  # the rest isn't shown, so it's for screen readers
+        names = {text_of(anchor) for anchor in anchors}
+        assert "$2,500 from Paycheck in Oct 2026: see the transactions" in names
+        assert "$2,529 of income in Oct 2026: see the transactions" in names
+
+    def test_one_category_stays_spending_only(self, client, cat, earnings):
+        page = client.get(f"/trends?category={cat('Groceries').id}").text
+        assert "income-switch" in page  # the choice is still offered
+        assert "trends-income-card" not in page and 'id="trend-income"' not in page
+        assert '<div class="grid grid--4" id="trends-kpis">' in page
+
+    def test_one_category_says_where_income_shows(self, client, db, cat, earnings):
+        """The switch is offered in one category's view too, so with it on the view says
+        that income and net show with all categories (and links there), on the page and to
+        screen readers; nothing to say with the switch off or with all categories."""
+        groceries = cat("Groceries")
+        page = client.get(f"/trends?months=24&through=2026-10&category={groceries.id}").text
+        note = re.search(r'<p[^>]*id="trends-income-elsewhere"[^>]*>.*?</p>', page, re.S)
+        assert note, "no note"
+        assert note.group(0).endswith(
+            'Income and net show with <a href="/trends?months=24&amp;through=2026-10">'
+            "All categories</a>.</p>"
+        )
+        assert page.index('id="trends-category-heading"') < note.start()
+        assert note.start() < page.index('id="trends-kpis"')
+        status = html.unescape(re.search(r' data-status="([^"]*)"', page).group(1))
+        assert status.endswith(", Groceries; income and net show with all categories.")
+        assert csp_problems(page, rendered=True) == []
+        assert 'id="trends-income-elsewhere"' not in client.get("/trends").text
+
+        # Switched off in place, the view has nothing to explain; switched on, it says it again.
+        filters = {"months": "24", "through": "2026-10", "category": str(groceries.id)}
+        off = client.post("/trends/show-income", data=filters, headers=HTMX).text
+        assert "Income is hidden on the Dashboard and Trends." in off
+        assert 'id="trends-income-elsewhere"' not in off
+        status = html.unescape(re.search(r' data-status="([^"]*)"', off).group(1))
+        assert status.endswith(", Groceries.")
+        assert (
+            'id="trends-income-elsewhere"'
+            not in client.get(f"/trends?category={groceries.id}").text
+        )
+        on = client.post(
+            "/trends/show-income", data={"show_income": "1", **filters}, headers=HTMX
+        ).text
+        assert "Income is shown on the Dashboard and Trends." in on
+        assert 'id="trends-income-elsewhere"' in on and "trends-income-card" not in on
+
+    def test_card_credits_only_until_a_bank_account_is_linked(self, client, db, card_credits):
+        """With no bank account, the only income is card credits, so Net is close to minus
+        all spending: the Net tile and the income note say why, and link to Connection."""
+        page = client.get("/trends").text
+        text = tiles(page)
+        assert "Net in Oct 2026 −$180 average" in text
+        assert f"over 11 complete months {CARDS_ONLY_HINT} Spent in Nov 2026 so far" in text
+        net = re.search(r'id="trend-net".*?</p>', page, re.S).group(0)
+        assert '<a href="/connection">link a bank account</a>' in net
+        note = text_of(re.search(r'<p[^>]*id="trends-income-note".*?</p>', page, re.S).group(0))
+        assert note.endswith(f"neither. {CARDS_ONLY_HINT}")
+        assert csp_problems(page, rendered=True) == []
+
+    @pytest.mark.parametrize("hidden", [False, True])
+    def test_no_card_credit_hint_once_a_bank_account_exists(
+        self, client, db, card_credits, checking, hidden
+    ):
+        """A bank account ends the hint, even a hidden one: its money still counts."""
+        checking.is_hidden = hidden
+        db.flush()
+        page = client.get("/trends").text
+        assert 'id="trend-net"' in page and "Only card credits" not in page
+
+    def test_switching_off_in_place_keeps_the_filters(self, client, db, earnings):
+        response = client.post(
+            "/trends/show-income",
+            data={"months": "24", "through": "2026-09", "category": ""},
+            headers=HTMX,
+        )
+        assert response.status_code == 200
+        assert response.template.name == "trends/_results.html"
+        t = response.context["t"]
+        assert (t.span, t.through.start) == (24, day("2026-09-01")) and t.income is None
+        fragment = response.text
+        assert "trends-income-card" not in fragment and 'id="grid-income' not in fragment
+        assert "Income is hidden on the Dashboard and Trends." in fragment
+        # Announced like a filter change: what the results now show (from the history's start).
+        status = re.search(r' data-status="([^"]*)"', fragment).group(1)
+        assert html.unescape(status) == "Trends for Nov 2025 – Sep 2026, all categories."
+        assert csp_problems(fragment, rendered=True) == []
+        from budgetapp.models import get_app_settings
+
+        assert get_app_settings(db).show_income is False
+        response = client.post(
+            "/trends/show-income", data={"show_income": "1", "months": "12"}, headers=HTMX
+        )
+        assert "trends-income-card" in response.text
+        assert "Income is shown on the Dashboard and Trends." in response.text
+        assert ", all categories, with income and net." in html.unescape(response.text)
+
+    @pytest.mark.parametrize(
+        ("next_url", "location"),
+        [
+            ("/trends?months=24&through=2026-10", "/trends?months=24&through=2026-10"),
+            ("/trends", "/trends"),
+            ("https://evil.example/trends", "/trends"),
+            ("//evil.example/trends", "/trends"),
+            ("/transactions", "/trends"),
+            ("/trendsetter", "/trends"),
+            ("", "/trends"),
+        ],
+    )
+    def test_without_javascript_a_plain_post_returns_to_the_page(
+        self, client, earnings, next_url, location
+    ):
+        response = client.post(
+            "/trends/show-income", data={"next": next_url}, follow_redirects=False
+        )
+        assert response.status_code == 303 and response.headers["location"] == location
+
+    def test_the_largest_source_when_there_is_no_month_to_compare(self, client, db, checking):
+        paycheck = income_category(db, "Paycheck")
+        make_transaction(db, checking, amount="-1000.00", category=paycheck, date="2026-10-15")
+        make_transaction(db, checking, amount="-3.00", category=income_category(db, "Interest"),
+                         date="2026-10-31")  # fmt: skip
+        text = tiles(client.get("/trends").text)
+        assert "Income in Oct 2026 $1,003 largest: Paycheck, $1,000" in text
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {"months": "abc", "through": "never", "category": ""},
+            {"months": "36", "through": "2999-01"},
+            {"category": "-3"},
+            {},
+        ],
+    )
+    def test_odd_filters_fall_back_like_the_page(self, client, earnings, data):
+        response = client.post(
+            "/trends/show-income", data={"show_income": "1", **data}, headers=HTMX
+        )
+        assert response.status_code == 200
+        t = response.context["t"]
+        assert t.through.start == day("2026-11-01") and t.span in (12, 36)
+        bad_category = data.get("category", "") != ""
+        assert ('id="trends-category-notice"' in response.text) == bad_category
+        assert csp_problems(response.text, rendered=True) == []
+
+    def test_income_without_spending(self, client, db, checking):
+        paycheck = income_category(db, "Paycheck")
+        make_transaction(db, checking, amount="-1000.00", category=paycheck, date="2026-10-15")
+        page = client.get("/trends").text
+        assert "Income in Oct 2026 $1,000" in tiles(page)
+        grid = section(page, "trends-grid-card")
+        assert "All income $1,000" in shown(row(grid, "grid-income-total"))
+        assert csp_problems(page, rendered=True) == []
+
+    def test_income_starts_with_the_bank_history(self, client, db, cat, spend, checking):
+        """ux-3: the card's history starts in January, the bank's (where paychecks arrive) on
+        Jun 15. Income isn't known before it, so January to May show "—" for income and net
+        (not $0 and −all spending, which read as losses), their card credits aren't listed,
+        the net average counts the months the bank history covers, and a note says why."""
+        paycheck = income_category(db, "Paycheck")
+        for month in range(1, 11):
+            spend(cat("Groceries"), "100.00", f"2026-{month:02d}-10")
+        spend(cat("Credits & Rewards"), "-25.00", "2026-03-12")  # before the bank's history
+        for month in range(6, 11):
+            make_transaction(db, checking, amount="-2000.00", category=paycheck,
+                             date=f"2026-{month:02d}-15")  # fmt: skip
+        page = client.get("/trends").text
+        grid = section(page, "trends-grid-card")
+        assert shown(row(grid, "grid-income-total")) == (
+            "All income $10,000 $2,000 — — — — — $2,000 $2,000 $2,000 $2,000 $2,000 $0"
+        )
+        assert text_of(row(grid, "grid-net")) == (
+            "Net income − spending +$9,500 +$1,900 — — — — — +$1,900 +$1,900 +$1,900 +$1,900 "
+            "+$1,900 $0"
+        )
+        assert re.findall(r'<tr id="grid-income-(\d+)"', grid) == [str(paycheck.id)]
+        assert text_of(row(grid, "grid-spending")).startswith("All spending $1,000 $100 $100")
+        text = tiles(page)
+        assert "Net in Oct 2026 +$1,900 average +$1,900 over 4 complete months" in text
+        assert "Spent in Oct 2026 $100" in text
+        note = re.search(r'<p[^>]*id="trends-income-start"[^>]*>(.*?)</p>', page, re.S)
+        assert note and text_of(note.group(1)) == (
+            "Your bank history starts on Jun 15, 2026, so income and net start in Jun 2026 (a "
+            "partial month): earlier months have no income data."
+        )
+        card = section(page, "trends-income-card")
+        assert card.index('id="trends-income-start"') < card.index('id="trends-income-chart')
+        described = text_of(card)
+        assert "May 2026 no income data $100.00 no income data" in described
+        assert "Jun 2026 $2,000.00 $100.00 +$1,900.00" in described
+        config = income_chart(page)
+        net, income, _spent = config["data"]["datasets"]
+        assert income["data"][:6] == [None] * 5 + ["2000.00"]
+        assert net["data"][:6] == [None] * 5 + ["1900.00"]
+        assert csp_problems(page, rendered=True) == []
+
+    def test_income_waits_for_the_bank_history(self, client, db, card_credits, checking):
+        """A bank account is linked but none of its transactions has arrived: no month has
+        income data yet, so the tiles and the grid show "—" and the note says so."""
+        page = client.get("/trends").text
+        text = tiles(page)
+        assert "Income in Oct 2026 — no bank history for this month yet" in text
+        assert "Net in Oct 2026 — income − all spending" in text
+        note = re.search(r'<p[^>]*id="trends-income-start"[^>]*>(.*?)</p>', page, re.S)
+        assert note and text_of(note.group(1)) == (
+            "Income and net start when your bank account’s transactions arrive."
+        )
+        grid = section(page, "trends-grid-card")
+        assert shown(row(grid, "grid-income-total")).startswith("All income — — —")
+        assert csp_problems(page, rendered=True) == []
+
+    def test_no_income_note_when_the_bank_history_covers_every_month(self, client, earnings):
+        assert 'id="trends-income-start"' not in client.get("/trends").text
+
+    def test_the_first_month_of_history_shows_this_months_income(self, client, db, checking):
+        paycheck = income_category(db, "Paycheck")
+        make_transaction(db, checking, amount="-1000.00", category=paycheck, date="2026-11-02")
+        text = tiles(client.get("/trends").text)
+        assert "Income in Nov 2026 so far $1,000 all from Paycheck" in text
+        assert "Net in Nov 2026 so far +$1,000 income − all spending" in text

@@ -1,4 +1,4 @@
-"""Demo databases: ``budgetapp_test_demo_<NAME>`` filled with realistic, made-up card data.
+"""Demo databases: ``budgetapp_test_demo_<NAME>`` filled with realistic, made-up card and bank data.
 
 A demo database lives in the dedicated cluster next to the test databases and is reached the same
 way: as the non-superuser ``budgetapp_test`` over the private socket (peer authentication), with
@@ -59,7 +59,8 @@ from budgetapp.models import (
     TransactionTombstone,
 )
 from budgetapp.periods import Period, month_of, previous_period
-from budgetapp.services.spending import period_spending
+from budgetapp.services.accounts import BANK
+from budgetapp.services.spending import period_income, period_spending
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +125,20 @@ class DemoSummary:
     month_label: str
     month_spending: tuple[CategoryLine, ...]
     month_total: Decimal
+    #: Rows on Harbor Bank's checking and savings accounts (MON-5).
+    bank_transactions: int = 0
+    #: This month's income per income category, positive (``spending.period_income``, W3-PLAN
+    #: C4: the spending figure's date basis and pending setting).
+    month_income: tuple[tuple[str, Decimal], ...] = ()
+
+    @property
+    def month_income_total(self) -> Decimal:
+        return sum((amount for _name, amount in self.month_income), Decimal("0.00"))
+
+    @property
+    def month_net(self) -> Decimal:
+        """Income − spending this month (positive: money kept)."""
+        return self.month_income_total - self.month_total
 
     def lines(self) -> list[str]:
         """A short human report (the ``demo create`` output)."""
@@ -138,6 +153,8 @@ class DemoSummary:
             f"  {t['split']} split, {t['user_edited']} edited by the user, "
             f"{t['needs_review']} needs review; statements {self.statements[0]:%b %Y} – "
             f"{self.statements[1]:%b %Y}.",
+            f"  {self.bank_transactions:,} of them on {cat.BANK_INSTITUTION_NAME} checking and "
+            "savings: paychecks, rent, transfers, savings interest and the card's payments.",
             "  Rows per table: "
             + ", ".join(f"{table} {count:,}" for table, count in self.counts.items()),
             f"This month ({self.month_label}), spending by category (services.spending):",
@@ -153,6 +170,14 @@ class DemoSummary:
                     budget += f"  (incl. {_money(line.carry_in)} rolled over)"
             out.append(f"  {line.name:<{width}}  {_money(line.spent):>10}{budget}")
         out.append(f"  {'Total':<{width}}  {_money(self.month_total):>10}")
+        sources = ", ".join(f"{name} {_money(amount)}" for name, amount in self.month_income)
+        out += [
+            f"Income, spending and net this month ({self.month_label}):",
+            f"  Income    {_money(self.month_income_total):>10}"
+            + (f"  ({sources})" if sources else ""),
+            f"  Spending  {_money(self.month_total):>10}",
+            f"  Net       {_money(self.month_net):>10}  (income − spending)",
+        ]
         return out
 
 
@@ -381,6 +406,9 @@ def _summary(
     lines += tuple(
         category_line(n, Decimal("0.00")) for n in budgets if n not in names and n in ids
     )
+    income = period_income(session, month)  # C4, next to period_spending (largest first)
+    month_income = tuple((row.name, row.amount) for row in income.categories if row.amount)
+    bank_ids = select(Account.id).where(Account.type == BANK)
     statements = sorted(s.closing_date for s in plan.statements)
     return DemoSummary(
         name=name,
@@ -397,4 +425,6 @@ def _summary(
         month_label=month.label,
         month_spending=lines,
         month_total=spending.total,
+        bank_transactions=count(t.account_id.in_(bank_ids)),
+        month_income=month_income,
     )

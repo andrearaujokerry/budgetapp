@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import itertools
+import json
 import os
 import plistlib
 import re
@@ -27,7 +28,8 @@ from budgetapp.config import load_settings, scratch_dir_for_tests
 from budgetapp.db import code_head
 from budgetapp.services import agents, doctor
 from budgetapp.services.doctor import FAIL, INFO, PASS, WARN
-from tests.factories import make_item
+from tests.bank_factories import make_bank_account
+from tests.factories import make_account, make_item
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 OLD_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
@@ -751,8 +753,16 @@ class TestWeb:
 class TestKeychainItems:
     def test_every_item_of_both_environments_is_read_and_never_shown(self, dr):
         store = RecordingStore(store_with(*ALL_ITEMS))
+        store.store.values[app_secrets.PRODUCTION_ITEM_INDEX] = '["item-a"]'
+        store.store.values["plaid.access_token.production.item-a"] = "value-of-a"
         report = doctor.run_checks(dr.context(store=store), [doctor.check_keychain_items])
-        assert set(store.reads) >= set(ALL_ITEMS) | {app_secrets.PRODUCTION_ACCESS_TOKEN}
+        assert set(store.reads) >= set(ALL_ITEMS) | {
+            app_secrets.LEGACY_PRODUCTION_TOKEN,
+            app_secrets.PRODUCTION_ITEM_INDEX,
+            app_secrets.SANDBOX_ITEM_INDEX,
+            "plaid.access_token.production.item-a",  # BANK-4: each Item's own token
+            app_secrets.link_in_progress_key(),  # final review 3 ops-1
+        }
         assert [c.status for c in report.checks] == [PASS]
         assert "value-of" not in doctor.format_report(report)
 
@@ -782,13 +792,13 @@ class TestKeychainItems:
             doctor.check_keychain_items, store=store_with("db.password.budgetapp_live")
         )
         by_title = {c.title: c.status for c in checks}
-        assert by_title["The production access token is missing, but Amex is linked"] == FAIL
+        assert by_title["The access token of American Express is missing"] == FAIL
         assert by_title["The Plaid client ID isn't saved"] == FAIL
         assert by_title["The Plaid Production secret isn't saved"] == FAIL
         assert by_title["The Plaid Sandbox secret isn't saved"] == INFO
 
     def test_a_saved_token_without_a_connection_suggests_reattaching(self, prod):
-        store = store_with(*ALL_ITEMS, app_secrets.PRODUCTION_ACCESS_TOKEN)
+        store = store_with(*ALL_ITEMS, app_secrets.LEGACY_PRODUCTION_TOKEN)
         checks = prod.run(doctor.check_keychain_items, store=store)
         assert any("Re-attach" in (c.fix or "") and c.status == WARN for c in checks)
 
@@ -798,6 +808,141 @@ class TestKeychainItems:
         checks = dr.run(doctor.check_keychain_items, store=store)
         missing = [c for c in checks if c.status == WARN]
         assert [c.title for c in missing] == ["The Sandbox access token (item-1) is missing"]
+
+
+class TestProductionTokens:
+    """BANK-4/BANK-7 (C6): one token per production Item; orphans; the v1 token's states."""
+
+    TARTAN = "plaid.access_token.production.item-tartan"
+    AMEX = "plaid.access_token.production.item-amex"
+
+    def store(self, *accounts: str, index: tuple[str, ...] = ()) -> app_secrets.MemoryStore:
+        store = store_with(*ALL_ITEMS, *accounts)
+        store.values[app_secrets.PRODUCTION_ITEM_INDEX] = json.dumps(list(index))
+        return store
+
+    def titles(self, prod, store) -> dict[str, str]:
+        recording = RecordingStore(store)
+        checks = prod.run(doctor.check_keychain_items, store=recording)
+        return {c.title: c.status for c in checks}
+
+    def test_each_connection_needs_its_own_token(self, prod, db):
+        make_item(db, plaid_item_id="item-amex")
+        make_item(db, plaid_item_id="item-tartan", institution_name="Tartan Bank")
+        titles = self.titles(prod, self.store(self.AMEX, index=("item-amex",)))
+        assert titles["The access token of Tartan Bank is missing"] == FAIL
+        assert "The access token of American Express is missing" not in titles
+        titles = self.titles(
+            prod, self.store(self.AMEX, self.TARTAN, index=("item-amex", "item-tartan"))
+        )
+        assert set(titles.values()) == {PASS}
+
+    def test_tokens_without_a_connection_are_reported(self, prod, db):
+        make_item(db, plaid_item_id="item-amex")
+        store = self.store(self.AMEX, self.TARTAN, index=("item-amex", "item-tartan"))
+        checks = prod.run(doctor.check_keychain_items, store=store)
+        (orphan,) = [c for c in checks if "no connection in the database" in c.title]
+        assert orphan.status == WARN and orphan.detail == "Items item-tartan"
+        assert "Re-attach" in orphan.fix
+
+    def test_a_connection_plaid_removed_is_no_longer_sent_to_re_attach(self, prod, db):
+        """Final review (ops-2): once Re-attach has found that Plaid removed it (ITEM_NOT_FOUND),
+        the page stops offering Re-attach for it, so doctor stops asking for it too."""
+        make_item(db, plaid_item_id="item-amex")
+        store = self.store(self.AMEX, self.TARTAN, index=("item-amex", "item-tartan"))
+        app_secrets.mark_production_item_removed(prod.settings, "item-tartan")
+        checks = prod.run(doctor.check_keychain_items, store=store)
+        assert not [c for c in checks if "no connection in the database" in c.title]
+        (gone,) = [c for c in checks if "removed at Plaid" in c.title]
+        assert gone.status == INFO and gone.detail == "Items item-tartan" and gone.fix is None
+
+    def test_a_v1_token_not_moved_yet(self, prod, db):
+        make_item(db, plaid_item_id="item-amex")
+        titles = self.titles(prod, self.store(app_secrets.LEGACY_PRODUCTION_TOKEN))
+        v1 = "The access token of American Express still uses its v1 Keychain name"
+        assert titles[v1] == WARN
+        assert "The access token of American Express is missing" not in titles
+
+    def test_a_v1_copy_left_after_the_move(self, prod, db):
+        """Safety review (major): the fix must be a command that really deletes it: every
+        production sync retries the delete (sync.access_token_for), and in Terminal macOS can
+        ask for the approval the agents can't."""
+        make_item(db, plaid_item_id="item-amex")
+        store = self.store(index=("item-amex",))
+        store.values[self.AMEX] = store.values[app_secrets.LEGACY_PRODUCTION_TOKEN] = "same"
+        checks = prod.run(doctor.check_keychain_items, store=RecordingStore(store))
+        (copy,) = [c for c in checks if "old copy" in c.title]
+        assert copy.status == INFO
+        assert copy.title == "An old copy of the access token of American Express is still saved"
+        assert copy.fix == (
+            "./run sync --env production in Terminal deletes it (click Always Allow if macOS asks)."
+        )
+
+    def test_a_v1_copy_beside_a_second_connection_is_still_only_a_copy(self, prod, db):
+        """Its value names its owner however many connections exist: never "can't tell which
+        connection it belongs to" (which would send the owner to Re-attach for nothing)."""
+        make_item(db, plaid_item_id="item-amex")
+        make_item(db, plaid_item_id="item-tartan", institution_name="Tartan Bank")
+        store = self.store(self.TARTAN, index=("item-amex", "item-tartan"))
+        store.values[self.AMEX] = store.values[app_secrets.LEGACY_PRODUCTION_TOKEN] = "same"
+        titles = self.titles(prod, store)
+        assert titles["An old copy of the access token of American Express is still saved"] == INFO
+        assert not any("can't tell" in title for title in titles)
+        assert set(titles.values()) == {INFO, PASS}
+
+    def test_a_v1_token_beside_the_one_items_own_token_is_never_called_dead(self, prod, db):
+        """The one Item has a different token of its own, so the v1 token may be the only
+        token of a connection the database lost: re-attach (Plaid says whose), never delete."""
+        make_item(db, plaid_item_id="item-amex")
+        store = self.store(self.AMEX, app_secrets.LEGACY_PRODUCTION_TOKEN, index=("item-amex",))
+        checks = prod.run(doctor.check_keychain_items, store=store)
+        (check,) = [c for c in checks if "v1 access token" in c.title]
+        assert check.status == WARN and "Re-attach" in check.fix
+        assert not any("delete" in (c.fix or "").casefold() for c in checks)
+
+    @pytest.mark.parametrize("count", [0, 2])
+    def test_a_v1_token_whose_connection_is_unknown(self, prod, db, count):
+        for n in range(count):
+            make_item(db, plaid_item_id=f"item-{n}")
+        store = self.store(app_secrets.LEGACY_PRODUCTION_TOKEN)
+        store.values.update({f"plaid.access_token.production.item-{n}": "x" for n in range(count)})
+        store.values[app_secrets.PRODUCTION_ITEM_INDEX] = json.dumps(
+            [f"item-{n}" for n in range(count)]
+        )
+        checks = prod.run(doctor.check_keychain_items, store=store)
+        (check,) = [c for c in checks if "v1 access token" in c.title]
+        assert check.status == WARN and "Re-attach" in check.fix
+
+    def test_doctor_never_moves_the_v1_token(self, prod, db):
+        """Doctor only reads: the move belongs to the next sync or link (RecordingStore raises on
+        any write or delete)."""
+        make_item(db, plaid_item_id="item-amex")
+        store = RecordingStore(self.store(app_secrets.LEGACY_PRODUCTION_TOKEN))
+        doctor.run_checks(prod.context(store=store), doctor.CHECKS)
+
+    def test_the_link_marker_is_read_so_always_allow_covers_it(self, prod, db):
+        """Final review 3 ops-1 (major): every production Connection page reads the
+        link-in-progress marker, which can outlive its link (a tab closed while Plaid's window was
+        open). After a brew upgrade of Python it needs one Always Allow like every other item, and
+        doctor is how the owner gives it. It exists only while a link is open, so absent or
+        present there is nothing to report; unreadable, it is a failure like any other item."""
+        marker = app_secrets.link_in_progress_key()
+        make_item(db, plaid_item_id="item-amex")
+        store = self.store(self.AMEX, index=("item-amex",))
+        recording = RecordingStore(store)
+        checks = prod.run(doctor.check_keychain_items, store=recording)
+        assert marker in recording.reads
+        assert [c.status for c in checks] == [PASS]
+        store.values[marker] = json.dumps(
+            {"created_at": "2026-10-01T10:00:00+00:00", "expires_at": "2026-10-01T14:00:00+00:00"}
+        )
+        assert [c.status for c in prod.run(doctor.check_keychain_items, store=store)] == [PASS]
+        store.fail_on[("get", marker)] = app_secrets.KeychainApprovalNeeded(marker, -25308)
+        checks = prod.run(doctor.check_keychain_items, store=store)
+        (problem,) = [c for c in checks if c.status != PASS]
+        assert problem.status == FAIL
+        assert problem.title == "macOS didn't allow reading the Plaid link-in-progress marker"
+        assert "Always Allow" in problem.fix
 
 
 class TestKeychainLock:
@@ -1086,7 +1231,7 @@ class TestConnection:
 
     def test_healthy(self, dr, db, freeze_today):
         freeze_today(now=NOW)
-        make_item(db, liabilities_status="ok")
+        make_account(db, make_item(db, liabilities_status="ok"))
         checks = dr.run(doctor.check_connection)
         assert [c.status for c in checks] == [PASS, PASS]
         assert checks[0].title.startswith("American Express consent is valid until")
@@ -1098,21 +1243,104 @@ class TestConnection:
         assert check.status == WARN and "(15 days left)" in check.title
         make_item(db, last_consented_at=NOW - dt.timedelta(days=400), liabilities_status="ok")
         expired = [c for c in dr.run(doctor.check_connection) if c.status == FAIL]
-        assert expired[0].title.startswith("American Express consent expired on")
+        # two Amex logins without accounts: the label tells them apart (UX review)
+        assert expired[0].title.startswith("American Express (login 2) consent expired on")
+        assert expired[0].fix == "Connection page → Renew consent on American Express (login 2)"
 
     def test_reconnect_errors_liabilities_and_staleness(self, dr, db, freeze_today):
         freeze_today(now=NOW)
-        make_item(
+        item = make_item(
             db,
             status="needs_reconnect",
             error_code="ITEM_LOGIN_REQUIRED",
             liabilities_status="not_consented",
             last_sync_success_at=NOW - dt.timedelta(hours=50),
         )
+        make_account(db, item)
         checks = {c.title: c.status for c in dr.run(doctor.check_connection)}
         assert checks["American Express needs you to reconnect"] == FAIL
-        assert checks["Liabilities wasn't consented (no statement balance or due date)"] == WARN
-        assert checks["No successful sync for 2 days"] == WARN
+        details = (
+            "American Express doesn't share statement details (no statement balance or due date)"
+        )
+        assert checks[details] == WARN
+        assert checks["No successful sync of American Express for 2 days"] == WARN
+
+    def test_a_bank_without_cards_has_no_statement_details_to_warn_about(
+        self, dr, db, freeze_today
+    ):
+        """BANK-6/BANK-7: no consent estimate and no Liabilities warning for a bank login."""
+        freeze_today(now=NOW)
+        bank = make_item(
+            db,
+            institution_id="ins_109511",
+            institution_name="Tartan Bank",
+            liabilities_status=None,
+            consented_products=["transactions"],
+            last_consented_at=NOW - dt.timedelta(days=400),
+        )
+        make_bank_account(db, bank, name="Checking")
+        checks = {c.title: c.status for c in dr.run(doctor.check_connection)}
+        assert checks == {
+            "Tartan Bank consent has no end date (Plaid reports none)": INFO,
+            "Statement details don't apply to Tartan Bank (no cards)": INFO,
+        }
+
+    def test_every_line_names_its_connection(self, dr, db, freeze_today):
+        """UX review: with several connections each line says which one it is about, and the
+        fixes name the button on that connection."""
+        freeze_today(now=NOW)
+        amex = make_item(
+            db,
+            liabilities_status="not_consented",
+            consented_products=["transactions"],
+            last_sync_success_at=NOW - dt.timedelta(hours=50),
+        )
+        make_account(db, amex)
+        houndstooth = make_item(
+            db,
+            institution_name="Houndstooth Bank",
+            institution_id="ins_109512",
+            liabilities_status="ok",
+            consent_expires_at=None,
+            last_sync_success_at=NOW - dt.timedelta(hours=1),
+        )
+        make_account(db, houndstooth, name="Cash Rewards", mask="5678")
+        checks = dr.run(doctor.check_connection)
+        assert all(
+            ("American Express" in c.title) != ("Houndstooth Bank" in c.title) for c in checks
+        )
+        by_title = {c.title: c for c in checks}
+        details = by_title[
+            "American Express doesn't share statement details (no statement balance or due date)"
+        ]
+        assert details.status == WARN
+        assert details.fix.startswith(
+            "Connection page → Grant access to statement details on American Express"
+        )
+        assert by_title["No successful sync of American Express for 2 days"].status == WARN
+        assert (
+            by_title["Statement details of Houndstooth Bank (balance, due date) are synced"].status
+            == PASS
+        )
+
+    def test_two_logins_at_one_bank_are_told_apart(self, dr, db, freeze_today):
+        freeze_today(now=NOW)
+        for name, mask, status in (
+            ("Travel Rewards", "1234", "healthy"),
+            ("Cash Rewards", "5678", None),
+        ):
+            values = {"status": "needs_reconnect", "error_code": "ITEM_LOGIN_REQUIRED"}
+            item = make_item(
+                db,
+                institution_name="Houndstooth Bank",
+                institution_id="ins_109512",
+                liabilities_status="ok",
+                **({} if status else values),
+            )
+            make_account(db, item, name=name, mask=mask)
+        (check,) = [c for c in dr.run(doctor.check_connection) if c.status == FAIL]
+        assert check.title == "Houndstooth Bank (Cash Rewards ··5678) needs you to reconnect"
+        assert check.fix == "Connection page → Reconnect on Houndstooth Bank (Cash Rewards ··5678)"
 
     def test_rejected_plaid_keys_point_to_setup(self, dr, db, freeze_today):
         """Final review ops-4: the fix said to click Sync now, which can't help."""
@@ -1121,6 +1349,65 @@ class TestConnection:
         (check,) = [c for c in dr.run(doctor.check_connection) if c.status == WARN]
         assert check.title == "The last sync of American Express failed (INVALID_API_KEYS)"
         assert check.fix.startswith("./run setup --keys-only")
+
+    @pytest.mark.parametrize(
+        ("code", "fix"),
+        [
+            (
+                "ACCESS_TOKEN_MISSING",
+                "Re-enter its saved token: ./run setup --env production --access-token, then "
+                "Connection page → Sync now",
+            ),
+            (
+                "KEYCHAIN_APPROVAL_NEEDED",
+                "Run ./run doctor in Terminal and click Always Allow when macOS asks, then "
+                "Connection page → Sync now",
+            ),
+            (
+                "INVALID_ACCESS_TOKEN",
+                "./run setup --keys-only with the client ID and Production secret of the Plaid "
+                "team that linked it, then Connection page → Sync now",
+            ),
+            (
+                "ITEM_NOT_FOUND",
+                "None in the app: Plaid removed this connection, so Reconnect can't repair it and "
+                "it can't sync again; the data already here stays (docs/reconnecting.md)",
+            ),
+            ("INSTITUTION_DOWN", "Connection page → Sync now; see the log if it repeats"),
+            ("INTERNAL", "Connection page → Sync now; see the log if it repeats"),
+        ],
+        ids=["missing-token", "keychain", "token-refused", "removed", "bank-down", "internal"],
+    )
+    def test_the_fix_of_a_failed_sync_depends_on_its_code(self, prod, db, freeze_today, code, fix):
+        """Final review 3 ops-5: every failed sync was sent to Sync now, which can't bring back a
+        missing token, approve Keychain access, correct the keys or restore a connection Plaid
+        removed (and for a missing token the Keychain section said otherwise for the same bank).
+        Sync now stays the fix for failures that clear up by themselves."""
+        freeze_today(now=NOW)
+        bank = make_item(
+            db,
+            institution_id="ins_109511",
+            institution_name="Tartan Bank",
+            consented_products=["transactions"],
+            liabilities_status=None,
+            status="error",
+            error_code=code,
+        )
+        make_bank_account(db, bank, name="Checking")
+        (check,) = [c for c in prod.run(doctor.check_connection) if c.status == WARN]
+        assert check.title == f"The last sync of Tartan Bank failed ({code})"
+        assert check.fix == fix
+
+    def test_in_the_sandbox_the_fixes_name_its_commands(self, dr, db, freeze_today):
+        freeze_today(now=NOW)
+        for code in ("ACCESS_TOKEN_MISSING", "INVALID_ACCESS_TOKEN"):
+            make_item(db, status="error", error_code=code, liabilities_status="ok")
+        fixes = [c.fix for c in dr.run(doctor.check_connection) if c.status == WARN]
+        assert fixes == [
+            "./run sandbox-link makes a new test connection",
+            "./run setup --keys-only with the client ID and Sandbox secret of the Plaid team "
+            "that linked it, then Connection page → Sync now",
+        ]
 
 
 # =========================================================================== the command

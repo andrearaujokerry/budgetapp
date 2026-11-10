@@ -2,8 +2,10 @@
 
 Shows the same preview as the Import page (new rows, rows held for review, rows that match a Plaid
 transaction, rows already imported, changed rows and errors), then imports unless ``--dry-run``.
-Without ``--account`` the file goes to the only linked credit-card account, else to the manual
-account "American Express (CSV)" (created when needed). The file is read into memory only.
+Without ``--account`` the file goes to your only linked American Express card; with no Amex card
+linked, to the manual account "American Express (CSV)" (created when needed). With more than one
+to choose from, it lists them: pick one with ``--account``. Bank accounts and other banks' cards
+never take an Amex file. The file is read into memory only.
 """
 
 from __future__ import annotations

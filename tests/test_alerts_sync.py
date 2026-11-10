@@ -23,7 +23,9 @@ from budgetapp.models import AlertEvent, PlaidItem
 from budgetapp.services import alerts, sync
 from budgetapp.services.events import PendingRaise, SyncOutcome
 from budgetapp.services.notify import NotifyResult, RecordingNotifier
+from tests.bank_factories import make_bank_account, make_bank_item
 from tests.factories import (
+    card_payments,
     get_category,
     make_account,
     make_budget,
@@ -113,7 +115,7 @@ def test_a_failed_sync_alerts_once_per_code_and_day(db, notifier, item):
     (sent,) = notifier.sent
     assert sent.title == "American Express sync failed"
     assert sent.message == (
-        "Amex isn't answering Plaid right now. The next sync will try again. "
+        "American Express isn't answering Plaid right now. The next sync will try again. "
         "Code: INSTITUTION_NOT_RESPONDING."
     )
     key = f"sync-error:{item.id}:INSTITUTION_NOT_RESPONDING:{today().isoformat()}"
@@ -161,9 +163,9 @@ def test_reconnect_alerts_once_per_occurrence(db, notifier, item):
     (sent,) = notifier.sent
     assert sent.title == "Reconnect American Express"
     assert sent.message == (
-        "Amex needs you to sign in again through Plaid (the consent expired or was revoked). "
-        "Reconnect fixes it and keeps this connection. Open the Connection page and click "
-        "Reconnect."
+        "American Express needs you to sign in again through Plaid (the consent expired or was "
+        "revoked). Reconnect fixes it and keeps this connection. Open the Connection page and "
+        "click Reconnect."
     )
     assert keys(db) == [f"reconnect:{item.id}:open"]
     at(NOW + DAY)  # still broken the next day: no daily nagging, and no "sync failed" either
@@ -201,7 +203,7 @@ def test_a_transient_error_does_not_end_the_reconnect_occurrence(db, notifier, i
 
 def test_consent_revoked_and_locked_items_say_so(db, notifier, item):
     evaluate(db, notifier, fail(item, "ITEM_LOCKED", reconnect=True))
-    assert notifier.sent[0].message.startswith("Amex didn't accept the sign-in.")
+    assert notifier.sent[0].message.startswith("American Express didn't accept the sign-in.")
 
 
 # --------------------------------------------------------------------------- ALR-2 stale
@@ -214,7 +216,7 @@ def test_stale_data_alerts_once_a_day(db, notifier):
     (sent,) = notifier.sent
     assert sent.title == "American Express data is out of date"
     assert sent.message == (
-        "No transactions have arrived since the card was linked 40 hours ago. Check the "
+        "No transactions have arrived since American Express was linked 40 hours ago. Check the "
         "Connection page; Sync now tries again."
     )
     assert keys(db) == [f"stale:{linked.id}:{today().isoformat()}"]
@@ -237,7 +239,7 @@ def test_a_failure_on_stale_data_sends_one_notification(db, notifier):
     last = (NOW - 3 * DAY).astimezone()
     when = f"{last:%b} {last.day} at {last.strftime('%I:%M %p').lstrip('0')}"
     assert sent.message == (
-        "Amex isn't answering Plaid right now. The next sync will try again. Code: "
+        "American Express isn't answering Plaid right now. The next sync will try again. Code: "
         f"INSTITUTION_DOWN. The last successful sync was 3 days ago ({when})."
     )
     stale = event(db, f"stale:{old.id}:{today().isoformat()}")
@@ -338,6 +340,63 @@ def test_no_consent_reminder_while_a_reconnect_is_needed(db, notifier, item):
     assert notifier.titles[-1] == "Renew your American Express connection"
 
 
+def test_a_bank_connection_names_its_bank_and_has_no_estimated_consent(db, notifier):
+    """BANK-6/BANK-7: connection alerts name the institution; only American Express gets the
+    12-month consent estimate, so a bank without a date from Plaid never gets a reminder."""
+    bank = make_item(
+        db,
+        institution_id="ins_109511",
+        institution_name="Tartan Bank",
+        last_sync_success_at=NOW - 2 * HOUR,
+        linked_at=NOW - 400 * DAY,
+        last_consented_at=NOW - 400 * DAY,
+    )
+    evaluate(db, notifier, fail(bank, "ITEM_LOGIN_REQUIRED", reconnect=True))
+    assert notifier.titles == ["Reconnect Tartan Bank"]
+    assert notifier.sent[0].message.startswith(
+        "Tartan Bank needs you to sign in again through Plaid"
+    )
+    evaluate(db, notifier, succeed(bank))
+    assert keys(db, "consent") == [] and notifier.titles == ["Reconnect Tartan Bank"]
+    bank.consent_expires_at = NOW + 10 * DAY  # Plaid sends a date: it counts
+    evaluate(db, notifier, succeed(bank))
+    assert notifier.titles[-1] == "Renew your Tartan Bank connection"
+
+
+def test_a_connection_without_a_name_stays_neutral(db, notifier):
+    nameless = make_item(
+        db, institution_name=None, institution_id=None, last_sync_success_at=NOW - 2 * HOUR
+    )
+    evaluate(db, notifier, fail(nameless, "INSTITUTION_DOWN"))
+    assert notifier.titles == ["Your bank sync failed"]
+    assert notifier.sent[0].message.startswith("The bank isn't answering Plaid right now.")
+    evaluate(db, notifier, fail(nameless, "ITEM_LOGIN_REQUIRED", reconnect=True))
+    assert notifier.titles[-1] == "Reconnect your bank"
+    nameless.status, nameless.error_code = "healthy", None
+    nameless.consent_expires_at = NOW + 5 * DAY
+    evaluate(db, notifier, succeed(nameless))
+    assert notifier.titles[-1] == "Renew your bank connection"
+    assert notifier.sent[-1].message.startswith("Plaid's access to your bank ends on")
+
+
+def test_a_bank_reconnect_alert_blames_no_consent_and_names_the_login(db, notifier):
+    """UX review: at a bank, ITEM_LOGIN_REQUIRED often follows a password change (only American
+    Express's text blames the consent), and two logins at one bank are told apart."""
+    for name, mask in (("Travel Rewards", "1234"), ("Cash Rewards", "5678")):
+        houndstooth = make_item(
+            db,
+            institution_id="ins_109512",
+            institution_name="Houndstooth Bank",
+            last_sync_success_at=NOW - 2 * HOUR,
+        )
+        make_account(db, houndstooth, name=name, mask=mask)
+    evaluate(db, notifier, fail(houndstooth, "ITEM_LOGIN_REQUIRED", reconnect=True))
+    assert notifier.titles == ["Reconnect Houndstooth Bank (Cash Rewards ··5678)"]
+    message = notifier.sent[0].message
+    assert message.startswith("Houndstooth Bank (Cash Rewards ··5678) needs you to sign in again")
+    assert "password change" in message and "the consent expired or was revoked" not in message
+
+
 # --------------------------------------------------------------------------- ALR-3
 
 
@@ -388,6 +447,52 @@ def test_only_charges_over_the_amount(db, notifier, item, card, threshold):
     ]
     evaluate(db, notifier, new_charges(item, *rows))
     assert notifier.titles == ["$500.01 at JUST OVER"]
+
+
+def test_only_spending_raises_a_large_charge(db, notifier, threshold):
+    """MON-2 / W3-PLAN C5: on a bank account (and on a card), a row alerts only when its category
+    is spending after categorization: paying the card from checking, moving money to savings and
+    a paycheck never do; rent and an ATM withdrawal do."""
+    bank = make_bank_item(db, last_sync_success_at=NOW - 2 * HOUR, linked_at=NOW - 30 * DAY)
+    checking = make_bank_account(db, bank)
+    rows = [
+        charge(db, checking, "2512.37", category=card_payments(db), name="AMEX EPAYMENT"),
+        charge(db, checking, "800.00", category=get_category(db, "Transfers"), name="TO SAVINGS"),
+        charge(db, checking, "-3412.18", category=get_category(db, "Paycheck"), name="PAYROLL"),
+        charge(
+            db, checking, "2450.00", category=get_category(db, "Home"), merchant_name="Landlord"
+        ),
+        charge(db, checking, "600.00", category=get_category(db, "Cash & ATM"), name="ATM 24TH ST"),
+    ]
+    evaluate(db, notifier, new_charges(bank, *rows))
+    assert notifier.titles == ["$2,450.00 at Landlord", "$600.00 at ATM 24TH ST"]
+    assert {e.item_id for e in db.scalars(select(AlertEvent))} == {bank.id}
+
+
+def test_a_large_charge_in_a_category_that_isnt_spending_never_alerts(
+    db, notifier, item, card, threshold
+):
+    credits = get_category(db, "Credits & Rewards")
+    moved = charge(db, card, "900.00", category=card_payments(db), name="PAYMENT RETURNED")
+    income = charge(db, card, "700.00", category=credits, name="CREDIT REVERSED")
+    spent = charge(db, card, "650.00", merchant_name="Delta")
+    evaluate(db, notifier, new_charges(item, moved, income, spent))
+    assert notifier.titles == ["$650.00 at Delta"]
+    hold = charge(db, card, "640.00", pending=True, category=card_payments(db), name="PAYMENT")
+    evaluate(db, notifier, raised(item, hold, hold.plaid_transaction_id, "300.00"))
+    assert notifier.titles == ["$650.00 at Delta"]
+
+
+def test_the_summary_counts_only_spending(db, notifier, threshold):
+    bank = make_bank_item(db, last_sync_success_at=NOW - 2 * HOUR, linked_at=NOW - 30 * DAY)
+    checking = make_bank_account(db, bank)
+    spent = [charge(db, checking, f"{600 + i}.00", merchant_name=f"Shop {i}") for i in range(3)]
+    moved = [
+        charge(db, checking, "1500.00", category=get_category(db, "Transfers"), name=f"XFER {i}")
+        for i in range(3)
+    ]
+    evaluate(db, notifier, new_charges(bank, *moved, *spent))
+    assert notifier.titles == ["$600.00 at Shop 0", "$601.00 at Shop 1", "$602.00 at Shop 2"]
 
 
 def test_a_pending_charge_says_so(db, notifier, item, card, threshold):

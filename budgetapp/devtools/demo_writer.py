@@ -6,6 +6,8 @@ refunds are categorized last, once the purchases they look back at are stored. U
 (categories, notes, tags, splits) are applied the way the app stores them, and the one split whose
 amount Plaid later changed goes through ``userstate.fit_splits_to_amount`` (rescaled, flagged
 ``needs_review``). Budget alerts for the current period come from ``services.spending``.
+Harbor Bank (``demo_bank``) is a second Item with a checking and a savings account; its rows go
+through the same Categorizer, which reads their accounts' type (W3-PLAN C3).
 The caller owns the transaction.
 """
 
@@ -20,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from budgetapp.db import ledger_lock
 from budgetapp.devtools import demo_catalog as cat
-from budgetapp.devtools.demo_plan import BudgetPlan, Plan, Row, entity_id, local_time
+from budgetapp.devtools.demo_plan import BudgetPlan, Plan, Row, SyncRunPlan, entity_id, local_time
 from budgetapp.models import (
     Account,
     AlertEvent,
@@ -43,6 +45,11 @@ from budgetapp.services.alerts import budget_key
 from budgetapp.services.categorize import Categorizer, apply_decision
 from budgetapp.services.spending import period_spending
 
+#: Categories whose money is never spending (income and transfers).
+NOT_SPENDING = frozenset(
+    {"Card Payments", "Credits & Rewards", "Paycheck", "Interest", "Other Income", "Transfers"}
+)
+
 
 def write_plan(session: Session, plan: Plan) -> None:
     """Store ``plan`` (flushes; the caller commits)."""
@@ -55,14 +62,27 @@ def write_plan(session: Session, plan: Plan) -> None:
     account = Account(item_id=item.id, **plan.account)
     session.add(account)
     session.flush()
+    account_ids = {"card": account.id}
+    bank_item = None
+    if plan.bank_item:
+        bank_item = PlaidItem(**plan.bank_item)
+        session.add(bank_item)
+        session.flush()
+        for key, values in plan.bank_accounts.items():
+            bank_account = Account(item_id=bank_item.id, **values)
+            session.add(bank_account)
+            session.flush()
+            account_ids[key] = bank_account.id
     csv_import = CsvImport(account_id=account.id, **plan.csv_import)
     session.add(csv_import)
     session.flush()
-    stored = _transactions(session, plan, categories, account.id, csv_import.id)
+    stored = _transactions(session, plan, categories, account_ids, csv_import.id)
     _link_rule_origin(rules, plan, stored)
     _statements(session, plan, account.id)
     _budgets(session, plan, categories)
-    _sync_runs(session, plan, item.id)
+    _sync_runs(session, plan.sync_runs, item.id)
+    if bank_item is not None:
+        _sync_runs(session, plan.bank_sync_runs, bank_item.id)
     _alerts(session, plan, item.id, categories)
     for key in plan.recurring_ignored:
         session.add(RecurringOverride(merchant_key=entity_id(key), status="ignored"))
@@ -77,8 +97,8 @@ def write_plan(session: Session, plan: Plan) -> None:
 
 
 def _categories(session: Session) -> dict[str, Category]:
-    name, color, icon = cat.CUSTOM_CATEGORY
-    session.add(Category(name=name, kind="expense", color=color, icon=icon, sort_order=145))
+    for name, color, icon, order in cat.CUSTOM_CATEGORIES:
+        session.add(Category(name=name, kind="expense", color=color, icon=icon, sort_order=order))
     session.flush()
     return {c.name: c for c in session.scalars(select(Category))}
 
@@ -178,14 +198,14 @@ def _transactions(
     session: Session,
     plan: Plan,
     categories: dict[str, Category],
-    account_id: int,
+    account_ids: dict[str, int],
     csv_import_id: int,
 ) -> dict[int, Transaction]:
     categorizer = Categorizer.load(session)
     stored: dict[int, Transaction] = {}
     refunds: list[tuple[Row, Transaction]] = []
-    for row in plan.rows:
-        txn = Transaction(**_columns(row, account_id, csv_import_id))
+    for row in [*plan.rows, *plan.bank_rows]:
+        txn = Transaction(**_columns(row, account_ids[row.account], csv_import_id))
         stored[row.seq] = txn
         if row.kind == "refund":
             refunds.append((row, txn))
@@ -266,8 +286,8 @@ def _budgets(session: Session, plan: Plan, categories: dict[str, Category]) -> N
         )
 
 
-def _sync_runs(session: Session, plan: Plan, item_id: int) -> None:
-    for run in plan.sync_runs:
+def _sync_runs(session: Session, runs: list[SyncRunPlan], item_id: int) -> None:
+    for run in runs:
         session.add(
             SyncRun(
                 item_id=item_id,
@@ -421,10 +441,10 @@ def budget_alerts(
 
 def _crossing_time(plan: Plan, category: str | None, period: Period, level: Decimal) -> dt.datetime:
     """Roughly when spending reached ``level``: the evening sync after the crossing charge."""
-    skip = {"Card Payments", "Credits & Rewards", *cat.ANNUAL_BUDGETS}
+    skip = {*NOT_SPENDING, *cat.ANNUAL_BUDGETS}
     total = ZERO
     day = plan.today
-    for row in sorted(plan.rows, key=lambda r: (r.auth, r.seq)):
+    for row in sorted([*plan.rows, *plan.bank_rows], key=lambda r: (r.auth, r.seq)):
         name = row.user_category or row.category
         counts = name == category if category is not None else name not in skip
         if counts and not row.suspect and period.start <= row.auth <= period.end:

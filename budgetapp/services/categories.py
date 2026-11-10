@@ -19,9 +19,13 @@
   codes are grouped by their primary code, Amex CSV ``Group-Subgroup`` values by their group;
   each row has its transaction count and its own mapping, or the one it falls back to in the
   order categorization tries them (ARCHITECTURE §5: for credits ``sub|credit``, ``group|credit``,
-  ``sub``, ``group``; otherwise ``sub``, ``group``; then Uncategorized). ``|credit`` keys are
-  shown as such, and a code's credits that reach a ``|credit`` mapping count on the code's own
-  credit row, so every row shows where its transactions really go. External categories found
+  ``sub``, ``group``; otherwise ``sub``, ``group``; then Uncategorized; on a bank account
+  ``sub|bank`` and ``group|bank`` come first, ARCHITECTURE §6). ``|credit`` and ``|bank`` keys
+  are shown as such, and a code's credits that reach a ``|credit`` mapping count on the code's
+  own credit row, and its bank-account rows that reach a ``|bank`` mapping on the code's own bank
+  row, so every row shows where its transactions really go (money in to a bank account that Plaid
+  didn't classify counts on Income → Other's bank row, where it goes: ``categorize.MONEY_IN_KEYS``).
+  External categories found
   in transactions but not mapped (for example Amex subgroups nobody has verified, such as
   ``Other-Charities``) are listed so they can be mapped, and any row's own mapping can be
   removed again. A mapping change affects new transactions; past ones change only when
@@ -52,6 +56,7 @@ from budgetapp.db import ledger_lock
 from budgetapp.models import (
     CATEGORY_KINDS,
     MAPPING_SOURCES,
+    Account,
     AlertEvent,
     Budget,
     Category,
@@ -65,11 +70,15 @@ from budgetapp.models import (
 from budgetapp.money import ZERO
 from budgetapp.periods import Period
 from budgetapp.services import budgets, spending, userstate
+from budgetapp.services.accounts import BANK
 from budgetapp.services.categorize import (
+    BANK_KEY_SUFFIX,
     CREDIT_KEY_SUFFIX,
+    MONEY_IN_KEYS,
     Categorizer,
     amex_category_keys,
     looks_like_fee,
+    money_in_keys,
 )
 from budgetapp.textutil import strip_control_chars
 
@@ -81,8 +90,11 @@ KIND_LABELS: dict[str, str] = {
 }
 KIND_HELP: dict[str, str] = {
     "expense": "Counts toward budgets and spending totals. Refunds in it reduce its spending.",
-    "income": "Not spending: cash back, rewards and other credits.",
-    "transfer": "Not spending: paying the card and moving money.",
+    "income": "Not spending: paychecks, interest, cash back and other money coming in.",
+    "transfer": (
+        "Not spending or income: card payments, money moved between your accounts and anything "
+        "else Plaid files as a transfer."
+    ),
 }
 #: The theme-aware palette slots (``components/README.md`` §3.3) and the neutral grey.
 PALETTE: tuple[str, ...] = tuple(f"cat-{n}" for n in range(1, 17))
@@ -828,11 +840,11 @@ class MappingError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class MappingRow:
-    """One external category (or its ``|credit`` variant) and where it goes."""
+    """One external category (or its ``|credit`` or ``|bank`` variant) and where it goes."""
 
     source: str
     key: str  #: the mapping key (as stored, or as found in transactions when not mapped)
-    code: str  #: the key without the ``|credit`` suffix (what Plaid or Amex calls it)
+    code: str  #: the key without its ``|credit`` or ``|bank`` suffix (Plaid's or Amex's name)
     label: str
     group: str
     is_group: bool  #: the group's own key (the fallback for its other codes)
@@ -846,6 +858,8 @@ class MappingRow:
     transaction_count: int
     #: The key ``fallback_category_id`` comes from (``None`` = Uncategorized).
     fallback_key: str | None = None
+    #: A ``|bank`` key: tried first for rows on a bank account (checking, savings).
+    for_banks: bool = False
 
     @property
     def is_mapped(self) -> bool:
@@ -858,14 +872,15 @@ class MappingRow:
     @property
     def fallback_from(self) -> str | None:
         """Where the fallback comes from: ``charges`` (the same code's own mapping, for its
-        credits), ``group`` (the group's mapping) or ``group_credits`` (the group's credit
-        mapping); ``None`` = nothing (Uncategorized)."""
+        credits), ``cards`` (the same code's own mapping, for its bank-account rows), ``group``
+        (the group's mapping, or for a bank row the group's bank mapping) or ``group_credits``
+        (the group's credit mapping); ``None`` = nothing (Uncategorized)."""
         if self.fallback_key is None:
             return None
-        base, credit = _split_credit(self.fallback_key)
+        base, suffix = _split(self.fallback_key)
         if _canon(self.source, base) == _canon(self.source, self.code):
-            return "charges"
-        return "group_credits" if credit else "group"
+            return "cards" if self.for_banks else "charges"
+        return "group_credits" if suffix == CREDIT_KEY_SUFFIX else "group"
 
     @property
     def slug(self) -> str:
@@ -934,10 +949,12 @@ def _canon(source: str, key: str) -> str:
     return key if source == "plaid_pfc" else key.casefold()
 
 
-def _split_credit(key: str) -> tuple[str, bool]:
-    if key.endswith(CREDIT_KEY_SUFFIX):
-        return key[: -len(CREDIT_KEY_SUFFIX)], True
-    return key, False
+def _split(key: str) -> tuple[str, str]:
+    """``(code, suffix)``: the suffix is ``"|credit"``, ``"|bank"`` or ``""``."""
+    for suffix in (CREDIT_KEY_SUFFIX, BANK_KEY_SUFFIX):
+        if key.endswith(suffix):
+            return key[: -len(suffix)], suffix
+    return key, ""
 
 
 def _humanize(code: str) -> str:
@@ -989,19 +1006,29 @@ def _raw_keys(source: str, row: Any) -> tuple[str, ...]:
     return tuple(k for k in (row.pfc_detailed, row.pfc_primary) if k)
 
 
-def _lookup_order(keys: tuple[str, ...], credit: bool) -> list[str]:
+def _lookup_order(keys: tuple[str, ...], credit: bool, bank: bool = False) -> list[str]:
     """The keys categorization tries, in order: for a credit (a negative amount that isn't a fee
-    reversal) the ``|credit`` keys first — ``sub|credit, group|credit, sub, group`` (§5)."""
+    reversal) the ``|credit`` keys first — ``sub|credit, group|credit, sub, group`` (§5); for a
+    Plaid row on a bank account the ``|bank`` keys before all of those (§6)."""
+    order = list(keys)
     if credit:
-        return [k + CREDIT_KEY_SUFFIX for k in keys] + list(keys)
-    return list(keys)
+        order = [k + CREDIT_KEY_SUFFIX for k in keys] + order
+    if bank:
+        order = [k + BANK_KEY_SUFFIX for k in keys] + order
+    return order
 
 
 def _chain(source: str, key: str, group: str) -> list[str]:
-    """The keys categorization tries after ``key`` when ``key`` has no mapping of its own."""
-    base, credit = _split_credit(key)
+    """The keys categorization tries after ``key`` when ``key`` has no mapping of its own.
+
+    A ``|bank`` row lists its bank-account rows' next keys as for a charge (the group's bank key,
+    then the card keys); credits would try ``|credit`` keys before the card keys, which only Amex
+    files have."""
+    base, suffix = _split(key)
     is_group = _canon(source, base) == _canon(source, group)
-    if credit:
+    if suffix == BANK_KEY_SUFFIX:
+        return [base] if is_group else [group + BANK_KEY_SUFFIX, base, group]
+    if suffix == CREDIT_KEY_SUFFIX:
         return [group] if is_group else [group + CREDIT_KEY_SUFFIX, base, group]
     return [] if is_group else [group]
 
@@ -1018,11 +1045,20 @@ def _first_mapped(
 
 
 def _row_key(
-    source: str, keys: tuple[str, ...], credit: bool, mapped: Mapping[str, int] | set[str]
+    source: str,
+    keys: tuple[str, ...],
+    credit: bool,
+    mapped: Mapping[str, int] | set[str],
+    bank: bool = False,
 ) -> str:
     """The editor row a transaction counts on: its code's row, or for a credit whose lookup
-    reaches a ``|credit`` mapping, its code's ``|credit`` row (listed even when not mapped), so
-    the row the transaction is counted on shows the category it really gets."""
+    reaches a ``|credit`` mapping, its code's ``|credit`` row, or for a bank-account row whose
+    lookup reaches a ``|bank`` mapping, its code's ``|bank`` row (both listed even when not
+    mapped), so the row the transaction is counted on shows the category it really gets."""
+    if bank:
+        bank_keys = [k + BANK_KEY_SUFFIX for k in keys]
+        if any(_canon(source, k) in mapped for k in bank_keys):
+            return bank_keys[0]
     if credit:
         credit_keys = [k + CREDIT_KEY_SUFFIX for k in keys]
         if any(_canon(source, k) in mapped for k in credit_keys):
@@ -1043,6 +1079,13 @@ def _stored(session: Session, source: str) -> tuple[dict[str, int], dict[str, st
     return mapped, spelling
 
 
+def _credit(row: Any) -> SimpleNamespace:
+    """A grouped Plaid credit row (no amount or source column) as categorization reads it."""
+    return SimpleNamespace(
+        source="plaid", amount=-1, pfc_primary=row.pfc_primary, pfc_detailed=row.pfc_detailed
+    )
+
+
 def _key_counts(
     session: Session, source: str, mapped: Mapping[str, int]
 ) -> dict[str, tuple[str, int]]:
@@ -1053,6 +1096,8 @@ def _key_counts(
         if source == "amex_csv"
         else (Transaction.pfc_detailed, Transaction.pfc_primary)
     )
+    # Plaid rows on a bank account look up ``|bank`` keys first (Amex files are card rows).
+    kind = Account.type.label("account_type")
     counts: dict[str, tuple[str, int]] = {}
 
     def add(key: str, n: int) -> None:
@@ -1060,18 +1105,31 @@ def _key_counts(
         spelling, total = counts.get(canon, (key, 0))
         counts[canon] = (spelling, total + n)
 
-    charges = select(*cols, func.count().label("n")).where(
-        Transaction.source == txn_source, Transaction.amount >= 0
+    def on_bank(row: Any) -> bool:
+        return source == "plaid_pfc" and row.account_type == BANK
+
+    charges = (
+        select(*cols, kind, func.count().label("n"))
+        .select_from(Transaction)
+        .join(Account, Account.id == Transaction.account_id)
+        .where(Transaction.source == txn_source, Transaction.amount >= 0)
     )
-    for row in session.execute(charges.group_by(*cols)):
+    for row in session.execute(charges.group_by(*cols, kind)):
         keys = _raw_keys(source, row)
         if keys:
-            add(keys[0], row.n)
+            add(_row_key(source, keys, False, mapped, on_bank(row)), row.n)
     detail = (Transaction.name, Transaction.original_description, Transaction.transaction_code)
-    credits = select(*cols, *detail, func.count().label("n")).where(
-        Transaction.source == txn_source, Transaction.amount < 0
+    credits = (
+        select(*cols, *detail, kind, func.count().label("n"))
+        .select_from(Transaction)
+        .join(Account, Account.id == Transaction.account_id)
+        .where(Transaction.source == txn_source, Transaction.amount < 0)
     )
-    for row in session.execute(credits.group_by(*cols, *detail)):
+    reaches_money_in = any(_canon(source, k) in mapped for k in MONEY_IN_KEYS)
+    for row in session.execute(credits.group_by(*cols, *detail, kind)):
+        if reaches_money_in and on_bank(row) and money_in_keys(_credit(row), bank=True):
+            add(MONEY_IN_KEYS[0], row.n)  # where categorization sends it (final review money-3)
+            continue
         keys = _raw_keys(source, row)
         if not keys:
             continue
@@ -1082,7 +1140,7 @@ def _key_counts(
                 transaction_code=row.transaction_code,
             )
         )
-        add(_row_key(source, keys, not fee, mapped), row.n)
+        add(_row_key(source, keys, not fee, mapped, on_bank(row)), row.n)
     return counts
 
 
@@ -1105,7 +1163,7 @@ def list_mappings(session: Session, source: str, *, only_used: bool = False) -> 
     # group (canonical) -> its members (canonical keys); every group also lists its own key.
     members: dict[str, list[str]] = {}
     for canon, key in list(spelling.items()):
-        group = _group_of(source, _split_credit(key)[0], primaries)
+        group = _group_of(source, _split(key)[0], primaries)
         group_canon = _canon(source, group)
         spelling.setdefault(group_canon, group)
         members.setdefault(group_canon, [])
@@ -1117,7 +1175,7 @@ def list_mappings(session: Session, source: str, *, only_used: bool = False) -> 
 
     def make_row(canon: str, group: str) -> MappingRow:
         key = spelling[canon]
-        base, credit = _split_credit(key)
+        base, suffix = _split(key)
         fallback_key, fallback = _first_mapped(source, _chain(source, key, group), mapped)
         return MappingRow(
             source=source,
@@ -1126,11 +1184,12 @@ def list_mappings(session: Session, source: str, *, only_used: bool = False) -> 
             label=_label(source, base, group),
             group=group,
             is_group=_canon(source, base) == _canon(source, group),
-            for_credits=credit,
+            for_credits=suffix == CREDIT_KEY_SUFFIX,
             category_id=mapped.get(canon),
             fallback_category_id=fallback,
             transaction_count=counts[canon][1] if canon in counts else 0,
             fallback_key=fallback_key,
+            for_banks=suffix == BANK_KEY_SUFFIX,
         )
 
     all_rows = {
@@ -1147,12 +1206,14 @@ def list_mappings(session: Session, source: str, *, only_used: bool = False) -> 
                 r
                 for r in rows
                 if r.transaction_count
-                or (r.is_group and not r.for_credits and unmapped)
+                or (r.is_group and not r.for_credits and not r.for_banks and unmapped)
                 or _canon(source, r.key) in needed
             ]
             if not any(r.transaction_count for r in rows):
                 continue
-        rows = sorted(rows, key=lambda r: (not r.is_group, r.code.casefold(), r.for_credits))
+        rows = sorted(
+            rows, key=lambda r: (not r.is_group, r.code.casefold(), r.for_credits, r.for_banks)
+        )
         group = spelling[group_canon]
         built.append(MappingGroup(key=group, label=_group_label(source, group), rows=tuple(rows)))
     built.sort(key=lambda g: g.label.casefold())
@@ -1167,25 +1228,32 @@ def list_mappings(session: Session, source: str, *, only_used: bool = False) -> 
 
 
 def normalize_mapping_key(source: str, key: str) -> str:
-    """The canonical spelling of a mapping key (Amex: ``Group-Subgroup`` without spaces)."""
+    """The canonical spelling of a mapping key (Amex: ``Group-Subgroup`` without spaces).
+
+    ``|credit`` and, for Plaid codes only, ``|bank`` suffixes are kept (Amex files are card rows).
+    """
     _check_source(source)
-    base, credit = _split_credit((key or "").strip())
+    base, suffix = _split((key or "").strip())
     base = base.strip()
     if source == "plaid_pfc":
         if not _PLAID_KEY.fullmatch(base):
             raise MappingError("That isn't a Plaid category code.")
     else:
+        if suffix == BANK_KEY_SUFFIX:
+            raise MappingError("That isn't an Amex category.")
         keys = amex_category_keys(base)
         if not keys:
             raise MappingError("That isn't an Amex category.")
         base = keys[0]
         if len(base) > MAX_AMEX_KEY_LENGTH or not base.isprintable():
             raise MappingError("That isn't an Amex category.")
-    return base + (CREDIT_KEY_SUFFIX if credit else "")
+    return base + suffix
 
 
-#: What categorization reads from a transaction (``Categorizer.decide`` takes these rows).
+#: What categorization reads from a transaction (``Categorizer.decide`` takes these rows), and
+#: the account's type (a bank account's rows look up ``|bank`` keys first).
 _DECIDE_COLUMNS = (
+    Account.type.label("account_type"),
     Transaction.id,
     Transaction.account_id,
     Transaction.source,
@@ -1217,11 +1285,19 @@ def _mapping_effect(
     txn_source = "csv" if source == "amex_csv" else "plaid"
     categorizer: Categorizer | None = None
     reached = moving = 0
-    for row in session.execute(select(*_DECIDE_COLUMNS).where(Transaction.source == txn_source)):
+    rows = session.execute(
+        select(*_DECIDE_COLUMNS)
+        .select_from(Transaction)
+        .join(Account, Account.id == Transaction.account_id)
+        .where(Transaction.source == txn_source)
+    )
+    for row in rows:
         keys = _raw_keys(source, row)
-        if not keys:
+        bank = source == "plaid_pfc" and row.account_type == BANK
+        order = _lookup_order(keys, row.amount < 0 and not looks_like_fee(row), bank)
+        order = [*money_in_keys(row, bank=bank), *order]  # final review money-3
+        if not order:
             continue
-        order = _lookup_order(keys, row.amount < 0 and not looks_like_fee(row))
         first_before, _ = _first_mapped(source, order, before)
         first_after, _ = _first_mapped(source, order, after)
         hits = {_canon(source, k) for k in (first_before, first_after) if k is not None}
@@ -1273,14 +1349,17 @@ def set_mapping(session: Session, source: str, key: str, category_id: int | None
         session.add(CategoryMapping(source=source, external_key=key, category_id=category_id))
     session.flush()
     after, _spelling = _stored(session, source)
-    base, _credit = _split_credit(key)
+    base, suffix = _split(key)
     group = _group_of(source, base, _primaries(session, source))
     _fallback_key, fallback = _first_mapped(source, _chain(source, key, group), after)
     reached, moving = _mapping_effect(session, source, key, before, after)
+    label = _label(source, base, group)
+    if suffix == BANK_KEY_SUFFIX:
+        label += " (bank accounts)"
     return MappingChange(
         source=source,
         key=key,
-        label=_label(source, base, group),
+        label=label,
         old_category_id=old,
         new_category_id=category_id,
         transaction_count=reached,

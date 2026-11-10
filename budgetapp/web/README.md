@@ -11,7 +11,7 @@ component live at `/dev/ui-kit`. ARCHITECTURE §9 has the security design.
 | `flash.py` | `redirect()`, `flash()`, `flash_oob()`, `is_local_path()` |
 | `security.py` | the Host/Origin checks, security headers, CSP, `allow_plaid_link()` |
 | `app.py` | `create_app()`: wiring, error pages (never import it from a route: circular) |
-| `routes/<page>.py` | one module per page, each with `router = APIRouter()`. Every page is built (`dashboard.py` serves `/`); `connection.py` (SYNC) also answers the top bar's `POST /connection/sync` and `GET /connection/sync-status` |
+| `routes/<page>.py` | one module per page, each with `router = APIRouter()`. Every page is built (`dashboard.py` serves `/`); `connection.py` (SYNC) also answers the top bar's `POST /connection/sync` and `GET /connection/sync-status`; `dashboard.py` and `trends.py` answer their "Show income" switch (`POST /dashboard/show-income`, `POST /trends/show-income`, ARCHITECTURE §9) |
 | `templates/<page>/` | `index.html` (full page) and `_<part>.html` partials |
 
 Checklist for a page package:
