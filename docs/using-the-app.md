@@ -191,7 +191,9 @@ note says so), with the same pending setting as budgets.
   The first month of your history has no month before it, so there the page says "No month to
   compare yet" rather than comparing with $0. The month in progress is shown "so far" and
   compared with the same days of the month before (only days your history covers), so a few days
-  are never set against a whole month. The **Monthly average** counts complete months only.
+  are never set against a whole month. The **Monthly spending average** (a category's **Monthly
+  average** in its own view) counts complete months only. The tiles that hold spending say so
+  ("Spent in …"), so they are never read as income or net when income is shown.
 - **Change from last month** lists each category with both months, the change and the average;
   **Every month** shows every category for every month, in whole dollars ("—" before your
   history starts).

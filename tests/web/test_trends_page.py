@@ -149,7 +149,7 @@ def test_the_first_month_of_history(client, cat, spend):
     text = tiles(page)
     assert "Last month — no complete month in this range yet" in text
     assert "Nov 2026 so far $40 the first month of your history" in text
-    assert "Monthly average — needs one complete month" in text
+    assert "Monthly spending average — needs one complete month" in text
     assert chart_config(page)["data"]["labels"] == ["Nov 2026"]
     assert csp_problems(page, rendered=True) == []
 
@@ -198,7 +198,7 @@ def test_the_historys_first_month_on_its_own(client, cat, spend):
     page = client.get("/trends?through=2025-11").text
     text = tiles(page)
     assert "Spent in Nov 2025 $560 from Nov 28, when your history starts" in text
-    assert "In Nov 2025 $560 all categories" in text and "In these 1 months" not in text
+    assert "Spent in Nov 2025 $560 all categories" in text and "these 1 months" not in text
     changes = changes_card(page)
     assert changes.startswith("No month to compare yet")
     assert changes.endswith("Choose a later month under “Through” to see a change.")
@@ -228,8 +228,8 @@ class TestAllCategories:
         assert "/static/vendor/chart.umd.min.js" in page
         text = tiles(page)
         assert "Spent in Oct 2026 $205 $105 more than Sep (+105%)" in text
-        assert "Nov 2026 so far $35 $45 by Oct 5 (−$10)" in text
-        assert "Monthly average $191 over 11 complete months" in text
+        assert "Spent in Nov 2026 so far $35 $45 by Oct 5 (−$10)" in text
+        assert "Monthly spending average $191 over 11 complete months" in text
         assert "Biggest increase +$60 Groceries: $100 → $160" in text
         changes = section(page, "trends-changes")
         assert "Oct 2026 compared with Sep 2026" in changes
@@ -534,6 +534,32 @@ class TestIncome:
                              "trend-average", "trend-increase"]  # fmt: skip
         assert csp_problems(page, rendered=True) == []
 
+    def test_spending_tiles_say_spending_next_to_income(self, client, cat, earnings):
+        """ux-4: the tiles that hold all spending say so, so next to the Income and Net tiles
+        (on a phone they pair up two by two: Net beside the month so far) none reads as income
+        or net. One category's view names its category instead."""
+
+        def labels(page: str) -> dict[str, str]:
+            found = re.findall(r'id="(trend-[a-z-]+)">\s*<div class="stat__label">(.*?)</div>',
+                               page, re.S)  # fmt: skip
+            return {tile: text_of(label) for tile, label in found}
+
+        tiles = labels(client.get("/trends").text)
+        assert tiles == {
+            "trend-compare": "Spent in Oct 2026",
+            "trend-income": "Income in Oct 2026",
+            "trend-net": "Net in Oct 2026",
+            "trend-so-far": "Spent in Nov 2026 so far",
+            "trend-average": "Monthly spending average",
+            "trend-increase": "Biggest increase",  # its line names the category
+        }
+        ended = labels(client.get("/trends?through=2026-09").text)  # no month in progress
+        assert ended["trend-total"] == "Spent in these 11 months"
+        assert ended["trend-average"] == "Monthly spending average"
+        one = labels(client.get(f"/trends?category={cat('Groceries').id}").text)
+        assert one["trend-compare"] == "Groceries in Oct 2026"
+        assert (one["trend-so-far"], one["trend-average"]) == ("Nov 2026 so far", "Monthly average")
+
     def test_the_income_and_spending_chart(self, client, earnings):
         page = client.get("/trends").text
         config = income_chart(page)
@@ -665,7 +691,7 @@ class TestIncome:
         page = client.get("/trends").text
         text = tiles(page)
         assert "Net in Oct 2026 −$180 average" in text
-        assert f"over 11 complete months {CARDS_ONLY_HINT} Nov 2026 so far" in text  # Net's
+        assert f"over 11 complete months {CARDS_ONLY_HINT} Spent in Nov 2026 so far" in text
         net = re.search(r'id="trend-net".*?</p>', page, re.S).group(0)
         assert '<a href="/connection">link a bank account</a>' in net
         note = text_of(re.search(r'<p[^>]*id="trends-income-note".*?</p>', page, re.S).group(0))
