@@ -12,7 +12,8 @@
                    missing or None the page shows NO environment bar or label
                    (it never assumes Sandbox), so error handlers must render
                    through web/templating.render() too.
-      nav_items    [{key, label, href, icon, group}, …] in display order
+      nav_items    [{key, label, href, group}, …] in display order (text only: the nav
+                   draws no icons)
       active_nav   key of the current page (None for none)
       conn         services.status.ConnectionStatus or None. Reads: state,
                    needs_reconnect, reconnect_names, consent_items
@@ -93,11 +94,14 @@
 
 {%- macro brand(env, env_label) -%}
 <a class="brand" href="/">
-<svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="mark-bg" width="32" height="32" rx="8"/><path class="mark-fg" d="M8.5 20.5 13 16l3.5 3.5 7-7.5"/><path class="mark-fg" d="M19.5 12h4v4"/></svg>
+<svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="mark-bg" width="32" height="32"/><path class="mark-fg" d="M8.5 20.5 13 16l3.5 3.5 7-7.5"/><path class="mark-fg" d="M19.5 12h4v4"/></svg>
 <span class="brand__text"><span class="brand__name">Budget Tracker</span>{% if env_label %}<span class="brand__env brand__env--{{ env }}">{{ env_label }}</span>{% endif %}</span>
 </a>
 {%- endmacro -%}
 
+{#- The nav is text only. The current page's link carries a marker (a sharp 2px bar at its
+    left edge); in the sidebar it has a view-transition-name, so on a page change it slides
+    from the old page's link to the new one (app.css, "Page transitions"). -#}
 {%- macro render_nav(prefix, items, active) -%}
 <nav class="nav" aria-label="Main">
 {%- for item in items %}
@@ -106,7 +110,7 @@
 {%- if item.group %}<span class="nav__heading" id="{{ prefix }}-nav-{{ loop.index }}">{{ item.group }}</span>{% endif %}
 <ul class="nav__list"{% if item.group %} aria-labelledby="{{ prefix }}-nav-{{ loop.index }}"{% endif %}>
 {%- endif %}
-<li><a class="nav__link" href="{{ item.href }}"{% if item.key == active %} aria-current="page"{% endif %}>{{ ui.icon(item.icon or 'list') }}<span>{{ item.label }}</span></a></li>
+<li><a class="nav__link" href="{{ item.href }}"{% if item.key == active %} aria-current="page"{% endif %}>{% if item.key == active %}<span class="nav__marker" aria-hidden="true"></span>{% endif %}<span>{{ item.label }}</span></a></li>
 {%- if loop.last or item.group != loop.nextitem.group %}
 </ul>
 </div>
@@ -138,7 +142,7 @@
 {%- if nav_items %}
 {{ render_nav('side', nav_items, active_nav) }}
 {%- endif %}
-<div class="sidebar__footer">{{ ui.icon('lock', size='sm') }}<span>Private · runs only on this Mac{% if app_version %} · v{{ app_version }}{% endif %}</span></div>
+<div class="sidebar__footer"><span>Private · runs only on this Mac{% if app_version %} · v{{ app_version }}{% endif %}</span></div>
 </aside>
 
 <div class="main-col">
