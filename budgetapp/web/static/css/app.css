@@ -200,10 +200,19 @@
   --gutter: 32px;
   --sticky-top: var(--topbar-h);
 
-  /* Motion */
-  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  /* Motion: one ease-out curve (easeOutQuint) for everything that moves, and only transform,
+     opacity and a little blur move. Each piece takes 300-600 ms (charts draw in over 800 ms);
+     a page's whole arrival is over within 800 ms. See section 7 and "Motion" in
+     templates/components/README.md. */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
   --dur-fast: 120ms;
   --dur: 200ms;
+  --dur-page-out: 300ms;      /* the page you leave fades and settles back */
+  --dur-arrive: 450ms;        /* each block of the page you arrive on rises in */
+  --arrive-step: 50ms;        /* the stagger between blocks: 8 steps (0-7), 350 ms at most */
+  --dur-swap: 300ms;          /* what an HTMX request swapped in fades and rises in */
+  --dur-fill: 500ms;          /* a budget bar fills from 0 */
+  --reveal-distance: 120px;   /* the scroll over which a card from below the fold appears */
 
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23585858' stroke-width='2' stroke-linecap='square' stroke-linejoin='miter'%3E%3Cpath d='m6.5 9.5 5.5 5.5 5.5-5.5'/%3E%3C/svg%3E");
 }
@@ -1171,12 +1180,15 @@ a.cat:hover .cat__name {
   background: var(--track);
 }
 
+/* The fill, and an overspend's hatched tail, grow from the track's left end (a transform, so
+   nothing relays out): from 0 when the bar is first visible (section 7). */
 .progress__fill {
   position: absolute;
   inset: 0 auto 0 0;
   width: calc(var(--value) * 1%);
   background: var(--ok);
-  transition: width 0.4s var(--ease);
+  transform-origin: 0 50%;
+  transition: transform var(--dur-fill) var(--ease);
 }
 
 .progress__overflow {
@@ -1187,6 +1199,8 @@ a.cat:hover .cat__name {
   left: calc(var(--limit) * 1%);
   background-color: var(--over-deep);
   background-image: repeating-linear-gradient(-45deg, rgb(255 255 255 / 0.22) 0 2px, transparent 2px 5px);
+  transform-origin: calc(var(--limit) / (var(--limit) - 100) * 100%) 50%; /* the track's left end */
+  transition: transform var(--dur-fill) var(--ease);
 }
 
 .progress__limit {
@@ -1198,6 +1212,14 @@ a.cat:hover .cat__name {
   margin-left: -1px;
   background: var(--text);
   box-shadow: 0 0 0 1.5px var(--surface);
+}
+
+/* Any other bar whose children are its fill (data-fill, e.g. the Dashboard's ranked
+   categories): they grow from the left end like a meter's, and fill from 0 when first
+   visible (section 7). */
+[data-fill] > * {
+  transform-origin: 0 50%;
+  transition: transform var(--dur-fill) var(--ease);
 }
 
 /* Pace: a caret above the bar plus a notch through it (the limit tick, by
@@ -3243,6 +3265,207 @@ legend.field__label {
 
 /* 7. MOTION, CONTRAST, PRINT ============================================== */
 
+/* Page motion ------------------------------------------------------------------
+   One choreography, in the manner of a product page and never in the way: only transform,
+   opacity and a little blur move, on one ease-out curve (--ease), each piece in 300-600 ms
+   and a page's whole arrival within 800 ms. Each piece of motion has one owner:
+   - Page to page: the View Transition. The page you leave fades out quickly while settling
+     back (scale 0.985, a little blur); the sidebar, the bars at the top and the notices keep
+     their own names, so they stay perfectly still; the current page's marker slides to the
+     new link and the breadcrumb crossfades. Back and Forward do the same. It is over in
+     450 ms, and clicks pass straight through it to the new page.
+   - Arriving on a page: plain CSS, on every page load (with or without a View Transition).
+     The title and subtitle rise in first, then each block or tile in turn: 24px up, 8px blur
+     to sharp, 50 ms apart, 8 steps at most. Nothing is hidden before CSS runs and nothing
+     waits for JavaScript; app.js only marks <html> .is-arrived once it is over, so content
+     an HTMX request swaps in later doesn't replay it.
+   - Scrolling: cards and tiles below the fold appear as they come in (scroll-driven, in
+     @supports: other browsers just show them). One in view at load is never hidden, and a
+     card the page opens with stays the arrival's.
+   - Charts draw in and budget bars fill when first visible, and what an HTMX request swaps
+     in fades and rises in briefly (app.js marks it [data-swapped]).
+   Reduced motion switches every piece off (the end of this section). */
+
+/* Page to page: a cross-document View Transition, for links, forms, Back and Forward. */
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition {
+    navigation: auto;
+  }
+}
+
+/* The bars at the top are named one by one, not as their .masthead: a named element is a
+   backdrop root, which would leave the top bar's frosted glass nothing to blur. */
+.sidebar { view-transition-name: sidebar; }
+.mobile-bar { view-transition-name: mobile-bar; }
+.env-bar { view-transition-name: env-bar; }
+.topbar { view-transition-name: topbar; }
+.notices { view-transition-name: notices; }
+.topbar__title { view-transition-name: crumb; }
+.sidebar .nav__marker { view-transition-name: nav-marker; }
+
+/* Clicks and typing reach the new page at once, even while the old one is still fading. */
+::view-transition {
+  pointer-events: none;
+}
+
+::view-transition-group(*) {
+  animation-duration: var(--dur-arrive);
+  animation-timing-function: var(--ease);
+}
+
+/* The page you leave is drawn over the new one and fades out while settling back; the new
+   page's blocks rise in beneath it (the arrival below), so it has no animation of its own. */
+::view-transition-old(root) {
+  z-index: 1;
+  animation: page-out var(--dur-page-out) var(--ease) both;
+}
+
+::view-transition-new(root),
+::view-transition-group(sidebar),
+::view-transition-group(mobile-bar),
+::view-transition-group(env-bar),
+::view-transition-group(topbar),
+::view-transition-group(notices),
+::view-transition-new(sidebar),
+::view-transition-new(mobile-bar),
+::view-transition-new(env-bar),
+::view-transition-new(topbar),
+::view-transition-new(notices),
+::view-transition-new(nav-marker) {
+  animation: none;
+}
+
+/* The chrome: the new sidebar, bars and notices show at once, in place (no crossfade). The
+   marker's group still moves it from the old link to the new one. */
+::view-transition-old(sidebar),
+::view-transition-old(mobile-bar),
+::view-transition-old(env-bar),
+::view-transition-old(topbar),
+::view-transition-old(notices),
+::view-transition-old(nav-marker) {
+  display: none;
+}
+
+::view-transition-old(crumb) {
+  animation: fade-out var(--dur-page-out) var(--ease) both;
+}
+
+::view-transition-new(crumb) {
+  animation: fade-in var(--dur-page-out) var(--ease) 120ms both; /* after the old one is gone */
+}
+
+/* Arriving on a page. A block's place in the order: its place among the page's blocks (the
+   screen readers' status lines don't count), plus, inside a wrapper (a grid, a stack, the
+   region a status line announces, a plain div with an id), its place there: the wrapper's
+   children arrive in turn rather than the wrapper as one. Tiles side by side in a grid count
+   half a step each. Bars read the same order (their fill starts as their block arrives). */
+.content > :nth-child(2 of :not(.sr-only)) { --arrive-i: 1; }
+.content > :nth-child(3 of :not(.sr-only)) { --arrive-i: 2; }
+.content > :nth-child(4 of :not(.sr-only)) { --arrive-i: 3; }
+.content > :nth-child(5 of :not(.sr-only)) { --arrive-i: 4; }
+.content > :nth-child(6 of :not(.sr-only)) { --arrive-i: 5; }
+.content > :nth-child(7 of :not(.sr-only)) { --arrive-i: 6; }
+.content > :nth-child(n + 8 of :not(.sr-only)) { --arrive-i: 7; }
+.content > :where(.grid, .stack, [data-status-for] + *, div[id]:not([class])) > :nth-child(2) { --arrive-j: 1; }
+.content > :where(.grid, .stack, [data-status-for] + *, div[id]:not([class])) > :nth-child(3) { --arrive-j: 2; }
+.content > :where(.grid, .stack, [data-status-for] + *, div[id]:not([class])) > :nth-child(4) { --arrive-j: 3; }
+.content > :where(.grid, .stack, [data-status-for] + *, div[id]:not([class])) > :nth-child(5) { --arrive-j: 4; }
+.content > :where(.grid, .stack, [data-status-for] + *, div[id]:not([class])) > :nth-child(6) { --arrive-j: 5; }
+.content > :where(.grid, .stack, [data-status-for] + *, div[id]:not([class])) > :nth-child(7) { --arrive-j: 6; }
+.content > :where(.grid, .stack, [data-status-for] + *, div[id]:not([class])) > :nth-child(n + 8) { --arrive-j: 7; }
+.content > .grid { --arrive-w: 0.5; }
+
+html:not(.is-arrived) .content > :not(:where(.grid, .stack, [data-status-for] + *, div[id]:not([class]), .sr-only, script, dialog)),
+html:not(.is-arrived) .content > :where(.grid, .stack, [data-status-for] + *, div[id]:not([class])) > :not(:where(.sr-only, script, dialog)) {
+  animation: arrive var(--dur-arrive) var(--ease) backwards;
+  animation-delay: calc(min(var(--arrive-i, 0) + var(--arrive-j, 0) * var(--arrive-w, 1), 7) * var(--arrive-step));
+}
+
+/* Scrolling: a card or tile fades in and rises from below as it enters the view, over its
+   first --reveal-distance. Above the fold it is past that range at load, so the reveal does
+   nothing there; a card that is also one of the page's blocks takes both animations, the
+   reveal listed last so a card half in view at load stays as the scroll puts it. (No
+   specificity of its own, so anything a component says about a card's animation wins.) */
+@supports (animation-timeline: view()) {
+  :where(.card, .stat):not(:where(.dialog *)) {
+    animation: reveal linear backwards;
+    animation-timeline: view();
+    animation-range: entry 0% entry var(--reveal-distance);
+  }
+
+  html:not(.is-arrived) .content > :is(.card, .stat),
+  html:not(.is-arrived) .content > :where(.grid, .stack, [data-status-for] + *, div[id]:not([class])) > :is(.card, .stat) {
+    animation: arrive var(--dur-arrive) var(--ease) backwards, reveal linear backwards;
+    animation-delay: calc(min(var(--arrive-i, 0) + var(--arrive-j, 0) * var(--arrive-w, 1), 7) * var(--arrive-step)), 0s;
+    animation-timeline: auto, view();
+    animation-range: normal, entry 0% entry var(--reveal-distance);
+  }
+
+  /* The page title fades and eases smaller as it reaches the bar at the top, which names the
+     page too. */
+  .page-header__title {
+    transform-origin: 0 100%;
+    animation: title-away linear both;
+    animation-timeline: view(block calc(var(--sticky-top) + 12px) 0px);
+    animation-range: exit 0% exit 100%;
+  }
+}
+
+/* Budget bars fill from 0 when first visible: as their block arrives (@starting-style: plain
+   CSS, timed 100 ms after the block), or, below the fold, once scrolled into view (app.js
+   marks the track .is-waiting until then). Bars swapped in later show their value at once. */
+@starting-style {
+  html:not(.is-arrived) :is(.progress__fill, .progress__overflow, [data-fill] > *) {
+    transform: scaleX(0);
+  }
+}
+
+html:not(.is-arrived) :is(.progress__fill, .progress__overflow, [data-fill] > *) {
+  transition-delay: calc(min(var(--arrive-i, 0) + var(--arrive-j, 0) * var(--arrive-w, 1), 7) * var(--arrive-step) + 100ms);
+}
+
+.progress__track.is-waiting > :is(.progress__fill, .progress__overflow),
+[data-fill].is-waiting > * {
+  transform: scaleX(0);
+}
+
+/* What an HTMX request swapped in (filters, sorting, the Show income switch, a saved row):
+   app.js marks it [data-swapped] for the moment it fades and rises in. */
+[data-swapped] {
+  animation: swap-in var(--dur-swap) var(--ease) backwards;
+}
+
+@keyframes page-out {
+  to { opacity: 0; transform: scale(0.985); filter: blur(4px); }
+}
+
+@keyframes arrive {
+  from { opacity: 0; transform: translateY(24px); filter: blur(8px); }
+}
+
+@keyframes reveal {
+  from { opacity: 0; transform: translateY(16px) scale(0.98); }
+}
+
+@keyframes title-away {
+  to { opacity: 0; transform: scale(0.94); }
+}
+
+@keyframes swap-in {
+  from { opacity: 0; transform: translateY(6px); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+}
+
+@keyframes fade-out {
+  to { opacity: 0; }
+}
+
+/* Small motion ------------------------------------------------------------- */
+
+
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
@@ -3297,6 +3520,34 @@ legend.field__label {
   .table tr.flash-in > td,
   .flash-in:not(tr) {
     animation-duration: 1.6s !important;
+  }
+
+  /* No page motion at all: no arrival, no scroll reveal, no shrinking title, no swap-in, and
+     bars show their value at once. (There is no page transition either: @view-transition
+     only exists without reduced motion. app.js draws charts at once and skips the rest.) */
+  .content > *,
+  .content > * > *,
+  .card,
+  .stat,
+  .page-header__title,
+  [data-swapped] {
+    animation: none !important;
+  }
+
+  .progress__fill,
+  .progress__overflow,
+  [data-fill] > * {
+    transform: none !important;
+    transition: none !important;
+  }
+}
+
+/* Kept apart: a browser without View Transitions drops a rule naming these pseudo-elements. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
   }
 }
 

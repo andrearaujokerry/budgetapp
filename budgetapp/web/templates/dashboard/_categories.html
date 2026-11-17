@@ -14,7 +14,7 @@
 {{ ui.category_badge(row.category, href=spent_href(row.category.id), class='dash-row__name') }}
 <span class="dash-row__value">{{ ui.money(row.amount) }}{% if row.percent is not none %}<span class="rank-list__pct">{{ row.percent|pct }}</span>{% endif %}</span>
 </div>
-<div class="rank-list__bar" aria-hidden="true"><span style="--value: {{ '%.2f'|format((row.amount / largest * 100)|float) }}"></span></div>
+<div class="rank-list__bar" aria-hidden="true" data-fill><span style="--value: {{ '%.2f'|format((row.amount / largest * 100)|float) }}"></span></div>
 </li>
 {%- endfor %}
 {%- if top.rest_count %}
@@ -24,7 +24,7 @@
 <span class="dash-row__value">{{ ui.money(top.rest_amount) }}</span>
 </div>
 {%- if top.rest_amount > 0 %}
-<div class="rank-list__bar rank-list__bar--rest" aria-hidden="true"><span style="--value: {{ '%.2f'|format(([top.rest_amount / largest * 100, 100]|min)|float) }}"></span></div>
+<div class="rank-list__bar rank-list__bar--rest" aria-hidden="true" data-fill><span style="--value: {{ '%.2f'|format(([top.rest_amount / largest * 100, 100]|min)|float) }}"></span></div>
 {%- endif %}
 </li>
 {%- endif %}
