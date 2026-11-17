@@ -829,15 +829,16 @@
         out.borderColor = color;
         out.backgroundColor = withAlpha(color, 0.1);
         out.borderWidth = 2;
-        out.borderCapStyle = "round";
-        out.borderJoinStyle = "round";
+        out.borderCapStyle = "butt";       // straight lines, square ends, sharp corners
+        out.borderJoinStyle = "miter";
+        out.pointStyle = "rect";            // points (hover, a lone value) are squares
         out.pointRadius = spark ? 0 : (out.data.length <= 1 ? 4 : 0);
         out.pointHoverRadius = spark ? 0 : 5;
         out.pointBackgroundColor = color;
         out.pointBorderColor = theme.surface;
         out.pointBorderWidth = 2;
         out.pointHitRadius = 12;
-        out.tension = 0.25;
+        out.tension = 0;
         if (out.fill === undefined) out.fill = spark ? "origin" : false;
         if (ds.dashed) out.borderDash = [5, 4];
       } else {
@@ -845,7 +846,8 @@
         out.backgroundColor = fills;
         out.hoverBackgroundColor = fills;
         out.borderSkipped = "start";
-        out.borderRadius = stacked ? (i === sets.length - 1 ? 4 : 0) : 4;
+        out.borderRadius = 0;               // square bar ends
+        out.pointStyle = "rect";            // the tooltip's key for a bar
         out.maxBarThickness = 28;
         out.categoryPercentage = 0.72;
         out.barPercentage = 0.9;
@@ -906,7 +908,7 @@
             labels: {
               color: theme.muted,
               usePointStyle: true,
-              pointStyle: type === "line" ? "line" : "rectRounded",
+              pointStyle: type === "line" ? "line" : "rect",
               boxWidth: 10,
               boxHeight: 10,
               padding: 14,
@@ -921,7 +923,7 @@
             footerColor: theme.tooltipText,
             borderWidth: 0,
             padding: 10,
-            cornerRadius: 8,
+            cornerRadius: 0,
             boxWidth: 8,
             boxHeight: 8,
             boxPadding: 4,
@@ -955,8 +957,8 @@
     return cfg;
   }
 
-  // Legend keys mirror the marks: a short line for line series (dashed when the
-  // series is), a rounded square for bars. Chart.js would otherwise take the key
+  // Legend keys mirror the marks: a short straight line for line series (dashed
+  // when the series is), a square for bars. Chart.js would otherwise take the key
   // colour from the first point, whose border is the surface-coloured ring.
   function legendLabels(chart) {
     var items = window.Chart.defaults.plugins.legend.labels.generateLabels(chart);
@@ -969,7 +971,7 @@
       it.strokeStyle = c;
       it.lineWidth = isLine ? 2 : 0;
       it.lineDash = isLine && ds.borderDash ? ds.borderDash : [];
-      it.pointStyle = isLine ? "line" : "rectRounded";
+      it.pointStyle = isLine ? "line" : "rect";
     });
     return items;
   }
