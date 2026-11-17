@@ -3662,6 +3662,24 @@ html:not(.is-arrived) :is(.progress__fill, .progress__overflow, [data-fill] > *)
   .print-only {
     display: block !important;
   }
+
+  /* Paper shows every part of the page as it is: no card waiting for its scroll reveal, no
+     bar waiting to fill (app.js also draws the charts not yet seen before printing). */
+  .content > *,
+  .content > * > *,
+  .card,
+  .stat,
+  .page-header__title,
+  [data-swapped] {
+    animation: none !important;
+  }
+
+  .progress__fill,
+  .progress__overflow,
+  [data-fill] > * {
+    transform: none !important;
+    transition: none !important;
+  }
 }
 
 .print-only {

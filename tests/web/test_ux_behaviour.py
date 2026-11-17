@@ -479,6 +479,20 @@ def test_every_page_motion_is_off_with_reduced_motion():
     assert "reducedMotion()" in listener(js, "htmx:afterSwap")
 
 
+def test_printing_shows_every_part_of_the_page():
+    """Paper doesn't scroll: a card below the fold would print faded, waiting for its reveal,
+    and a bar empty. The print stylesheet switches page motion off like reduced motion does,
+    and app.js draws the charts not yet seen before printing."""
+    css = re.sub(r"/\*.*?\*/", "", source("css/app.css"), flags=re.S)
+    printed = "\n".join(blocks(css, "@media print"))
+    off = " ".join(sel for sel, body in css_rules(printed) if "animation: none !important" in body)
+    for covered in (".content > *", ".content > * > *", ".card", ".stat", ".page-header__title"):
+        assert covered in off, covered
+    bars = " ".join(body for sel, body in css_rules(printed) if ".progress__fill" in sel)
+    assert "transform: none !important" in bars
+    assert 'addEventListener("beforeprint"' in source("js/app.js")
+
+
 def test_charts_draw_in_when_first_seen_and_swaps_fade_in():
     """A chart is drawn when its canvas first comes into view (IntersectionObserver), and only
     then draws in; what HTMX swaps in is marked with an attribute (htmx resets class and style
