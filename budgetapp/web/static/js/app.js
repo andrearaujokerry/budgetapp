@@ -15,6 +15,12 @@
  *   data-flash                 swapped-in element glows briefly (swapped <tr> rows always do)
  *   .table-wrap                gets .is-fit (table fits: header sticks to the page) or .is-scrollable
  *   data-status-for="<id>"     live region: after #<id> is swapped, its [data-status] text is announced
+ *   data-fill                  a bar whose children fill from 0 when first visible (like .progress__track)
+ *
+ * Motion (app.css section 7 has the CSS side): charts draw in when they first come into view,
+ * budget bars below the fold fill when scrolled to, what HTMX swaps in fades and rises in
+ * ([data-swapped]), and <html> gets .is-arrived once the page's arrival is over. With reduced
+ * motion none of it runs: charts and bars show at once.
  *
  * Page scripts can use window.App: toast(level, text), renderCharts(force),
  * formatMoney(number).
@@ -595,6 +601,7 @@
 
   var charts = typeof Map === "function" ? new Map() : null; // canvas -> Chart
   var chartLoader = null;
+  var DRAW_MS = 800; // a chart drawing in: lines from left to right, bars up from the axis
 
   function ensureChartJs() {
     if (window.Chart) return Promise.resolve(window.Chart);
@@ -799,8 +806,63 @@
     };
   }
 
-  // Turn the JSON contract (see README "Charts") into a Chart.js configuration.
-  function buildConfig(spec, theme, canvas) {
+  // Lines draw in from left to right: while chart._drawIn runs, they are clipped to the share
+  // of the chart's width the draw-in has reached, eased like the CSS (--ease is easeOutQuint).
+  // A chart of lines only is clipped as a whole, so a line's filled area comes with it (Chart.js
+  // draws fills in its own hook, before a chart's plugins); in a chart that mixes bars and a
+  // line only the line is, since Chart.js grows the bars from the axis by itself.
+  function drawInPlugin() {
+    var clip = function (chart, run) {
+      var t = Math.min(1, (window.performance.now() - run.start) / DRAW_MS);
+      var reached = 1 - Math.pow(1 - t, 5);
+      var area = chart.chartArea;
+      chart.ctx.save();
+      chart.ctx.beginPath();
+      chart.ctx.rect(0, 0, area.left + (area.right - area.left) * reached, chart.height);
+      chart.ctx.clip();
+    };
+    return {
+      id: "drawIn",
+      beforeDatasetsDraw: function (chart) {
+        var run = chart._drawIn;
+        if (!run) return;
+        run.whole = chart.getSortedVisibleDatasetMetas().every(function (m) { return m.type === "line"; });
+        if (run.whole) clip(chart, run);
+      },
+      afterDatasetsDraw: function (chart) {
+        if (chart._drawIn && chart._drawIn.whole) chart.ctx.restore();
+      },
+      beforeDatasetDraw: function (chart, args) {
+        var run = chart._drawIn;
+        if (!run || run.whole || args.meta.type !== "line") return;
+        clip(chart, run);
+        run.clipped = args.index;
+      },
+      afterDatasetDraw: function (chart, args) {
+        var run = chart._drawIn;
+        if (!run || run.clipped !== args.index) return;
+        run.clipped = null;
+        chart.ctx.restore();
+      }
+    };
+  }
+
+  // Redraw every frame until the lines have drawn in (the bars' animation runs on its own).
+  function startDrawIn(chart) {
+    chart._drawIn = { start: window.performance.now(), clipped: null };
+    var frame = function () {
+      if (!chart._drawIn || !chart.canvas) return; // finished, or destroyed by a swap
+      var done = window.performance.now() - chart._drawIn.start >= DRAW_MS;
+      if (done) chart._drawIn = null;
+      chart.draw();
+      if (!done) window.requestAnimationFrame(frame);
+    };
+    window.requestAnimationFrame(frame);
+  }
+
+  // Turn the JSON contract (see README "Charts") into a Chart.js configuration. drawIn: the
+  // chart is new to the page (its first time in view), so it draws in.
+  function buildConfig(spec, theme, canvas, drawIn) {
     var type = spec.type || "bar";
     var format = spec.format || "usd";
     var horizontal = !!spec.horizontal;
@@ -829,15 +891,17 @@
         out.borderColor = color;
         out.backgroundColor = withAlpha(color, 0.1);
         out.borderWidth = 2;
-        out.borderCapStyle = "round";
-        out.borderJoinStyle = "round";
+        out.borderCapStyle = "butt";       // straight lines, square ends, sharp corners
+        out.borderJoinStyle = "miter";
+        out.pointStyle = "rect";            // points (hover, a lone value) are squares
         out.pointRadius = spark ? 0 : (out.data.length <= 1 ? 4 : 0);
         out.pointHoverRadius = spark ? 0 : 5;
         out.pointBackgroundColor = color;
         out.pointBorderColor = theme.surface;
         out.pointBorderWidth = 2;
         out.pointHitRadius = 12;
-        out.tension = 0.25;
+        out.tension = 0;
+        out.animation = { duration: 0 };    // a line never rises from the axis: it draws in (drawInPlugin)
         if (out.fill === undefined) out.fill = spark ? "origin" : false;
         if (ds.dashed) out.borderDash = [5, 4];
       } else {
@@ -845,7 +909,8 @@
         out.backgroundColor = fills;
         out.hoverBackgroundColor = fills;
         out.borderSkipped = "start";
-        out.borderRadius = stacked ? (i === sets.length - 1 ? 4 : 0) : 4;
+        out.borderRadius = 0;               // square bar ends
+        out.pointStyle = "rect";            // the tooltip's key for a bar
         out.maxBarThickness = 28;
         out.categoryPercentage = 0.72;
         out.barPercentage = 0.9;
@@ -893,7 +958,9 @@
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        animation: reducedMotion() ? false : { duration: 350 },
+        // Bars grow from the axis as the chart draws in (Chart.js's own animation, ease-out like
+        // the CSS); a chart drawn again (theme change, new data) just appears.
+        animation: reducedMotion() ? false : { duration: drawIn ? DRAW_MS : 0, easing: "easeOutQuint" },
         indexAxis: horizontal ? "y" : "x",
         layout: { padding: spark ? 2 : { top: 4, right: 4 } },
         interaction: circular ? { mode: "nearest", intersect: true } : { mode: "index", intersect: false },
@@ -906,7 +973,7 @@
             labels: {
               color: theme.muted,
               usePointStyle: true,
-              pointStyle: type === "line" ? "line" : "rectRounded",
+              pointStyle: type === "line" ? "line" : "rect",
               boxWidth: 10,
               boxHeight: 10,
               padding: 14,
@@ -921,7 +988,7 @@
             footerColor: theme.tooltipText,
             borderWidth: 0,
             padding: 10,
-            cornerRadius: 8,
+            cornerRadius: 0,
             boxWidth: 8,
             boxHeight: 8,
             boxPadding: 4,
@@ -948,15 +1015,15 @@
           }
         }
       },
-      plugins: type === "line" && !spark ? [crosshairPlugin(theme.axis)] : []
+      plugins: (type === "line" && !spark ? [crosshairPlugin(theme.axis)] : []).concat(circular ? [] : [drawInPlugin()])
     };
     if (!circular) cfg.options.plugins.legend.labels.generateLabels = legendLabels;
     if (isPlain(spec.options)) merge(cfg.options, spec.options);
     return cfg;
   }
 
-  // Legend keys mirror the marks: a short line for line series (dashed when the
-  // series is), a rounded square for bars. Chart.js would otherwise take the key
+  // Legend keys mirror the marks: a short straight line for line series (dashed
+  // when the series is), a square for bars. Chart.js would otherwise take the key
   // colour from the first point, whose border is the surface-coloured ring.
   function legendLabels(chart) {
     var items = window.Chart.defaults.plugins.legend.labels.generateLabels(chart);
@@ -969,7 +1036,7 @@
       it.strokeStyle = c;
       it.lineWidth = isLine ? 2 : 0;
       it.lineDash = isLine && ds.borderDash ? ds.borderDash : [];
-      it.pointStyle = isLine ? "line" : "rectRounded";
+      it.pointStyle = isLine ? "line" : "rect";
     });
     return items;
   }
@@ -994,14 +1061,66 @@
     var theme = readTheme();
     window.Chart.defaults.font.family = theme.font;
     window.Chart.defaults.color = theme.muted;
+    var drawIn = !reducedMotion() && !canvas._chartDrawn; // only a canvas's first chart draws in
     try {
-      var chart = new window.Chart(canvas, buildConfig(spec, theme, canvas));
+      var chart = new window.Chart(canvas, buildConfig(spec, theme, canvas, drawIn));
       chart._configText = text;
       charts.set(canvas, chart);
+      canvas._chartDrawn = true;
+      if (drawIn) startDrawIn(chart);
     } catch (e) {
       console.error("Chart '" + id + "' failed to render", e);
     }
   }
+
+  // A chart is drawn when its canvas first comes into view, so it draws in where it can be
+  // seen; until then the canvas is watched. With reduced motion, or without
+  // IntersectionObserver, every chart is drawn at once.
+  var chartWatch = typeof IntersectionObserver === "function" ? new IntersectionObserver(function (entries) {
+    var seen = false;
+    entries.forEach(function (e) {
+      if (!e.isIntersecting) return;
+      chartWatch.unobserve(e.target);
+      e.target._chartInView = true;
+      seen = true;
+    });
+    if (seen) renderCharts(false);
+  }, { threshold: 0.2 }) : null;
+
+  function waitsForView(canvas) {
+    if (canvas._chartInView || !chartWatch || reducedMotion()) return false;
+    if (!canvas._chartWatched) {
+      canvas._chartWatched = true;
+      chartWatch.observe(canvas);
+    }
+    return true;
+  }
+
+  // A chart whose card is still arriving (app.css: the page's blocks rise in one after another)
+  // draws in once the card is mostly in place, 150 ms into its arrival, so the draw-in is seen.
+  // Milliseconds to wait (0: draw now).
+  function untilArrived(el) {
+    var wait = 0;
+    for (var a = el.parentElement; a && a !== doc.body; a = a.parentElement) {
+      if (typeof a.getAnimations !== "function") break;
+      a.getAnimations().forEach(function (anim) {
+        if (anim.animationName !== "arrive" || anim.playState === "finished") return;
+        wait = Math.max(wait, anim.effect.getTiming().delay + 150 - (anim.currentTime || 0));
+      });
+    }
+    return wait;
+  }
+
+  // Printing draws every chart not yet in view, as it is (no draw-in).
+  window.addEventListener("beforeprint", function () {
+    if (!window.Chart || !charts) return;
+    forEach(doc.querySelectorAll("canvas[data-chart]"), function (canvas) {
+      if (charts.get(canvas)) return;
+      canvas._chartInView = true;
+      canvas._chartDrawn = true;
+      renderChart(canvas);
+    });
+  });
 
   // Canvas text isn't redrawn when a web font arrives, so charts wait for the text face.
   function textFontReady() {
@@ -1023,11 +1142,18 @@
     if (!canvases.length) return;
     Promise.all([ensureChartJs(), textFontReady()]).then(function () {
       forEach(canvases, function (canvas) {
-        if (!canvas.isConnected) return;
+        if (!canvas.isConnected || canvas._chartPending || waitsForView(canvas)) return;
         var chart = charts.get(canvas);
         var script = doc.getElementById(canvas.getAttribute("data-chart") + "-config");
         var changed = chart && script && chart._configText !== script.textContent;
-        if (force || !chart || changed) renderChart(canvas);
+        if (!(force || !chart || changed)) return;
+        var wait = chart ? 0 : untilArrived(canvas);
+        if (wait <= 0) return renderChart(canvas);
+        canvas._chartPending = true;
+        window.setTimeout(function () {
+          canvas._chartPending = false;
+          if (canvas.isConnected) renderChart(canvas);
+        }, wait);
       });
     }).catch(function (e) { console.error(e); });
   }
@@ -1082,6 +1208,64 @@
       updateWrap(w);
     });
   }
+
+  /* ------------------------------------------------------------ motion */
+
+  // The page's arrival (app.css section 7) is plain CSS and runs on its own; once it is over,
+  // <html> gets .is-arrived, which turns it off, so blocks an HTMX request swaps in later fade
+  // in ([data-swapped]) rather than arriving again. (At the latest after 2 s, e.g. in a tab that
+  // loaded in the background.)
+  function markArrived() {
+    var done = function () { root.classList.add("is-arrived"); };
+    var running = typeof doc.getAnimations === "function" ? doc.getAnimations().filter(function (a) {
+      return a.animationName === "arrive";
+    }) : [];
+    window.setTimeout(done, 2000);
+    if (!running.length || typeof Promise.allSettled !== "function") return done();
+    Promise.allSettled(running.map(function (a) { return a.finished; })).then(done);
+  }
+
+  // Budget bars fill from 0 when first visible. Those in view at load fill with their block's
+  // arrival (CSS); those below the fold wait, emptied (.is-waiting), until they are scrolled to.
+  // Bars swapped in later just show their value.
+  var BARS = ".progress__track, [data-fill]";
+  var barWatch = typeof IntersectionObserver === "function" ? new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (!e.isIntersecting) return;
+      barWatch.unobserve(e.target);
+      e.target.classList.remove("is-waiting");
+    });
+  }, { rootMargin: "0px 0px -40px 0px" }) : null;
+
+  function watchBars() {
+    if (!barWatch || reducedMotion()) return;
+    var bottom = window.innerHeight - 40;
+    forEach(doc.querySelectorAll(BARS), function (bar) {
+      var r = bar.getBoundingClientRect();
+      if (r.bottom > 0 && r.top < bottom && (r.width || r.height)) return;
+      bar.classList.add("is-waiting");
+      barWatch.observe(bar);
+    });
+  }
+
+  // What an HTMX request swapped in (a filter's results, a sorted table, the tiles the Show
+  // income switch redraws, a saved row) fades and rises in briefly ([data-swapped], app.css).
+  // The mark goes on in htmx:afterSwap, before the browser paints, so nothing shows first and
+  // then hides. It is an attribute, not a class: htmx puts back the class and style of an
+  // element it swapped with the same id when it settles, 20 ms later, mid-animation. With
+  // outerHTML the new element moves; otherwise the target stays and its new children do.
+  // Polling, quiet requests, toasts and [data-flash] elements (they glow instead) don't.
+  doc.addEventListener("htmx:afterSwap", function (evt) {
+    var el = evt.target;
+    var d = evt.detail || {};
+    if (reducedMotion() || !el || el.nodeType !== 1 || isQuiet(d.elt) || el.closest("#flash")) return;
+    var moved = d.target && d.target !== el ? [el] : Array.prototype.slice.call(el.children);
+    moved.forEach(function (t) {
+      if (t.matches("script, template, dialog, [data-flash], .sr-only")) return;
+      t.setAttribute("data-swapped", "");
+      window.setTimeout(function () { t.removeAttribute("data-swapped"); }, 450);
+    });
+  });
 
   /* ------------------------------------------------------------- swaps */
 
@@ -1212,7 +1396,9 @@
     watchFlash();
     openAutoDialogs();
     watchTables();
+    watchBars();
     renderCharts(false);
+    markArrived();
   }
 
   if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", init);

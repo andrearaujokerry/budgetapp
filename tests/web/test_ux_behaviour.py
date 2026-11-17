@@ -291,3 +291,230 @@ def test_a_checkbox_with_help_is_named_by_its_label_alone():
         assert html.index("</label>") > html.index('id="t-help"')  # still one click target
     plain = templates.env.from_string(source + '{{ form.checkbox_field("x", "Also", id="t") }}')
     assert "aria-labelledby" not in plain.render() and "aria-describedby" not in plain.render()
+
+
+# --------------------------------------------------------------------------- shapes and motion
+# The owner asked for no rounded shapes anywhere (squares and pointed polygons only), a
+# text-only sidebar and motion like a product page that is never in the way (README "Shapes"
+# and "Motion"). These pin the rules so a later change can't quietly bring a curve back.
+
+TEMPLATES = Path(web.__file__).parent / "templates"
+#: The page-motion keyframes (app.css section 7); every one is off under reduced motion.
+PAGE_MOTION = ("page-out", "arrive", "reveal", "title-away", "swap-in", "fade-in", "fade-out")
+
+
+def stylesheets() -> dict[str, str]:
+    """app.css and every page stylesheet, comments removed."""
+    paths = [STATIC / "css" / "app.css", *sorted((STATIC / "css" / "pages").glob("*.css"))]
+    comments = re.compile(r"/\*.*?\*/", re.S)
+    return {p.name: comments.sub("", p.read_text(encoding="utf-8")) for p in paths}
+
+
+def blocks(css: str, prelude: str) -> list[str]:
+    """The insides of every ``<prelude> { … }`` block (nested braces included)."""
+    out = []
+    for match in re.finditer(re.escape(prelude) + r"\s*\{", css):
+        depth, i = 1, match.end()
+        while depth:
+            depth += {"{": 1, "}": -1}.get(css[i], 0)
+            i += 1
+        out.append(css[match.end() : i - 1])
+    return out
+
+
+def test_every_corner_is_square():
+    """No border-radius but 0 in the app's own CSS (no px, no 50%, no pill), the radius tokens
+    are 0, and a reset squares what browsers round by default (buttons, fields, selects)."""
+    for name, css in stylesheets().items():
+        for prop, value in re.findall(r"(border(?:-[a-z]+)*-radius)\s*:\s*([^;}]+)", css):
+            assert value.strip() == "0", f"{name}: {prop}: {value.strip()}"
+        for token, value in re.findall(r"(--radius-[\w-]+)\s*:\s*([^;}]+)", css):
+            assert value.strip() == "0", f"{name}: {token}: {value.strip()}"
+        assert not re.search(r"\b(?:circle|ellipse)\(", css), name  # no round clip-paths either
+    reset = [body for sel, body in css_rules(source("css/app.css")) if sel.startswith("*,")]
+    assert any("border-radius: 0" in body for body in reset)
+    lists = declarations(source("css/app.css"), "ul")
+    assert any("list-style-type: square" in body for body in lists)  # bullets too
+
+
+def test_round_marks_are_squares_and_radios_diamonds():
+    """Dots are squares (equal sides, no radius); a radio is a turned square, so it never looks
+    like a checkbox, and so is each colour in the category picker; the switch is a square track
+    whose square knob slides (it still takes --accent-contrast on an ink track)."""
+    css = source("css/app.css")
+    for selector in (".cat__dot", ".pill__dot"):
+        body = " ".join(declarations(css, selector))
+        width, height = re.search(r"width: (\S+);", body), re.search(r"height: (\S+);", body)
+        assert width and height and width.group(1) == height.group(1), selector
+    radio = declarations(css, '.check input[type="radio"]')
+    assert any("transform: rotate(45deg)" in body for body in radio)
+    check = declarations(css, '.check input[type="checkbox"]:not(.switch)::before')
+    assert any("clip-path: polygon(" in body for body in check)  # an angular check mark
+    swatch = declarations(source("css/pages/categories.css"), ".swatch-option__dot")
+    assert any("transform: rotate(45deg)" in body for body in swatch)
+    knob = " ".join(declarations(css, ".switch:checked::before"))
+    assert "background: var(--accent-contrast)" in knob and "translateX(" in knob
+
+
+def test_icons_are_angular():
+    """Icons draw with square caps and mitred joins, and no glyph has a circle, an ellipse, a
+    rounded rect or an arc or curve command; nor does any other SVG the app draws (the brand
+    mark, the favicon, the select chevrons)."""
+    css = source("css/app.css")
+    icon = " ".join(declarations(css, ".icon"))
+    assert "stroke-linecap: square" in icon and "stroke-linejoin: miter" in icon
+    comments = re.compile(r"\{#.*?#\}", re.S)
+    templates = TEMPLATES.rglob("*.html")
+    svgs = {p.name: comments.sub("", p.read_text(encoding="utf-8")) for p in templates}
+    svgs |= {p.name: p.read_text(encoding="utf-8") for p in (STATIC / "img").glob("*.svg")}
+    svgs["app.css chevrons"] = " ".join(re.findall(r'url\("data:image/svg\+xml,([^"]+)"\)', css))
+    assert "i-home" in svgs["icons.html"] and svgs["app.css chevrons"]
+    for name, text in svgs.items():
+        assert not re.search(r"<circle|<ellipse|%3Ccircle|%3Cellipse", text), name
+        assert not re.search(r"""\s(?:rx|ry)=["']""", text), name
+        assert "round" not in " ".join(re.findall(r"stroke-line(?:cap|join)[=:]\s*\S+", text)), name
+        for d in re.findall(r"""\sd=["']([^"']*)["']""", text):
+            assert not re.search(r"[AaCcSsQqTt]", d), f"{name}: a curve in {d!r}"
+
+
+def test_the_sidebar_nav_is_text_only(client):
+    """The nav, in the sidebar and in the phone menu, draws no icon next to a page name; the
+    current page is marked by its ink text and a 2px bar (.nav__marker), never a filled
+    background; and the sync status in the top bar is a flat label, not a pill."""
+    from budgetapp.web.templating import NAV_ITEMS
+
+    assert all(set(item) == {"key", "label", "href", "group"} for item in NAV_ITEMS)
+    html = client.get("/").text
+    navs = re.findall(r'<nav class="nav" aria-label="Main">.*?</nav>', html, re.S)
+    assert len(navs) == 2  # sidebar + phone menu
+    for nav in navs:
+        assert "<svg" not in nav and "icon" not in nav
+        current = re.search(r'<a class="nav__link" href="/" aria-current="page">(.*?)</a>', nav)
+        marker = '<span class="nav__marker" aria-hidden="true"></span>'
+        assert current and marker in current.group(1)
+    footer = re.search(r'<div class="sidebar__footer">(.*?)</div>', html, re.S).group(1)
+    assert "<svg" not in footer
+    css = source("css/app.css")
+    current_link = " ".join(declarations(css, '.nav__link[aria-current="page"]'))
+    assert "background" not in current_link and "color: var(--text)" in current_link
+    assert "background" not in " ".join(declarations(css, ".nav__link:hover"))
+    pill = " ".join(declarations(css, ".pill"))
+    assert "border" not in pill and "background" not in pill
+
+
+def test_flat_surfaces_keep_shadows_for_overlays_only():
+    """Cards, tiles, buttons and the filter bar are flat (a hairline border, no shadow); only
+    what floats above the page has one: popovers, tooltips, dialogs, toasts, the phone menu."""
+    css = source("css/app.css")
+    for selector in (".card", ".stat", ".btn", ".filter-bar", ".segmented"):
+        shadows = re.findall(r"box-shadow:\s*([^;]+);", " ".join(declarations(css, selector)))
+        assert set(shadows) <= {"none"}, selector  # (print says none)
+    assert "--shadow-sm" not in css and "--shadow-xs" not in css
+    for selector in (".dialog", ".toast", ".mobile-nav__panel"):
+        assert "box-shadow: var(--shadow-lg)" in " ".join(declarations(css, selector)), selector
+
+
+def test_charts_use_square_marks_and_straight_lines():
+    """Lines are straight (tension 0) with mitred joins and flat ends; points, tooltip keys and
+    bar legend keys are squares, never rounded or round; bars and tooltips have square corners.
+    (Doughnuts and pies are the UI kit's only.)"""
+    js = source("js/app.js")
+    build = function_body(js, "buildConfig")
+    assert "out.tension = 0;" in build and 'out.borderJoinStyle = "miter";' in build
+    assert 'out.borderCapStyle = "butt";' in build and "out.borderRadius = 0;" in build
+    assert build.count('out.pointStyle = "rect";') == 2  # line points, bar tooltip keys
+    assert "cornerRadius: 0," in build
+    assert 'pointStyle: type === "line" ? "line" : "rect",' in build
+    assert 'it.pointStyle = isLine ? "line" : "rect";' in function_body(js, "legendLabels")
+    assert not re.search(r"rectRounded|\"round\"|'round'|pointStyle[^,;]*circle", js)
+
+
+def test_page_changes_are_view_transitions_that_keep_the_chrome_still():
+    """A cross-document View Transition (also for Back and Forward), only without reduced
+    motion; the sidebar, the bars at the top and the notices keep their own names and do not
+    animate; the top bar is named itself (a named ancestor would stop its frosted blur); and
+    clicks pass through the transition."""
+    css = re.sub(r"/\*.*?\*/", "", source("css/app.css"), flags=re.S)
+    allowed = blocks(css, "@media (prefers-reduced-motion: no-preference)")
+    assert any(re.search(r"@view-transition\s*\{\s*navigation: auto;", b) for b in allowed)
+    assert css.count("@view-transition") == 1
+    named = r"^([^\s{}][^{}\n]*?) \{ view-transition-name: ([\w-]+); \}"
+    names = dict(re.findall(named, css, re.M))
+    assert names[".sidebar"] == "sidebar" and names[".topbar"] == "topbar"
+    assert {".mobile-bar", ".env-bar", ".notices", ".topbar__title"} <= set(names)
+    assert ".masthead" not in names
+    still = " ".join(sel for sel, body in css_rules(css) if "animation: none" in body)
+    for name in ("sidebar", "mobile-bar", "env-bar", "topbar", "notices"):
+        assert f"::view-transition-group({name})" in still, name
+    assert any("pointer-events: none" in body for body in declarations(css, "::view-transition"))
+
+
+def test_every_page_motion_is_off_with_reduced_motion():
+    """Each rule that runs a page-motion animation (or a scroll-driven one) is covered by the
+    reduced-motion block, which switches them off with animation: none; the bars stop filling;
+    and app.js asks reducedMotion() before drawing charts in, holding bars and fading swaps."""
+    css = re.sub(r"/\*.*?\*/", "", source("css/app.css"), flags=re.S)
+    reduced = "\n".join(blocks(css, "@media (prefers-reduced-motion: reduce)"))
+    off = " ".join(sel for sel, body in css_rules(reduced) if "animation: none !important" in body)
+    for covered in (".content > *", ".content > * > *", ".card", ".stat", ".page-header__title"):
+        assert covered in off, covered
+    assert "[data-swapped]" in off and "::view-transition-group(*)" in off
+    bars = " ".join(body for sel, body in css_rules(reduced) if ".progress__fill" in sel)
+    assert "transition: none !important" in bars and "transform: none !important" in bars
+    outside = css
+    for block in blocks(css, "@media (prefers-reduced-motion: reduce)"):
+        outside = outside.replace(block, "")
+    assert set(PAGE_MOTION) <= set(re.findall(r"@keyframes ([\w-]+)", css))
+    markers = (".content >", ".card", ".stat", ".page-header__title", "[data-swapped]")
+    markers += ("::view-transition",)
+    for selector, body in css_rules(outside):
+        animated = re.findall(r"animation(?:-name)?:\s*([^;]+);", body)
+        uses = {n for value in animated for n in re.findall(r"[\w-]+", value) if n in PAGE_MOTION}
+        if uses or "animation-timeline" in body:
+            assert any(m in selector for m in markers), f"{selector} is not switched off"
+    js = source("js/app.js")
+    assert "reducedMotion()" in function_body(js, "renderChart")
+    assert "reducedMotion()" in function_body(js, "waitsForView")
+    assert "reducedMotion()" in function_body(js, "watchBars")
+    assert "reducedMotion()" in listener(js, "htmx:afterSwap")
+
+
+def test_printing_shows_every_part_of_the_page():
+    """Paper doesn't scroll: a card below the fold would print faded, waiting for its reveal,
+    and a bar empty. The print stylesheet switches page motion off like reduced motion does,
+    and app.js draws the charts not yet seen before printing."""
+    css = re.sub(r"/\*.*?\*/", "", source("css/app.css"), flags=re.S)
+    printed = "\n".join(blocks(css, "@media print"))
+    off = " ".join(sel for sel, body in css_rules(printed) if "animation: none !important" in body)
+    for covered in (".content > *", ".content > * > *", ".card", ".stat", ".page-header__title"):
+        assert covered in off, covered
+    bars = " ".join(body for sel, body in css_rules(printed) if ".progress__fill" in sel)
+    assert "transform: none !important" in bars
+    assert 'addEventListener("beforeprint"' in source("js/app.js")
+
+
+def test_charts_draw_in_when_first_seen_and_swaps_fade_in():
+    """A chart is drawn when its canvas first comes into view (IntersectionObserver), and only
+    then draws in; what HTMX swaps in is marked with an attribute (htmx resets class and style
+    when it settles), never for polling or the toast stack; the arrival hands over to swaps
+    through .is-arrived."""
+    js = source("js/app.js")
+    assert "new IntersectionObserver(" in js
+    assert "waitsForView(canvas)" in function_body(js, "renderCharts")
+    render = function_body(js, "renderChart")
+    assert "!canvas._chartDrawn" in render and "startDrawIn(chart)" in render
+    swap = listener(js, "htmx:afterSwap")
+    assert 'setAttribute("data-swapped"' in swap and "isQuiet(d.elt)" in swap and "#flash" in swap
+    assert 'classList.add("is-arrived")' in function_body(js, "markArrived")
+    assert "flashSwapped(el)" in listener(js, "htmx:afterSettle")  # saved rows still glow
+
+
+def test_templates_set_only_css_variables_inline():
+    """Inline style="" attributes only pass values into CSS variables (--value, --cat-color, …):
+    no styling crept into a template (and <style> elements are refused by test_security)."""
+    jinja = re.compile(r"\{\{.*?\}\}|\{%.*?%\}", re.S)
+    for path in TEMPLATES.rglob("*.html"):
+        for value in re.findall(r'\sstyle="([^"]*)"', path.read_text(encoding="utf-8")):
+            for declaration in jinja.sub("", value).split(";"):
+                declaration = declaration.strip()
+                assert not declaration or declaration.startswith("--"), f"{path.name}: {value}"

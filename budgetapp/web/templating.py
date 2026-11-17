@@ -39,61 +39,20 @@ log = logging.getLogger(__name__)
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
-#: Sidebar and mobile menu, in display order (``active_nav`` is one of these keys).
+#: Sidebar and mobile menu, in display order (``active_nav`` is one of these keys). The nav is
+#: text only: a label under its group heading, no icon.
 NAV_ITEMS: tuple[dict[str, str], ...] = (
-    {"key": "dashboard", "label": "Dashboard", "href": "/", "icon": "home", "group": "Money"},
-    {
-        "key": "transactions",
-        "label": "Transactions",
-        "href": "/transactions",
-        "icon": "list",
-        "group": "Money",
-    },
-    {"key": "budgets", "label": "Budgets", "href": "/budgets", "icon": "target", "group": "Money"},
-    {
-        "key": "trends",
-        "label": "Trends",
-        "href": "/trends",
-        "icon": "trending",
-        "group": "Insights",
-    },
-    {
-        "key": "recurring",
-        "label": "Recurring",
-        "href": "/recurring",
-        "icon": "repeat",
-        "group": "Insights",
-    },
-    {
-        "key": "statements",
-        "label": "Statements",
-        "href": "/statements",
-        "icon": "receipt",
-        "group": "Insights",
-    },
-    {
-        "key": "categories",
-        "label": "Categories",
-        "href": "/categories",
-        "icon": "tag",
-        "group": "Organize",
-    },
-    {"key": "rules", "label": "Rules", "href": "/rules", "icon": "wand", "group": "Organize"},
-    {"key": "imports", "label": "Import", "href": "/import", "icon": "upload", "group": "Data"},
-    {
-        "key": "connection",
-        "label": "Connection",
-        "href": "/connection",
-        "icon": "link",
-        "group": "Data",
-    },
-    {
-        "key": "settings",
-        "label": "Settings",
-        "href": "/settings",
-        "icon": "settings",
-        "group": "Data",
-    },
+    {"key": "dashboard", "label": "Dashboard", "href": "/", "group": "Money"},
+    {"key": "transactions", "label": "Transactions", "href": "/transactions", "group": "Money"},
+    {"key": "budgets", "label": "Budgets", "href": "/budgets", "group": "Money"},
+    {"key": "trends", "label": "Trends", "href": "/trends", "group": "Insights"},
+    {"key": "recurring", "label": "Recurring", "href": "/recurring", "group": "Insights"},
+    {"key": "statements", "label": "Statements", "href": "/statements", "group": "Insights"},
+    {"key": "categories", "label": "Categories", "href": "/categories", "group": "Organize"},
+    {"key": "rules", "label": "Rules", "href": "/rules", "group": "Organize"},
+    {"key": "imports", "label": "Import", "href": "/import", "group": "Data"},
+    {"key": "connection", "label": "Connection", "href": "/connection", "group": "Data"},
+    {"key": "settings", "label": "Settings", "href": "/settings", "group": "Data"},
 )
 NAV_KEYS = frozenset(item["key"] for item in NAV_ITEMS)
 

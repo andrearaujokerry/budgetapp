@@ -245,8 +245,18 @@
 {{ form.textarea_field('notes', 'Notes', value='Rides to the office are reimbursed quarterly.', rows=2, optional=true, id='kit-notes') }}
 <div class="stack stack--sm">
 {{ form.checkbox_field('apply_past', 'Also apply to past transactions', checked=true, help='Transactions you edited by hand are never changed.', id='kit-apply') }}
+{{ form.checkbox_field('notify', 'Send a notification too', id='kit-notify') }}
 {{ form.switch_field('is_active', 'Rule is active', checked=true, id='kit-active') }}
+{{ form.switch_field('is_paused', 'Pause this rule', id='kit-paused') }}
 </div>
+{#- Radios are diamonds (a turned square), so one choice of several never looks like a checkbox. #}
+<fieldset class="field" id="kit-radios">
+<legend class="field__label">Alert on</legend>
+<div class="stack stack--sm">
+<label class="check" for="kit-radio-every"><input type="radio" id="kit-radio-every" name="alert_on" value="every" checked><span class="check__text"><span>Every matching charge</span></span></label>
+<label class="check" for="kit-radio-large"><input type="radio" id="kit-radio-large" name="alert_on" value="large"><span class="check__text"><span>Only charges over $500</span></span></label>
+</div>
+</fieldset>
 <div class="form-actions">
 {{ ui.button('Save rule', variant='primary', type='submit') }}
 {{ ui.button('Cancel', variant='ghost') }}

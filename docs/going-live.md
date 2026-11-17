@@ -26,7 +26,7 @@ So the app treats every production link as a one-time event per bank login:
   you link. Even then, an account whose name and last digits match one already linked there is
   refused, because that is the same login again. The refusal can't undo what happened in Plaid's
   window: at some banks (Plaid names Chase, PNC, Navy Federal and Schwab) signing in to the same
-  login a second time already breaks the first connection. If that happens, its pill says
+  login a second time already breaks the first connection. If that happens, its status says
   **Reconnect needed**: use **Reconnect** on it.
 - Problems are always repaired **in place**: Reconnect, Renew consent, Add accounts and "Grant
   access to statement details" reopen the same connection in Plaid's window and never use another
@@ -275,7 +275,7 @@ bank or card** button.
   accounts** on that bank's connection. Plaid's window opens for the same connection and lets you
   pick the accounts to share. No new connection is used, and the next sync brings the new
   accounts in.
-- Each connection has its own Keychain item, its own status pill, its own Reconnect and Renew
+- Each connection has its own Keychain item, its own status, its own Reconnect and Renew
   buttons and its own entry in `./run doctor --env production`; a problem with one never stops
   the others from syncing.
 

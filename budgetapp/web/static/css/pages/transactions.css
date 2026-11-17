@@ -147,7 +147,6 @@
   margin: auto;
   padding: 4px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
   background: var(--surface-raised);
   box-shadow: var(--shadow-md);
   color: var(--text);
@@ -174,7 +173,6 @@
   height: 36px;
   padding: 0 12px;
   border: 0;
-  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
   font: inherit;
@@ -234,7 +232,6 @@
 
 .txn-catpick__option {
   padding: 6px 8px;
-  border-radius: var(--radius-sm);
 }
 
 .txn-catpick__option:hover {
@@ -347,7 +344,6 @@
 
 .txn-rule-preview {
   padding: 10px 12px;
-  border-radius: var(--radius-md);
   background: var(--surface-sunken);
 }
 

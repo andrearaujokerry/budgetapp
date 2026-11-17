@@ -291,6 +291,10 @@ img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'; fr
   `assert csp_problems(response.text, rendered=True) == []`.
 - Page CSS, only when a component is genuinely missing:
   `{% block head %}<link rel="stylesheet" href="/static/css/pages/<page>.css">{% endblock %}`.
+  Keep to the look: square corners only (no `border-radius` but 0), square or diamond marks,
+  hairline borders without shadows, and motion only through the shared choreography with its
+  reduced-motion switch (no animation library). The design-system README's section 13 has the
+  rules; `tests/web/test_ux_behaviour.py` checks them.
 - Page JS: `{% block scripts %}<script src="/static/js/<page>.js" defer></script>{% endblock %}`.
   Pass data with `data-*` attributes or a JSON island; use `window.App` (`App.toast`,
   `App.renderCharts`, `App.formatMoney`). Charts: `ui.chart(...)` and `{% block charts %}yes{% endblock %}`.
@@ -384,4 +388,6 @@ def test_saving_redirects_with_a_toast(client):
   calls raise "Not available with demo data". See `budgetapp/devtools/README.md`.
 - Screenshots: headless Chrome won't lay out narrower than 500px with `--window-size`, so a 390
   capture from `shot.sh` is the 500px layout cropped; emulate the device viewport (DevTools
-  `Emulation.setDeviceMetricsOverride`) for true phone widths.
+  `Emulation.setDeviceMetricsOverride`) for true phone widths. A full-page capture shows the page
+  as it loads: cards below the fold wait to appear on scroll and their charts to draw in. Emulate
+  `prefers-reduced-motion: reduce` to see every part of a page at once.

@@ -94,7 +94,8 @@
   margin-block: -2px;
 }
 
-/* Colour picker: the palette slots as round radio swatches. */
+/* Colour picker: the palette slots as radio diamonds (a turned square, like every radio: one
+   choice of several). Each diamond reaches past its box, so the margins keep them apart. */
 .swatch-field {
   margin: 0;
   padding: 0;
@@ -110,7 +111,7 @@
 .swatch-picker {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--sp-2);
+  gap: 10px;
 }
 
 .swatch-option {
@@ -132,19 +133,21 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-pill);
+  width: 20px;
+  height: 20px;
+  margin: 5px;
   background: var(--swatch, var(--chart-other));
   box-shadow: inset 0 0 0 1px var(--border);
   color: var(--surface);
   forced-color-adjust: none;
+  transform: rotate(45deg);
   transition: box-shadow var(--dur-fast) var(--ease);
 }
 
 .swatch-option__dot .icon {
   stroke-width: 3;
   opacity: 0;
+  transform: rotate(-45deg); /* the check stays upright inside the diamond */
 }
 
 .swatch-option:hover .swatch-option__dot {

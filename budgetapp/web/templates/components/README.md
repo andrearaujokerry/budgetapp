@@ -14,6 +14,9 @@ Ground rules (CSP: `script-src 'self'`, `style-src 'self'`, `style-src-attr 'uns
   (`--cat-color`, `--swatch`, `--value`, `--chart-h`, `--grid-min`, `--grid-gap`, `--stack-gap`,
   `--cluster-gap`, `--truncate-w`, `--grow-min`, `--table-max-h`, `--skeleton-w`).
 - Never hard-code colours, sizes or shadows: use the tokens (section 10).
+- No rounded shapes anywhere: corners are square, round marks are squares, radios are diamonds,
+  icons are angular; and motion follows one choreography that switches off with reduced motion
+  (section 13).
 - Colour is never the only signal: pair it with text or an icon (the macros do).
 - Macros fail loudly on a wrong tone, variant, unlabelled inline control or non-numeric amount
   (`UndefinedError` with a message saying what to pass), so a typo breaks the page's tests instead
@@ -73,9 +76,9 @@ missing `env` hides the environment bar, so **every error handler must render th
 | --- | --- | --- |
 | `request` | Starlette `Request` | required by `TemplateResponse`; base does not read it |
 | `env` | `"sandbox"` \| `"production"` \| `"test"` \| `"demo"` (see 2.2) | env bar, brand label, document title suffix, `<html data-env>` |
-| `nav_items` | list of `{key, label, href, icon, group}` (dicts or objects), display order | sidebar and mobile menu; consecutive items with the same `group` form one group |
+| `nav_items` | list of `{key, label, href, group}` (dicts or objects), display order | sidebar and mobile menu, text only (no icons); consecutive items with the same `group` form one group |
 | `active_nav` | key or `None` | `aria-current="page"`, top-bar breadcrumb `Group / Title`, default title |
-| `conn` | `services.status.ConnectionStatus` or `None` | sync status (pill + action), reconnect and consent banners (see 2.3) |
+| `conn` | `services.status.ConnectionStatus` or `None` | sync status (label + action), reconnect and consent banners (see 2.3) |
 | `messages` | list of `{level, text}` | toasts in `#flash` (levels `success`, `info`, `warning`, `error`; also `ok`, `warn`, `danger`, `over`; anything else shows as info) |
 | `app_version` | str | sidebar footer |
 
@@ -96,22 +99,22 @@ The web shell passes `env="demo"` when it serves a demo database (`serve --demo 
 ### 2.3 What base reads from `conn`
 
 `conn` is `services.status.connection_status(session)`; pass `None` when it cannot be computed
-(then no pill, no action and no connection banners are shown). base.html and
+(then no status, no action and no connection banners are shown). base.html and
 `components/sync_status.html` read exactly these fields, all of which exist on F1's dataclasses
 (checked by rendering with real objects under `StrictUndefined`):
 
 | Read by | Field | Type | Used for |
 | --- | --- | --- | --- |
-| base + partial | `conn.state` | `"healthy"` \| `"stale"` \| `"error"` \| `"needs_reconnect"` \| `"not_linked"` | pill state; `not_linked` suppresses the reconnect banner |
-| base + partial | `conn.needs_reconnect` | bool (property) | reconnect banner; pill and action "Reconnect" |
+| base + partial | `conn.state` | `"healthy"` \| `"stale"` \| `"error"` \| `"needs_reconnect"` \| `"not_linked"` | status state; `not_linked` suppresses the reconnect banner |
+| base + partial | `conn.needs_reconnect` | bool (property) | reconnect banner; status and action "Reconnect" |
 | base | `conn.reconnect_names` | tuple of str (property) | the reconnect banner names each connection that needs it (wave 3, BANK-6) |
 | base | `conn.consent_items` | tuple of `ItemStatus` (property) | the consent banner: every connection whose consent is due (a warning, or expired), soonest first, except one that needs reconnecting (its own Reconnect renews it). Each: `.display_name`, `.is_amex` (the "every 12 months" sentence is American Express's), `.consent_days_left` (int, negative = expired) and `.consent_due_at` (aware datetime: `.astimezone().date()` then `\|date_long`). `conn.consent_item` is the first of them |
 | partial | `conn.consent_expired` | bool (property) | "Renew access" (when nothing can sync) rather than "Reconnect" |
 | partial | `conn.syncable` | bool (property) | some connection neither needs reconnecting nor has an expired consent: the action stays Sync now |
-| partial | `conn.items[*].display_name`, `.state`, `.syncing` | str or `None`, str, bool | with several connections the pill's tooltip lists each one and its state |
-| partial | `conn.label` | str | pill text fallback |
-| partial | `conn.syncing` | bool (property) | "Syncing…" pill, polling, disabled Sync now |
-| partial | `conn.stale` | bool (property) | warning-toned "Synced 2 days ago" pill |
+| partial | `conn.items[*].display_name`, `.state`, `.syncing` | str or `None`, str, bool | with several connections the status's tooltip lists each one and its state |
+| partial | `conn.label` | str | status text fallback |
+| partial | `conn.syncing` | bool (property) | "Syncing…" status, polling, disabled Sync now |
+| partial | `conn.stale` | bool (property) | warning-toned "Synced 2 days ago" status |
 | partial | `conn.last_sync_success_at` | aware datetime or `None` (property) | "Synced " + `\|relative_time` |
 | partial | `conn.primary` | `ItemStatus` or `None` (property) | the worst Item (its fields below) |
 | partial | `conn.primary.display_name` | str or `None` | healthy tooltip "American Express via Plaid"; the problem tooltips start with it |
@@ -146,18 +149,18 @@ Notices (between the top bar and the page, only rendered when there is one):
 
 ### 2.4 Sync status partial (`components/sync_status.html`)
 
-`<div id="sync-status">` holds the status pill (a link to `/connection`) **and** its action, so
-the two always change together. base.html includes it in the top bar when `conn` is not `None`.
+`<div id="sync-status">` holds the status (a flat label with a small square mark, a link to
+`/connection`) **and** its action, so the two always change together. base.html includes it in the top bar when `conn` is not `None`.
 It needs only `conn` (and the `relative_time` filter).
 
-The pill and the action are chosen independently (first match wins in each list):
+The status and the action are chosen independently (first match wins in each list):
 
-| Pill: situation | State class and text |
+| Status: situation | State class and text |
 | --- | --- |
-| `conn.syncing` | `syncing` "Syncing…" (pulsing dot; the partial polls, see below) |
+| `conn.syncing` | `syncing` "Syncing…" (blinking mark; the partial polls, see below) |
 | `conn.needs_reconnect` (and state is not `not_linked`) | `needs_reconnect` "Reconnect needed" (tooltip: the institution, then `primary.error_message` or `error_code`) |
 | `conn.state == "error"` | `error` "Sync problem" (tooltip: the institution, then `primary.error_message` or `error_code`) |
-| `conn.state == "not_linked"` | `not_linked` "Not linked" (hollow dot) |
+| `conn.state == "not_linked"` | `not_linked` "Not linked" (hollow square) |
 | `conn.state == "stale"` or `conn.stale` | `stale` (warning tone) "Synced 2 days ago" (or `conn.label` when never synced) |
 | otherwise | `healthy` "Synced 5 min ago" (or `conn.label`; tooltip "American Express via Plaid") |
 
@@ -166,7 +169,7 @@ The pill and the action are chosen independently (first match wins in each list)
 | `conn.state == "not_linked"` | primary **Link account** link → `/connection` |
 | not `conn.syncable` (no connection can sync: each needs reconnecting or its consent expired) | **Reconnect** link → `/connection` when one needs reconnecting, else **Renew access** |
 | `conn.syncing` | disabled Sync now with a spinning icon |
-| otherwise | **Sync now**: `<form method="post" action="/connection/sync">` with a button carrying `hx-post="/connection/sync" hx-target="#sync-status" hx-swap="outerHTML"`, so it also works without JS. With several connections it stays while one of them can sync, even if another needs reconnecting (the pill and the reconnect banner lead to that repair), and the route then leaves the connections that need reconnecting out |
+| otherwise | **Sync now**: `<form method="post" action="/connection/sync">` with a button carrying `hx-post="/connection/sync" hx-target="#sync-status" hx-swap="outerHTML"`, so it also works without JS. With several connections it stays while one of them can sync, even if another needs reconnecting (the status and the reconnect banner lead to that repair), and the route then leaves the connections that need reconnecting out |
 
 Route contract (SYNC package, `routes/connection.py`) — **both routes return this one partial**,
 rendered with a fresh `conn`:
@@ -205,68 +208,30 @@ rendered with a fresh `conn`:
 - `ui.flash_oob` from Python: `templates.env.get_template("components/ui.html").module.flash_oob(level, text)`
   returns `Markup` to append to an HTMX partial.
 
-Recommended `nav_items` (icon names are from the sprite):
+`nav_items` (`templating.NAV_ITEMS`): text only, a label under its group heading:
 
 ```python
-NAV_ITEMS = [
-    {"key": "dashboard", "label": "Dashboard", "href": "/", "icon": "home", "group": "Money"},
-    {
-        "key": "transactions",
-        "label": "Transactions",
-        "href": "/transactions",
-        "icon": "list",
-        "group": "Money",
-    },
-    {"key": "budgets", "label": "Budgets", "href": "/budgets", "icon": "target", "group": "Money"},
-    {
-        "key": "trends",
-        "label": "Trends",
-        "href": "/trends",
-        "icon": "trending",
-        "group": "Insights",
-    },
-    {
-        "key": "recurring",
-        "label": "Recurring",
-        "href": "/recurring",
-        "icon": "repeat",
-        "group": "Insights",
-    },
-    {
-        "key": "statements",
-        "label": "Statements",
-        "href": "/statements",
-        "icon": "receipt",
-        "group": "Insights",
-    },
-    {
-        "key": "categories",
-        "label": "Categories",
-        "href": "/categories",
-        "icon": "tag",
-        "group": "Organize",
-    },
-    {"key": "rules", "label": "Rules", "href": "/rules", "icon": "wand", "group": "Organize"},
-    {"key": "imports", "label": "Import", "href": "/import", "icon": "upload", "group": "Data"},
-    {
-        "key": "connection",
-        "label": "Connection",
-        "href": "/connection",
-        "icon": "link",
-        "group": "Data",
-    },
-    {
-        "key": "settings",
-        "label": "Settings",
-        "href": "/settings",
-        "icon": "settings",
-        "group": "Data",
-    },
-]
+NAV_ITEMS = (
+    {"key": "dashboard", "label": "Dashboard", "href": "/", "group": "Money"},
+    {"key": "transactions", "label": "Transactions", "href": "/transactions", "group": "Money"},
+    {"key": "budgets", "label": "Budgets", "href": "/budgets", "group": "Money"},
+    {"key": "trends", "label": "Trends", "href": "/trends", "group": "Insights"},
+    {"key": "recurring", "label": "Recurring", "href": "/recurring", "group": "Insights"},
+    {"key": "statements", "label": "Statements", "href": "/statements", "group": "Insights"},
+    {"key": "categories", "label": "Categories", "href": "/categories", "group": "Organize"},
+    {"key": "rules", "label": "Rules", "href": "/rules", "group": "Organize"},
+    {"key": "imports", "label": "Import", "href": "/import", "group": "Data"},
+    {"key": "connection", "label": "Connection", "href": "/connection", "group": "Data"},
+    {"key": "settings", "label": "Settings", "href": "/settings", "group": "Data"},
+)
 ```
 
+The current page's link is full-strength ink with a sharp 2px bar at its left edge (`<span
+class="nav__marker">` inside it); the others are muted and brighten on hover. No background
+bubble, and no icons, in the sidebar or the phone menu.
+
 Base also renders: a skip link to `#main`, the icon sprite, the sidebar (≥ 900px: brand +
-environment label, grouped nav, "Private · runs only on this Mac · v{app_version}") or below 900px
+environment label, grouped text nav, "Private · runs only on this Mac · v{app_version}") or below 900px
 a mobile bar with a CSS-only `<details>` menu, `<div id="flash" class="toast-stack">` (holds
 `messages` and out-of-band flashes), `<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>`,
 and the scripts in this order, all `defer`: `/static/vendor/htmx.min.js`, Chart.js (only when the
@@ -335,7 +300,7 @@ Use `ui.money` for amounts shown as amounts (tabular figures, credit colour, pen
 
 A category's `color` is stored as one of three forms, and every component accepts all three:
 
-| Stored value | Dots, chips, swatches (`ui.color_value`) | Charts (`resolveColor` in app.js) |
+| Stored value | Dots (small squares), chips, swatches (`ui.color_value`) | Charts (`resolveColor` in app.js) |
 | --- | --- | --- |
 | `"cat-1"` … `"cat-16"` (preferred; the seeded categories use these) | `var(--cat-N)`: changes with the theme | the theme's `--cat-N` |
 | `"other"` | `var(--chart-other)` (neutral grey) | `--chart-other` |
@@ -368,8 +333,8 @@ other macros (`ui.stat("Spent", ui.money(x))`).
 | `money(amount, signed=false, pending=false, tone=none, cents=true, symbol="$", class=none)` | Amount in tabular figures (3.2). Plaid sign: charges `$12.34` plain; credits `−$12.34` green; `None` → muted `—`. `signed=true` prefixes `+` and turns off the automatic green (deltas). `pending=true` italic + muted + "(pending)" for screen readers. `tone` (3.1): `neutral`, `ok`, `warn`, `over`, `muted`. `cents=false` → whole dollars. |
 | `money_text(amount, signed=false, cents=true, symbol="$")` | The same text without markup (sentences, aria-labels, tooltips). |
 | `decimal_text(amount, places=2)` | Plain number for form values: half-up, no grouping, ASCII `-` (`1234.50`); `""` for `None`. |
-| `category_badge(category, chip=false, href=none, class=none)` | Colour dot + name from `category.name`, `.color` (3.3), `.is_hidden` (muted, eye-off icon, "(hidden)"). `None` → "Uncategorized" with a hollow dot. `chip=true` pill style; `href` makes it a link. |
-| `progress(pct, label=none, pace_pct=none, status=none, size=none, show_pct=true, name=none)` | Budget meter, `role="meter"` with a text value. `pct` = percent used (`Decimal`/int/float; `None` = no budget; negative, when refunds exceed charges, shows its text over an empty bar). Status is automatic: ok < 80 ≤ warn ≤ 100 < over (warn/over add an alert icon), or force it with `status`. Text is a whole percent, except next to a threshold where one decimal is rounded toward the colour shown (79.96 → "79.9%" green, 100.04 → "100.1%" red). Over 100% the bar fills, a dark tick overhanging the track marks where the budget ran out and the overspend is hatched. `pace_pct` (0–100, share of the period elapsed) draws a small caret above the bar with a notch through it (tooltip "Pace: 60% of the period has passed"). `label` sits top-left ("$415 of $500"); `show_pct=false` hides the percentage. `name` = accessible name, default the label's text, else "Budget used": give each meter its own (`name="Groceries budget"`). `size`: `sm` 6px, `lg` 10px. |
+| `category_badge(category, chip=false, href=none, class=none)` | Colour mark (a small square) + name from `category.name`, `.color` (3.3), `.is_hidden` (muted, eye-off icon, "(hidden)"). `None` → "Uncategorized" with a hollow square. `chip=true` chip style (square corners); `href` makes it a link. |
+| `progress(pct, label=none, pace_pct=none, status=none, size=none, show_pct=true, name=none)` | Budget meter, `role="meter"` with a text value. `pct` = percent used (`Decimal`/int/float; `None` = no budget; negative, when refunds exceed charges, shows its text over an empty bar). Status is automatic: ok < 80 ≤ warn ≤ 100 < over (warn/over add an alert icon), or force it with `status`. Text is a whole percent, except next to a threshold where one decimal is rounded toward the colour shown (79.96 → "79.9%" green, 100.04 → "100.1%" red). Over 100% the bar fills, a dark tick overhanging the track marks where the budget ran out and the overspend is hatched. `pace_pct` (0–100, share of the period elapsed) draws a small caret above the bar with a notch through it (tooltip "Pace: 60% of the period has passed"). `label` sits top-left ("$415 of $500"); `show_pct=false` hides the percentage. `name` = accessible name, default the label's text, else "Budget used": give each meter its own (`name="Groceries budget"`). `size`: `sm` 6px, `lg` 10px. Square ends; the fill grows from 0 when the meter is first visible (section 13). |
 | `stat(label, value, sub=none, tone=none, icon=none, href=none, id=none)` **call** | Stat tile. `value` is usually `ui.money(..., cents=false)`; it is never truncated: inside a `.grid` or `.stack` the value's type scales with the tile (26px down to 18px). `tone` (`ok`/`warn`/`over`/`info`/`neutral`) colours the sub line and adds an icon. The optional call body renders below (e.g. `ui.progress(..., size="sm", show_pct=false, name="Monthly target used")`). `href` makes the tile a link. |
 | `page_header(title, subtitle=none, back_href=none, back_label="Back")` **call** | The page `<h1>`; the call body holds action buttons (right-aligned, full width on phones). |
 | `card(title=none, subtitle=none, actions=none, flush=false, footer=none, id=none, class=none)` **call** | Surface container; body from the call. `flush=true` removes body padding (tables). `actions`/`footer` take markup built with `{% set x %}…{% endset %}`. With `id`, the title gets `id="<id>-title"` and the card is labelled by it. |
@@ -379,13 +344,13 @@ other macros (`ui.stat("Spent", ui.money(x))`).
 | `banner(tone, text, title=none, icon=none, action_href=none, action_label=none, id=none, role=none)` **call** | Notice. `tone` (3.1): `info`, `ok`, `warn`, `over`, `sandbox`. Bold `title` runs into `text`. One link action (danger-styled for `over`), or buttons via the call body. `role` defaults to `alert` for `over`, else `status`. |
 | `flash_message(level, text)` | One toast for `#flash`. `level`: `success`/`ok`, `info`, `warning`/`warn`, `error`/`danger`/`over`; unknown → info. Errors get `role="alert"` and stay until closed (`data-persist`); others auto-dismiss after 6 s (paused on hover/focus). Close button on all. |
 | `flash_oob(level, text)` | The toast wrapped in `<div hx-swap-oob="beforeend:#flash">`: append to any HTMX partial response (from Python see 2.6). |
-| `status_pill(state, text=none, detail=none, href=none)` | Pill with a coloured dot: `healthy`, `syncing` (pulsing), `needs_reconnect`, `error`, `stale`, `not_linked`. `text` defaults per state; `detail` becomes the tooltip (and part of the link's accessible name). |
+| `status_pill(state, text=none, detail=none, href=none)` | Flat status label with a small square mark (no pill): `healthy`, `syncing` (blinking), `needs_reconnect`, `error`, `stale`, `not_linked`. `text` defaults per state; `detail` becomes the tooltip (and part of the link's accessible name). |
 | `badge(text, tone=none, icon=none, title=none)` | Small label (3.1). E.g. Pending (`icon="clock"`), Payment (`muted`), Split (`info`, `icon="split"`), Rule (`accent`, `icon="wand"`). |
 | `button(label, variant="secondary", size=none, icon=none, icon_only=false, href=none, type="button", spin=false, tooltip=none)` **attrs** | `<button>` (or `<a>` with `href`). `variant`: `primary`, `secondary`, `ghost`, `danger`; `size`: `sm` (others raise). `icon_only=true`: square button, `label` becomes `aria-label` + tooltip. `spin=true` spins the icon while an HTMX request from it runs. `class=` adds classes. |
 | `tabs(items, active, label="Sections", target=none)` | Link tabs (`aria-current="page"`), scroll sideways when they don't fit. `items`: `[{key, label, href, count?}]`. With `target` links swap that region via HTMX and push the URL. |
 | `dialog(id, title, size=none, autoopen=false)` **call** | Modal `<dialog>`. Open: any element with `data-dialog-open="<id>"`. Close: `data-dialog-close`, Esc, backdrop click, `<form method="dialog">`, or an `HX-Trigger: dialog:close` response header. Buttons go in `<div class="dialog__footer">` at the end of the body (`dialog__footer--split` for left/right groups). `size`: `sm` 420px, `lg` 780px (default 560px). `autoopen=true` opens it as soon as it appears (dialogs returned by HTMX). |
 | `chart(id, config, height=280, label=none)` **call** | `<canvas data-chart="<id>" role="img">` + `<script type="application/json" id="<id>-config">`. `label` = accessible name (falls back to `config.title`). The optional call body (a short summary or a small table of the same numbers) renders in a visually hidden `<div id="<id>-desc">` that the canvas references with `aria-describedby`. See section 7. |
-| `spinner(label="Loading…", size=none)` | Spinning ring with `role="status"`; `size="lg"`. |
+| `spinner(label="Loading…", size=none)` | A turning square with one open side (the angular spinning ring), `role="status"`; `size="lg"`. |
 | `loading(label="Loading…")` | Spinner + text, e.g. initial content of an `hx-trigger="load"` region. |
 | `skeleton(lines=3, title=true)` | Grey placeholder lines (first loads only; refetches keep the old content dimmed instead). |
 | `tip(text, icon="info", pos=none)` | Focusable info icon with a CSS tooltip. `pos`: above (default), `bottom`, `left`, `right`, `bottom-end`. |
@@ -440,11 +405,11 @@ strings, so ints and `Decimal` ids are fine.
 | `select_field(name, label, options, value=none, placeholder=none, multiple=false, id=none, help=none, error=none, required=false, optional=false, compact=false, hide_label=false, wrapper_class=none)` **attrs** | `<select>`; `placeholder` adds a first `value=""` option ("All categories"). |
 | `category_select(name, categories, value=none, label="Category", inline=false, include_hidden=false, placeholder=none, id=none, help=none, error=none, required=false, compact=false, hide_label=false, wrapper_class=none)` **attrs** | Picker from category objects (`id`, `name`, `color`, `is_hidden`). Hidden categories are omitted unless selected or `include_hidden=true` (then labelled "(hidden)"). Options carry `data-color` (3.3). `inline=true` → borderless table-cell select (max 13rem wide) with the selected category's dot; app.js recolours the dot on change. |
 | `textarea_field(name, label, value=none, rows=3, placeholder=none, id=none, help=none, error=none, required=false, optional=false, hide_label=false, wrapper_class=none)` **attrs** | `<textarea>`. |
-| `checkbox_field(name, label, checked=false, value="1", help=none, switch=false, id=none, disabled=false, wrapper_class=none)` **attrs** | Checkbox with the label on the right and help under it. The `<label>` wraps both; with help the control is named by its label alone (`aria-labelledby`) and the help is its description (`aria-describedby`), read once. Unchecked boxes submit nothing: treat a missing field as false. |
-| `switch_field(name, label, checked=false, value="1", help=none, id=none, disabled=false, wrapper_class=none)` **attrs** | Same as `checkbox_field(…, switch=true)`: toggle with `role="switch"`. |
+| `checkbox_field(name, label, checked=false, value="1", help=none, switch=false, id=none, disabled=false, wrapper_class=none)` **attrs** | Checkbox (a square with an angular check) with the label on the right and help under it. The `<label>` wraps both; with help the control is named by its label alone (`aria-labelledby`) and the help is its description (`aria-describedby`), read once. Unchecked boxes submit nothing: treat a missing field as false. |
+| `switch_field(name, label, checked=false, value="1", help=none, id=none, disabled=false, wrapper_class=none)` **attrs** | Same as `checkbox_field(…, switch=true)`: toggle with `role="switch"`, a square track whose square knob slides (`--accent-contrast` on the ink track when on). |
 | `tags_field(name, label, tags=none, suggestions=none, placeholder="Add a tag…", id=none, help="Press Enter or comma to add a tag.", error=none, optional=false, hide_label=false, wrapper_class=none)` **attrs** | Tag chips + entry box. Enter or `,` adds (comma-separated paste works, case-insensitive de-dupe), Backspace in an empty box removes the last chip, blur commits pending text, × removes. Submits one `name` field per tag **plus one always-present empty `name` field**: read with `[t for t in form.getlist(name) if t.strip()]` (empty list = all removed). `suggestions` feed a `<datalist>`. Adding/removing fires `change` (autosubmit forms save). |
 | `search_field(name="q", value=none, label="Search", placeholder="Search…", id=none, shortcut=true)` **attrs** | Search box with icon, marked `data-search` so `/` focuses it; shows a `/` hint. |
-| `segmented(name, options, value=none, label=none, hide_label=false, help=none, wrapper_class=none)` **attrs** | Radio group drawn as a segmented control (presets: "This month / Last month / 90 days / Year / All", "Calendar month / Statement cycle"). With a `label` it renders like the other fields: `<fieldset class="field segmented-field">` with a visible `<legend class="field__label">` and `help` under it; with `hide_label=true` (or no label) just the control, the label read by screen readers only. **attrs** go on the outer `<fieldset>` (e.g. `hx_post` + `hx_trigger="change"`: radio changes bubble). In a narrow column the options stretch into rows; on phones they stay in one row that scrolls sideways. |
+| `segmented(name, options, value=none, label=none, hide_label=false, help=none, wrapper_class=none)` **attrs** | Radio group drawn as a segmented control (square segments; the chosen one has a hairline, not a shadow) (presets: "This month / Last month / 90 days / Year / All", "Calendar month / Statement cycle"). With a `label` it renders like the other fields: `<fieldset class="field segmented-field">` with a visible `<legend class="field__label">` and `help` under it; with `hide_label=true` (or no label) just the control, the label read by screen readers only. **attrs** go on the outer `<fieldset>` (e.g. `hx_post` + `hx_trigger="change"`: radio changes bubble). In a narrow column the options stretch into rows; on phones they stay in one row that scrolls sideways. |
 | `inline_select(name, options, value=none, label=none, id=none)` **attrs** | Borderless select for table cells. **`label` is required** (it becomes the `aria-label`; make it specific, e.g. "Period for Groceries"); leaving it out raises. |
 | `inline_money(name, value=none, label=none, id=none, placeholder="0.00")` **attrs** | Compact right-aligned money input for table cells (budget amounts); numbers render half-up with two decimals. **`label` is required** ("Groceries budget"). Add `aria_invalid="true"` to show an error border. |
 | `filter_bar(action, target=none, history="replace", autosubmit=true, label="Filters")` **call** **attrs** | GET form laid out as one row of compact controls (`role="search"`). With `target` it swaps that region: `hx-get` + `hx-target` + `hx-sync="this:replace"`, and `history` decides the address bar: `"replace"` (default) → `hx-replace-url="true"`: the URL follows the filters, so a reload or a shared link keeps them, without adding a Back step per change; `"push"` → `hx-push-url="true"` (each submit becomes a history entry); `none` → the URL is left alone. Pagination, sort headers and tabs still push (deliberate navigation). `autosubmit` submits on change, debouncing typing and date entry (400 ms). End the body with `<div class="filter-bar__actions">` for Reset / Export. Without JS it is a plain GET form with an Apply button. |
@@ -564,6 +529,17 @@ that are new or whose config changed) and redraws everything when the OS switche
 and dark. Charts are never the only way to read a number: show the key values in text or a table
 nearby (the chart's call body is read by screen readers).
 
+Shapes: lines are straight between points (`tension: 0`) with mitred joins and flat ends; points,
+tooltip keys and bar legend keys are squares (`pointStyle: "rect"`); a line series keeps a short
+straight legend key, dashed when the series is; bars and tooltips have square corners. (Doughnut
+and pie, which only the UI kit uses, keep their arcs.)
+
+Motion: a chart is drawn when its canvas first comes into view (an `IntersectionObserver`), once
+its card has mostly arrived, and draws in over 800 ms on the app's ease-out: lines from left to
+right (a clip that takes a line's filled area with it), bars up from the axis. A chart drawn
+again (theme change, new data on the same canvas) just appears; with reduced motion every chart
+is drawn at once. Printing draws the charts not yet seen.
+
 ---
 
 ## 8. Behaviours (`static/js/app.js`)
@@ -588,6 +564,10 @@ nearby (the chart's call body is read by screen readers).
 | HTMX 422 | **swapped**: return the re-rendered form with inline errors and status 422. Focus then moves to its first `aria-invalid="true"` field (else its `role="alert"` banner), scrolled into view if it isn't |
 | keyboard focus after a swap | htmx puts focus back only on an element with the same id, so give every control in a swapped region a stable id (a row's place in a list works when rows leave it: focus lands on the next row). When the focused control is gone anyway, focus goes to the nearest surviving container with an id: its first `h1`–`h3`, else its first control |
 | `details.mobile-nav` | the mobile menu closes on Escape (focus inside it goes back to its Menu button), when keyboard focus leaves it, on a click outside and when a link is followed |
+| `canvas[data-chart]` | drawn when first in view, and draws in (section 7) |
+| `.progress__track`, `[data-fill]` | a budget bar (or any bar whose children are its fill) below the fold at load is held empty (`.is-waiting`) and fills from 0 when scrolled into view; in view at load it fills with its block's arrival (CSS) |
+| any HTMX swap | the swapped content fades and rises in briefly (`[data-swapped]`, an attribute because htmx puts class and style back when it settles); not for polling, `data-quiet`, toasts or `[data-flash]` elements |
+| `<html>.is-arrived` | added once the page's arrival is over (section 13), so later swaps don't replay it |
 
 htmx config (set in app.js): `allowEval=false`, `includeIndicatorStyles=false`,
 `historyCacheSize=0` (page HTML is never copied into browser storage) with
@@ -633,8 +613,8 @@ Breakpoints:
 | < 900px | sidebar → mobile bar with a `<details>` menu; gutters 16px; top bar not sticky, no page title in it; `.grid--3` → 2 columns; tables `min-width: 560px` (scroll in their wrap) |
 | < 600px | all grids 1 column; page-header actions full width; card padding 16px; filter-bar fields full width; pagination shows Prev/Next only; `--truncate-w` 180px; segmented controls scroll in one row; full-width toasts; `.kv` stacks; Sync now icon-only; `.col-optional-sm` hidden |
 
-Motion respects `prefers-reduced-motion`; `prefers-contrast: more` strengthens borders and muted
-text; `forced-colors` keeps meters and dots visible; print hides the sidebar, top bar, notices,
+Motion (section 13) switches off entirely with `prefers-reduced-motion`; `prefers-contrast: more`
+strengthens borders and muted text; `forced-colors` keeps meters and dots visible; print hides the sidebar, top bar, notices,
 toasts, buttons, filters, pagination and tabs (the statements page prints as a clean document; add
 `.no-print` / `.print-only` as needed).
 
@@ -653,17 +633,17 @@ toasts, buttons, filters, pagination and tabs (the statements page prints as a c
 | Charts | `--cat-1` … `--cat-16` (fixed order; validated for colour-blind separation on adjacent pairs; slots 1–8 strongest; each has a light and a dark value), `--chart-grid`, `--chart-axis`, `--chart-other`, `--chart-accent`, `--tooltip-bg`, `--tooltip-text` |
 | Type | `--font-text` (Newsreader, vendored: all text and chart labels), `--font-mono`, `--fs-2xs` 11 · `--fs-xs` 12 · `--fs-sm` 13 · `--fs-md` 14 (body) · `--fs-lg` 16 · `--fs-xl` 20 · `--fs-2xl` 26 · `--fs-3xl` 32, `--lh-tight`, `--lh-normal`, `--fw-medium` 500, `--fw-semibold` 600, `--fw-bold` 650 |
 | Space | `--sp-1` 4 · `--sp-2` 8 · `--sp-3` 12 · `--sp-4` 16 · `--sp-5` 20 · `--sp-6` 24 · `--sp-8` 32 · `--sp-10` 40 · `--sp-12` 48 · `--sp-16` 64 |
-| Radii | `--radius-xs` 4 · `--radius-sm` 6 · `--radius-md` 8 (controls) · `--radius-lg` 12 (cards) · `--radius-xl` 16 (dialogs) · `--radius-pill` |
-| Shadows | `--shadow-xs`, `--shadow-sm` (cards), `--shadow-md` (popovers, tooltips), `--shadow-lg` (dialogs, toasts), `--dot-ring` |
+| Radii | `--radius-xs` … `--radius-xl`, `--radius-pill`: all `0` (every corner is square; section 13). Don't round anything |
+| Shadows | Surfaces are flat (hairline borders). Only overlays have one: `--shadow-md` (popovers, tooltips, skip link), `--shadow-lg` (dialogs, toasts, the phone menu); `--dot-ring` (the inset ring of a colour mark) |
 | Layers | `--z-sticky` 10, `--z-topbar` 20, `--z-sidebar` 30, `--z-dropdown` 40, `--z-overlay` 50, `--z-dialog` 60, `--z-toast` 70, `--z-tooltip` 80 |
 | Layout | `--sidebar-w` 248px, `--topbar-h`, `--envbar-h`, `--mobilebar-h`, `--content-max` 1200px, `--gutter` (32px, 16px below 900px), `--sticky-top` (offset for sticky table headers), `--scroll-fade` (table edge fade) |
-| Motion | `--ease`, `--dur-fast` 120ms, `--dur` 200ms |
+| Motion | `--ease` (`cubic-bezier(0.22, 1, 0.36, 1)`, easeOutQuint: everything that moves), `--dur-fast` 120ms, `--dur` 200ms, `--dur-page-out` 300ms, `--dur-arrive` 450ms, `--arrive-step` 50ms, `--dur-swap` 300ms, `--dur-fill` 500ms, `--reveal-distance` 120px (section 13) |
 
 ### Components
 
 | Component | Classes |
 | --- | --- |
-| Shell | `.shell` (`.has-envbar`), `.sidebar`, `__brand`, `__footer`, `.brand`, `__mark`, `__text`, `__env` (`--sandbox` / `--demo` / `--production`), `.nav`, `__heading`, `__list`, `__link` (`aria-current`), `.mobile-bar`, `.mobile-nav`, `__panel`, `__label`, `.main-col`, `.masthead`, `.env-bar` (purple by default, used for sandbox and test; `--demo` orange; base also emits `env-bar--<env>` as a hook), `__text`, `__detail`, `.topbar`, `__inner`, `__title`, `__sep`, `__actions`, `.notices`, `.content`, `.skip-link`, `.page-progress`, `.env-badge` (`--sandbox` / `--demo` / `--production`) |
+| Shell | `.shell` (`.has-envbar`), `.sidebar`, `__brand`, `__footer`, `.brand`, `__mark`, `__text`, `__env` (`--sandbox` / `--demo` / `--production`), `.nav`, `__heading`, `__list`, `__link` (`aria-current`), `__marker` (the current page's 2px bar), `.mobile-bar`, `.mobile-nav`, `__panel`, `__label`, `.main-col`, `.masthead`, `.env-bar` (purple by default, used for sandbox and test; `--demo` orange; base also emits `env-bar--<env>` as a hook), `__text`, `__detail`, `.topbar`, `__inner`, `__title`, `__sep`, `__actions`, `.notices`, `.content`, `.skip-link`, `.page-progress`, `.env-badge` (`--sandbox` / `--demo` / `--production`) |
 | Page header | `.page-header`, `__text`, `__eyebrow`, `__title`, `__subtitle`, `__actions` |
 | Card | `.card`, `--flush`, `__header`, `__heading`, `__title`, `__subtitle`, `__actions`, `__body`, `__footer`; `a.card` hover |
 | Stat tile | `.stat`, `--ok` / `--warn` / `--over` / `--info`, `__label`, `__value`, `__sub`, `__extra` |
@@ -677,14 +657,14 @@ toasts, buttons, filters, pagination and tabs (the statements page prints as a c
 | Empty state | `.empty`, `--compact`, `__icon`, `__title`, `__message`, `__actions` |
 | Banner | `.banner`, `--warn` / `--over` (alias `--danger`) / `--ok` / `--sandbox` (info is the default), `__icon`, `__body`, `__title`, `__text`, `__actions` |
 | Toast | `.toast-stack` (`#flash`; `--static` for inline demos), `.toast`, `--ok` / `--warn` / `--over` (info default), `__icon`, `__text`, `__close`, `.is-leaving` |
-| Status | `.sync-status` (the partial), `.sync-form`, `.sync-now__label`, `.pill`, `--healthy` / `--syncing` / `--needs_reconnect` / `--error` / `--stale` / `--not_linked`, `__dot`, `__text` |
+| Status | `.sync-status` (the partial), `.sync-form`, `.sync-now__label`, `.pill` (a flat label, no pill shape: the name stays), `--healthy` / `--syncing` / `--needs_reconnect` / `--error` / `--stale` / `--not_linked`, `__dot` (a small square), `__text` |
 | Buttons | `.btn` (= secondary), `--primary`, `--ghost`, `--danger`, `--sm`, `--icon`, `--block`; `.icon--spin` spins during `.htmx-request` or `.is-busy`; `.btn-group`; `disabled` / `aria-disabled="true"` |
-| Forms | `.field`, `--compact`, `--grow` (in a filter bar), `__label`, `__req`, `__optional`, `__help`, `__error`; `.input`, `.select`, `.textarea`; `.input--sm`, `.select--sm`; `[aria-invalid="true"]`; `.input-affix` + `--prefix`, `__prefix`, `__suffix`; `.input--money`; `.search`; `.check`, `__text`, `__help`; `.switch`; `.chip`, `--removable`, `__remove`, `.chips`; `.tags-input`, `__entry`; `.filter-bar`, `__actions`; `.segmented`, `__option`, `.segmented-field` |
+| Forms | `.field`, `--compact`, `--grow` (in a filter bar), `__label`, `__req`, `__optional`, `__help`, `__error`; `.input`, `.select`, `.textarea`; `.input--sm`, `.select--sm`; `[aria-invalid="true"]`; `.input-affix` + `--prefix`, `__prefix`, `__suffix`; `.input--money`; `.search`; `.check` (a checkbox in it is a square with an angular check, a radio a diamond), `__text`, `__help`; `.switch` (square track and knob); `.chip`, `--removable`, `__remove`, `.chips`; `.tags-input`, `__entry`; `.filter-bar`, `__actions`; `.segmented`, `__option`, `.segmented-field` |
 | Tabs | `.tabs`, `__tab` (`aria-current`), `__count` |
 | Dialog | `.dialog`, `--sm` / `--lg`, `__header`, `__title`, `__body`, `__footer`, `__footer--split` |
 | Tooltip | `data-tooltip="Text"` on any element (+ `aria-label` when it has no visible text), `data-tooltip-pos="bottom" \| "left" \| "right" \| "bottom-end"`; `.tip` icon. Tooltips use `::after`, so not on elements that already use it, and they are clipped by `overflow: hidden` ancestors. They show on keyboard focus always, and on hover only with a real pointer (touch screens would leave them stuck after a tap) |
 | Badge | `.badge`, `--accent` / `--ok` / `--warn` / `--over` / `--info` / `--sandbox` / `--muted` |
-| Loading | `.htmx-indicator` (hidden until the element or an ancestor has `.htmx-request`), `.spinner` (`--lg`), `.loading`, `.skeleton` (`--title`, `--block`), `.skeleton-group`, `[aria-busy="true"]` dims, `html.is-loading .page-progress` |
+| Loading | `.htmx-indicator` (hidden until the element or an ancestor has `.htmx-request`), `.spinner` (`--lg`; a turning square), `.loading`, `.skeleton` (`--title`, `--block`), `.skeleton-group`, `[aria-busy="true"]` dims, `html.is-loading .page-progress` |
 | Chart | `.chart` (`--chart-h`), `.legend`, `.swatch` (`--swatch`) |
 | Error pages | `.error-command`, `.error-status` |
 | Icons | `.icon`, `--xs` / `--sm` / `--lg` / `--xl`, `.icon-sprite` |
@@ -694,16 +674,20 @@ toasts, buttons, filters, pagination and tabs (the statements page prints as a c
 ## 11. Icons (`components/icons.html`)
 
 `{{ ui.icon("name") }}` or `<svg class="icon" aria-hidden="true"><use href="#i-name"/></svg>`.
-24px stroke icons that take the current text colour:
+24px stroke icons that take the current text colour, drawn angular like the rest of the app:
+straight segments and polygons only (no `<circle>`, `<ellipse>`, rounded `<rect>` or arc and
+curve path commands `A C S Q T`), with square caps and mitred joins (`.icon`). What was round is a
+square, a diamond or, for refresh, an octagon: the info, check, x and clock faces and the lens are
+squares, the target is concentric diamonds, dots are filled squares. The names keep their old
+meaning (`check-circle` is a checked square):
 
 home, list, target, trending, repeat, receipt, tag, wand, upload, download, link, settings,
 refresh, search, plus, minus, x, check, alert, info, check-circle, x-circle, chevron-down,
 chevron-up, chevron-left, chevron-right, arrow-up, arrow-down, sort, split, merge, pencil, trash,
 eye, eye-off, calendar, bell, clock, lock, credit-card, filter, external, menu, more.
 
-Nav icons: Dashboard home · Transactions list · Budgets target · Trends trending · Recurring
-repeat · Statements receipt · Categories tag · Rules wand · Import upload · Connection link ·
-Settings settings.
+A new icon follows the same rules (`tests/web/test_ux_behaviour.py` checks every SVG the app
+draws). The nav uses none: it is text only.
 
 ---
 
@@ -712,10 +696,68 @@ Settings settings.
 - One `<h1>` per page (`ui.page_header`), card/section titles are `<h2>`.
 - Every control has a label (the form macros do it; inline controls require `label=`).
 - Icon-only buttons: `ui.button(..., icon_only=true)` (sets `aria-label` and a tooltip).
-- Status is never colour-only: badges, pills, meters and amounts carry text or icons.
+- Status is never colour-only: badges, status labels, meters and amounts carry text or icons.
 - Give each budget meter its own `name` ("Groceries budget").
 - Tables: `<th scope="col">`, numbers in `.num`, actions column `<th class="shrink"><span
   class="sr-only">Actions</span></th>`; Amount is never an optional column.
 - Charts get a `label`, and the same numbers appear in text or a table nearby (or in the chart's
   call body).
 - Keep focus visible: never remove outlines; `:focus-visible` and focused fields use `--focus`.
+
+---
+
+## 13. Shapes and motion
+
+The owner asked for a sleeker look with no rounded shapes ("just square or other pointed
+polygons"), a sidebar without icons, and movement like an Apple product page. The rules:
+
+**Shapes.**
+
+- Every corner is square. `*, *::before, *::after { border-radius: 0 }` (app.css section 2)
+  also squares what browsers round by default (buttons, fields, selects); the radius tokens are 0;
+  no other radius is set anywhere. Outlines follow the box, so focus rings are square too.
+- Round marks are squares: category marks (`.cat__dot`), status marks, the environment mark,
+  swatches, numbered steps, list bullets (`list-style-type: square`). The spinner is a turning
+  square with one open side.
+- A checkbox is a square with an angular check (`clip-path: polygon(…)` in `--accent-contrast` on
+  the ink fill); a radio (`.check input[type="radio"]`) is a diamond, a 12px square turned 45°,
+  so one choice of several never looks like a checkbox; the category colour picker's swatches
+  are diamonds for the same reason. The switch is a square track whose square knob slides.
+- Bars have square ends; icons are angular (section 11); charts use square points and keys,
+  straight lines and square corners (section 7); the favicon and brand mark are square tiles.
+- Surfaces are flat: hairline borders and no shadow, except on what floats over the page
+  (popovers, tooltips, dialogs, toasts, the phone menu).
+- The sidebar is text only: page names muted, the current one in full-strength ink with a 2px
+  bar at its left edge, no background bubble. The top bar's sync status is a flat label with a
+  square mark.
+- What the app can't draw stays the browser's: scrollbars, the native date picker and select
+  menus, `confirm()` dialogs, `title` tooltips, the search field's clear button, and Plaid's
+  Link window.
+
+**Motion** (app.css section 7, `app.js`). One choreography, never in the way: only transform,
+opacity and a little blur move, on one ease-out curve (`--ease`, easeOutQuint); each piece takes
+300–600 ms (charts 800 ms) and a page's whole arrival is over within 800 ms. Each piece of motion
+has one owner:
+
+| Moment | What moves | Owner |
+| --- | --- | --- |
+| Page to page (links, forms, Back and Forward) | the page you leave fades out while settling back (scale 0.985, a little blur); the sidebar, phone bar, environment bar, top bar and notices stay perfectly still; the current page's marker slides to the new link; the breadcrumb crossfades | a cross-document View Transition (`@view-transition`; `view-transition-name` on `.sidebar`, `.mobile-bar`, `.env-bar`, `.topbar`, `.notices`, `.topbar__title` and the sidebar's `.nav__marker`). Clicks pass through it to the new page |
+| Arriving on a page | the title and subtitle first, then each block in turn, 50 ms apart and 8 steps at most: 24px up, 8px blur to sharp | CSS only, on every page load: `.content`'s children, or the children of a wrapper there (a grid, a stack, the region a status line announces, a plain `div` with an id). Nothing is hidden before the CSS runs and nothing waits for JavaScript |
+| Scrolling | a card or tile below the fold fades in and rises (from 16px, scale 0.98) over its first 120px | a scroll-driven animation (`animation-timeline: view()`, in `@supports`); one in view at load is past that range, so it is never hidden. The page title fades as it reaches the top bar |
+| A chart first in view | lines draw from left to right, bars grow from the axis | `app.js` (`IntersectionObserver`, Chart.js) |
+| A budget bar first in view | it fills from 0 (`scaleX`) | CSS (`@starting-style`, timed to its block's arrival) and, below the fold, `app.js` (`.is-waiting` until it is scrolled to) |
+| An HTMX swap (filters, sorting, the Show income switch, a saved row) | the new content fades and rises 6px | `app.js` marks it `[data-swapped]`; a saved row also glows (`.flash-in`), toasts keep their own entrance |
+
+Once the arrival is over `app.js` adds `.is-arrived` to `<html>`, which turns the arrival rules off,
+so blocks swapped in later fade in instead of arriving again. Browsers without View Transitions or
+scroll-driven animations get the app without those, fully working.
+
+**Reduced motion** (`prefers-reduced-motion: reduce`): no page transition (`@view-transition` only
+exists without it), no arrival, reveal, title fade, swap fade or bar fill (the reduced-motion
+block at the end of app.css section 7 switches each off), and charts are drawn at once
+(`reducedMotion()` in `app.js`). Everything appears at once. A saved row's glow stays: it is a
+colour fade, not movement.
+
+**Adding motion:** use the tokens; animate only transform, opacity or a small blur; give the new
+animation one owner; and add its selector to the reduced-motion block
+(`tests/web/test_ux_behaviour.py` fails a page-motion animation it can't see switched off there).

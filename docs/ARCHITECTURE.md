@@ -974,7 +974,7 @@ sync_item(item_id, trigger):
 - **Consent (SYNC-6, BANK-6):** read on every run. Only American Express (`ins_10`) asks every 12
   months, so only it falls back to `last_consented_at + 365 days` when Plaid leaves the date
   null; another bank uses Plaid's `consent_expiration_time` or has no due date (no reminder, no
-  banner). Renewal is update mode. The top-bar pill shows the worst connection and names each
+  banner). Renewal is update mode. The top-bar status shows the worst connection and names each
   institution in its tooltip; the reconnect and consent banners and the connection alerts name
   the institution(s). The consent banner names every connection whose consent is due except one
   that itself needs reconnecting (its Reconnect renews it), so it shows beside another bank's
@@ -988,6 +988,19 @@ FastAPI with server-rendered Jinja templates, HTMX for partial updates, Chart.js
 Vendored htmx 2.0.11, Chart.js 4.5.1 and the Newsreader font (fontsource 5.3.0) in
 `static/vendor/` (no CDNs). htmx's injected
 indicator styles are disabled with `<meta name="htmx-config">`; those rules live in `app.css`.
+
+**Look and motion** (the design-system README, `templates/components/README.md`, sections 10 and
+13). Black, white and grey in the Newsreader serif, red only for problems, the categorical palette
+only in charts and category marks. No rounded shapes anywhere: every corner is square (a
+`border-radius: 0` reset, radius tokens at 0), round marks are squares, radios diamonds, icons
+angular (square caps, mitred joins, no curves), charts straight-lined with square marks; surfaces
+are flat (hairline borders; shadows only on overlays); the sidebar is text only. Motion is one
+choreography that never blocks input: a cross-document View Transition between pages (the old
+page settles back and fades, the sidebar and top bars stay still), a CSS-only staggered arrival
+on every page load, scroll-driven reveals for cards below the fold, charts drawing in and budget
+bars filling when first seen, and a brief fade for HTMX swaps; transform, opacity and a little
+blur only, one ease-out curve. `prefers-reduced-motion` switches all of it off. Browsers without
+View Transitions or scroll-driven animations get the same app without that motion.
 
 Security middleware (SEC-1, SEC-4):
 - Uvicorn binds to `127.0.0.1` only; the code refuses any other host.
