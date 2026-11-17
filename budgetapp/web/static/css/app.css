@@ -3578,6 +3578,24 @@ html:not(.is-arrived) :is(.progress__fill, .progress__overflow, [data-fill] > *)
   .cat__dot,
   .swatch { forced-color-adjust: none; }
   .btn { border: 1px solid ButtonText; }
+  .nav__marker { background: Highlight; forced-color-adjust: none; }
+
+  /* The drawn checkbox and radio keep their shapes in the system colours (they would
+     otherwise lose their fills). */
+  .check input[type="checkbox"]:not(.switch),
+  .check input[type="radio"] {
+    border-color: CanvasText;
+    background: Canvas;
+    forced-color-adjust: none;
+  }
+
+  .check input[type="checkbox"]:not(.switch):checked {
+    border-color: Highlight;
+    background: Highlight;
+  }
+
+  .check input[type="checkbox"]:not(.switch)::before { background: HighlightText; }
+  .check input[type="radio"]::before { background: Highlight; }
 }
 
 @media print {
