@@ -166,17 +166,17 @@
   --sp-12: 3rem;
   --sp-16: 4rem;
 
-  /* Radii */
-  --radius-xs: 4px;
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
-  --radius-pill: 999px;
+  /* Radii: every corner is square (no rounded shapes anywhere; see "Shapes" in
+     templates/components/README.md). The tokens stay, at 0, for anything that names them. */
+  --radius-xs: 0;
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-pill: 0;
 
-  /* Shadows */
-  --shadow-xs: 0 1px 1px rgb(0 0 0 / 0.04);
-  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.05), 0 1px 3px rgb(0 0 0 / 0.03);
+  /* Shadows: surfaces are flat (hairline borders); only overlays that float above the page
+     have one: popovers and tooltips (md), dialogs, toasts and the mobile menu (lg). */
   --shadow-md: 0 2px 4px -1px rgb(0 0 0 / 0.06), 0 6px 16px -4px rgb(0 0 0 / 0.1);
   --shadow-lg: 0 4px 8px -2px rgb(0 0 0 / 0.06), 0 20px 40px -8px rgb(0 0 0 / 0.2);
   --dot-ring: inset 0 0 0 1px rgb(0 0 0 / 0.12);
@@ -205,7 +205,7 @@
   --dur-fast: 120ms;
   --dur: 200ms;
 
-  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23585858' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6.5 9.5 5.5 5.5 5.5-5.5'/%3E%3C/svg%3E");
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23585858' stroke-width='2' stroke-linecap='square' stroke-linejoin='miter'%3E%3Cpath d='m6.5 9.5 5.5 5.5 5.5-5.5'/%3E%3C/svg%3E");
 }
 
 @media screen and (prefers-color-scheme: dark) {
@@ -292,22 +292,33 @@
     --cat-15: #ab9017;
     --cat-16: #018d87;
 
-    --shadow-xs: 0 1px 1px rgb(0 0 0 / 0.3);
-    --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.35);
     --shadow-md: 0 2px 6px rgb(0 0 0 / 0.35), 0 8px 20px -6px rgb(0 0 0 / 0.45);
     --shadow-lg: 0 8px 16px -4px rgb(0 0 0 / 0.45), 0 24px 56px -8px rgb(0 0 0 / 0.65);
     --dot-ring: inset 0 0 0 1px rgb(255 255 255 / 0.14);
 
-    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1a1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6.5 9.5 5.5 5.5 5.5-5.5'/%3E%3C/svg%3E");
+    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1a1' stroke-width='2' stroke-linecap='square' stroke-linejoin='miter'%3E%3Cpath d='m6.5 9.5 5.5 5.5 5.5-5.5'/%3E%3C/svg%3E");
   }
 }
 
 /* 2. BASE ================================================================= */
 
+/* Every corner is square: no rounded shapes anywhere, including the ones browsers draw on
+   buttons, fields and selects by default. Focus outlines follow the box, so they are square
+   too. Round marks become squares, radios diamonds (section 4). */
 *,
 *::before,
 *::after {
   box-sizing: border-box;
+  border-radius: 0;
+}
+
+::file-selector-button {
+  border-radius: 0;
+}
+
+/* Bullets are squares too (a list a component styles sets its own). */
+ul {
+  list-style-type: square;
 }
 
 html {
@@ -419,7 +430,6 @@ kbd {
   padding: 0 0.4em;
   border: 1px solid var(--border-strong);
   border-bottom-width: 2px;
-  border-radius: var(--radius-xs);
   background: var(--surface-sunken);
   color: var(--text-muted);
   font-size: var(--fs-2xs);
@@ -451,8 +461,8 @@ table {
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  stroke-linecap: square; /* angular glyphs: square ends, sharp corners */
+  stroke-linejoin: miter;
 }
 
 .icon--xs { width: 12px; height: 12px; stroke-width: 2.2; }
@@ -468,7 +478,6 @@ table {
   left: 12px;
   z-index: 100;
   padding: 8px 14px;
-  border-radius: var(--radius-md);
   background: var(--accent);
   color: var(--accent-contrast);
   font-weight: var(--fw-semibold);
@@ -532,9 +541,8 @@ html.is-loading .page-progress {
 .sidebar__footer {
   display: flex;
   align-items: center;
-  gap: 6px;
   margin-top: auto;
-  padding: 16px 10px 4px;
+  padding: 16px 12px 4px;
   color: var(--text-muted);
   font-size: var(--fs-xs);
 }
@@ -582,7 +590,6 @@ html.is-loading .page-progress {
 .brand__env::before {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
   background: currentColor;
   content: "";
 }
@@ -599,8 +606,8 @@ html.is-loading .page-progress {
   fill: none;
   stroke: var(--accent-contrast);
   stroke-width: 2.4;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
 }
 
 .env-badge {
@@ -609,7 +616,6 @@ html.is-loading .page-progress {
   height: 20px;
   padding: 0 8px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
   background: var(--surface-sunken);
   color: var(--text-muted);
   font-size: var(--fs-2xs);
@@ -636,7 +642,10 @@ html.is-loading .page-progress {
   color: var(--ok-text);
 }
 
-/* Navigation (sidebar and mobile menu share it) */
+/* Navigation (sidebar and mobile menu share it): text only. Page names are muted and brighten
+   on hover; the current page is full-strength ink with a sharp 2px bar at its left edge
+   (.nav__marker, which slides to the new page during a page transition). No background
+   bubble. */
 .nav {
   display: flex;
   flex-direction: column;
@@ -646,7 +655,7 @@ html.is-loading .page-progress {
 
 .nav__heading {
   display: block;
-  padding: 0 10px 6px;
+  padding: 0 12px 6px;
   color: var(--text-muted);
   font-size: var(--fs-2xs);
   font-weight: var(--fw-semibold);
@@ -664,35 +673,33 @@ html.is-loading .page-progress {
 }
 
 .nav__link {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 34px;
-  padding: 0 10px;
-  border-radius: var(--radius-md);
-  color: var(--text-secondary);
-  font-weight: var(--fw-medium);
-  transition: background-color var(--dur-fast), color var(--dur-fast);
-}
-
-.nav__link .icon {
+  height: 32px;
+  padding: 0 10px 0 12px;
   color: var(--text-muted);
+  font-weight: var(--fw-medium);
+  transition: color var(--dur-fast);
 }
 
-.nav__link:hover {
-  background: var(--surface-hover);
+.nav__link:hover,
+.nav__link[aria-current="page"] {
   color: var(--text);
   text-decoration: none;
 }
 
-.nav__link[aria-current="page"] {
-  background: var(--accent-soft);
-  color: var(--accent-text);
-  font-weight: var(--fw-semibold);
+.nav__link:focus-visible {
+  outline-offset: -2px;
 }
 
-.nav__link[aria-current="page"] .icon {
-  color: var(--accent-text);
+.nav__marker {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 0;
+  width: 2px;
+  background: var(--text);
 }
 
 /* Mobile bar (shown below 900px instead of the sidebar) */
@@ -922,9 +929,7 @@ html.is-loading .page-progress {
 .card {
   min-width: 0;
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
 }
 
 .card__header {
@@ -993,9 +998,7 @@ a.card:hover {
   min-width: 0;
   padding: 16px 18px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
   color: var(--text);
 }
 
@@ -1070,7 +1073,7 @@ a.stat:hover {
   font-style: italic;
 }
 
-/* Category badge ---------------------------------------------------------- */
+/* Category badge (the colour mark is a small square) ------------------------ */
 .cat {
   display: inline-flex;
   align-items: center;
@@ -1084,9 +1087,8 @@ a.stat:hover {
 
 .cat__dot {
   flex: none;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
+  width: 8px;
+  height: 8px;
   background: var(--cat-color, var(--chart-other));
   box-shadow: var(--dot-ring);
 }
@@ -1113,7 +1115,6 @@ a.cat:hover .cat__name {
 .cat--chip {
   padding: 2px 10px 2px 8px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
   background: var(--surface-sunken);
   font-size: var(--fs-sm);
 }
@@ -1167,7 +1168,6 @@ a.cat:hover .cat__name {
 .progress__track {
   position: relative;
   height: 8px;
-  border-radius: var(--radius-pill);
   background: var(--track);
 }
 
@@ -1175,7 +1175,6 @@ a.cat:hover .cat__name {
   position: absolute;
   inset: 0 auto 0 0;
   width: calc(var(--value) * 1%);
-  border-radius: inherit;
   background: var(--ok);
   transition: width 0.4s var(--ease);
 }
@@ -1186,7 +1185,6 @@ a.cat:hover .cat__name {
   right: 0;
   bottom: 0;
   left: calc(var(--limit) * 1%);
-  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
   background-color: var(--over-deep);
   background-image: repeating-linear-gradient(-45deg, rgb(255 255 255 / 0.22) 0 2px, transparent 2px 5px);
 }
@@ -1198,7 +1196,6 @@ a.cat:hover .cat__name {
   left: calc(var(--limit) * 1%);
   width: 2px;
   margin-left: -1px;
-  border-radius: 1px;
   background: var(--text);
   box-shadow: 0 0 0 1.5px var(--surface);
 }
@@ -1351,28 +1348,6 @@ a.cat:hover .cat__name {
 
 .table--bordered {
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-}
-
-.card--flush > .card__body:first-child .table thead tr:first-child > :first-child,
-.table--bordered thead tr:first-child > :first-child {
-  border-top-left-radius: calc(var(--radius-lg) - 1px);
-}
-
-.card--flush > .card__body:first-child .table thead tr:first-child > :last-child,
-.table--bordered thead tr:first-child > :last-child {
-  border-top-right-radius: calc(var(--radius-lg) - 1px);
-}
-
-/* The last row's corner cells follow a flush card's (or bordered table's) rounded corners. */
-.card--flush > .card__body:last-child .table > :last-child > tr:last-child > :first-child,
-.table--bordered > :last-child > tr:last-child > :first-child {
-  border-bottom-left-radius: calc(var(--radius-lg) - 1px);
-}
-
-.card--flush > .card__body:last-child .table > :last-child > tr:last-child > :last-child,
-.table--bordered > :last-child > tr:last-child > :last-child {
-  border-bottom-right-radius: calc(var(--radius-lg) - 1px);
 }
 
 .table tr.is-muted > td,
@@ -1498,7 +1473,6 @@ a.cat:hover .cat__name {
   height: 30px;
   padding: 0 8px;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
   background: transparent;
   color: inherit;
   font-size: inherit;
@@ -1644,7 +1618,6 @@ select.inline-control {
   height: 32px;
   padding: 0 8px;
   border: 1px solid transparent;
-  border-radius: var(--radius-md);
   color: var(--text-secondary);
   font-variant-numeric: lining-nums tabular-nums;
 }
@@ -1660,7 +1633,6 @@ select.inline-control {
   background: var(--surface);
   color: var(--text);
   font-weight: var(--fw-semibold);
-  box-shadow: var(--shadow-xs);
 }
 
 .pagination__link[aria-disabled="true"] {
@@ -1699,7 +1671,6 @@ select.inline-control {
   width: 48px;
   height: 48px;
   margin-bottom: 10px;
-  border-radius: 14px;
   background: var(--accent-soft);
   color: var(--accent-text);
 }
@@ -1740,7 +1711,6 @@ select.inline-control {
 .empty--compact .empty__icon {
   width: 40px;
   height: 40px;
-  border-radius: 12px;
 }
 
 /* Banners ----------------------------------------------------------------- */
@@ -1754,7 +1724,6 @@ select.inline-control {
   gap: 10px 12px;
   padding: 12px 14px;
   border: 1px solid var(--tone-border);
-  border-radius: var(--radius-lg);
   background: var(--tone-soft);
   color: var(--text);
 }
@@ -1818,7 +1787,6 @@ select.inline-control {
   width: 100%;
   padding: 11px 8px 11px 14px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
   background: var(--surface-raised);
   box-shadow: var(--shadow-lg);
   color: var(--text);
@@ -1865,68 +1833,50 @@ select.inline-control {
   animation: none;
 }
 
-/* Status pill ------------------------------------------------------------- */
+/* Status (the sync status in the top bar, each connection's state): a flat label with a small
+   square mark, no pill. The mark's colour and the words carry the state. ------------ */
 .pill {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   height: 30px;
-  padding: 0 12px 0 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--surface);
-  color: var(--text-secondary);
+  padding: 0 2px;
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
   white-space: nowrap;
 }
 
 a.pill:hover {
-  border-color: var(--border-strong);
   color: var(--text);
   text-decoration: none;
 }
 
+a.pill:hover .pill__text {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .pill__dot {
   flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+  width: 7px;
+  height: 7px;
   background: var(--text-faint);
 }
 
-.pill--healthy .pill__dot {
-  background: var(--ok);
-  box-shadow: 0 0 0 3px var(--ok-soft);
-}
+.pill--healthy .pill__dot { background: var(--ok); }
 
 .pill--syncing .pill__dot {
   background: var(--accent);
   animation: pulse 1.4s ease-in-out infinite;
 }
 
-.pill--needs_reconnect {
-  border-color: var(--warn-border);
-  background: var(--warn-soft);
-  color: var(--warn-text);
-}
-
-.pill--needs_reconnect .pill__dot { background: var(--warn); }
-
-.pill--error {
-  border-color: var(--over-border);
-  background: var(--over-soft);
-  color: var(--over-text);
-}
-
-.pill--error .pill__dot { background: var(--over); }
-
-.pill--stale {
-  border-color: var(--warn-border);
-  color: var(--warn-text);
-}
-
+.pill--needs_reconnect,
+.pill--stale { color: var(--warn-text); }
+.pill--needs_reconnect .pill__dot,
 .pill--stale .pill__dot { background: var(--warn); }
+.pill--error { color: var(--over-text); }
+.pill--error .pill__dot { background: var(--over); }
 
 .pill--not_linked .pill__dot {
   background: transparent;
@@ -1950,9 +1900,7 @@ a.pill:hover {
   height: var(--btn-h);
   padding: 0 14px;
   border: 1px solid var(--control-border);
-  border-radius: var(--radius-md);
   background: var(--surface);
-  box-shadow: var(--shadow-xs);
   color: var(--text);
   font-size: var(--fs-md);
   font-weight: 550;
@@ -1960,7 +1908,7 @@ a.pill:hover {
   white-space: nowrap;
   cursor: pointer;
   user-select: none;
-  transition: background-color var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast), box-shadow var(--dur-fast);
+  transition: background-color var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast);
 }
 
 .btn:hover {
@@ -1995,7 +1943,6 @@ a.pill:hover {
 .btn--ghost {
   border-color: transparent;
   background: transparent;
-  box-shadow: none;
   color: var(--text-secondary);
 }
 
@@ -2020,7 +1967,6 @@ a.pill:hover {
   --btn-h: 30px;
   gap: 6px;
   padding: 0 10px;
-  border-radius: var(--radius-sm);
   font-size: var(--fs-sm);
 }
 
@@ -2035,7 +1981,6 @@ a.pill:hover {
 
 .btn:disabled,
 .btn[aria-disabled="true"] {
-  box-shadow: none;
   cursor: not-allowed;
   opacity: 0.5;
   pointer-events: none;
@@ -2093,6 +2038,10 @@ a.pill:hover {
   font-weight: 550;
 }
 
+legend.field__label {
+  padding: 0;
+}
+
 .field__req {
   margin-left: 2px;
   color: var(--over-text);
@@ -2133,7 +2082,6 @@ a.pill:hover {
   height: 36px;
   padding: 0 11px;
   border: 1px solid var(--control-border);
-  border-radius: var(--radius-md);
   background-color: var(--control-bg);
   color: var(--text);
   font-size: var(--fs-md);
@@ -2278,7 +2226,11 @@ a.pill:hover {
   display: none;
 }
 
-/* Checkbox and switch */
+/* Checkbox, radio and switch: drawn here (appearance: none) so they are square like the rest.
+   A checkbox is a square with an angular check; a radio is a diamond (a rotated square), so
+   one choice of several never looks like a checkbox; a switch is a square track whose square
+   knob slides. Borders and the off track reach 3:1 like the fields (--control-border,
+   --switch-off). */
 .check {
   display: inline-flex;
   align-items: flex-start;
@@ -2288,12 +2240,79 @@ a.pill:hover {
 
 .check input[type="checkbox"]:not(.switch),
 .check input[type="radio"] {
+  display: inline-grid;
   flex: none;
+  place-content: center;
   width: 16px;
   height: 16px;
   margin: 2px 0 0;
-  accent-color: var(--accent);
+  border: 1px solid var(--control-border);
+  background: var(--control-bg);
   cursor: pointer;
+  appearance: none;
+  transition: background-color var(--dur-fast), border-color var(--dur-fast);
+}
+
+/* The check: one polygon with square ends and a sharp corner, in the colour that reads on
+   the ink fill (--accent-contrast: white in light mode, near-black in dark). */
+.check input[type="checkbox"]:not(.switch)::before {
+  width: 10px;
+  height: 10px;
+  background: var(--accent-contrast);
+  clip-path: polygon(1.6% 58.4%, 38.4% 95.2%, 98.8% 25.9%, 85.2% 14.1%, 37.5% 68.8%, 14.4% 45.6%);
+  content: "";
+  transform: scale(0);
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.check input[type="checkbox"]:not(.switch):checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.check input[type="checkbox"]:not(.switch):checked::before {
+  transform: none;
+}
+
+/* The diamond: a 12px square turned 45 degrees spans the 16px a checkbox takes. */
+.check input[type="radio"] {
+  width: 12px;
+  height: 12px;
+  margin: 4px 2px 0;
+  transform: rotate(45deg);
+}
+
+.check input[type="radio"]::before {
+  width: 6px;
+  height: 6px;
+  background: var(--accent);
+  content: "";
+  transform: scale(0);
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.check input[type="radio"]:checked {
+  border-color: var(--accent);
+}
+
+.check input[type="radio"]:checked::before {
+  transform: none;
+}
+
+.check input[type="checkbox"]:not(.switch):hover,
+.check input[type="radio"]:hover {
+  border-color: var(--control-border-hover);
+}
+
+.check input[type="checkbox"]:not(.switch):checked:hover {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+}
+
+.check input[type="checkbox"]:not(.switch):disabled,
+.check input[type="radio"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .check__text {
@@ -2313,22 +2332,19 @@ a.pill:hover {
   width: 34px;
   height: 20px;
   margin: 1px 0 0;
-  border-radius: var(--radius-pill);
   background: var(--switch-off);
   cursor: pointer;
   appearance: none;
-  transition: background-color var(--dur) ease;
+  transition: background-color var(--dur) var(--ease);
 }
 
 .switch::before {
   position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
   background: #ffffff;
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.3);
   content: "";
   transition: transform var(--dur) var(--ease);
 }
@@ -2360,7 +2376,6 @@ a.pill:hover {
   height: 24px;
   padding: 0 9px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
   background: var(--surface-sunken);
   color: var(--text-secondary);
   font-size: var(--fs-sm);
@@ -2379,7 +2394,6 @@ a.pill:hover {
   height: 18px;
   padding: 0;
   border: 0;
-  border-radius: 50%;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -2410,7 +2424,6 @@ a.pill:hover {
   min-height: 36px;
   padding: 5px 6px;
   border: 1px solid var(--control-border);
-  border-radius: var(--radius-md);
   background: var(--control-bg);
   cursor: text;
   transition: border-color var(--dur-fast), box-shadow var(--dur-fast);
@@ -2447,9 +2460,7 @@ a.pill:hover {
   gap: 12px;
   padding: 12px 14px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
 }
 
 .filter-bar > .field,
@@ -2495,7 +2506,6 @@ a.pill:hover {
   margin: 0;
   padding: 3px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
   background: var(--surface-sunken);
 }
 
@@ -2533,7 +2543,6 @@ a.pill:hover {
   align-items: center;
   height: 26px;
   padding: 0 10px;
-  border-radius: var(--radius-sm);
   color: var(--text-muted);
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
@@ -2547,7 +2556,7 @@ a.pill:hover {
 
 .segmented__option input:checked + span {
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  box-shadow: inset 0 0 0 1px var(--border-strong); /* a hairline, not a shadow */
   color: var(--text);
   font-weight: var(--fw-semibold);
 }
@@ -2594,14 +2603,12 @@ a.pill:hover {
   bottom: -1px;
   left: 10px;
   height: 2px;
-  border-radius: 2px;
   background: var(--accent);
   content: "";
 }
 
 .tabs__count {
   padding: 1px 7px;
-  border-radius: var(--radius-pill);
   background: var(--surface-sunken);
   color: var(--text-muted);
   font-size: var(--fs-xs);
@@ -2615,7 +2622,6 @@ a.pill:hover {
   max-height: min(86vh, 860px);
   padding: 0;
   border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
   background: var(--surface-raised);
   box-shadow: var(--shadow-lg);
   color: var(--text);
@@ -2691,7 +2697,6 @@ a.pill:hover {
   width: max-content;
   max-width: min(260px, calc(100vw - 24px));
   padding: 6px 9px;
-  border-radius: var(--radius-sm);
   background: var(--tooltip-bg);
   box-shadow: var(--shadow-md);
   color: var(--tooltip-text);
@@ -2753,7 +2758,6 @@ a.pill:hover {
 .tip {
   display: inline-grid;
   place-items: center;
-  border-radius: 50%;
   color: var(--text-muted);
   vertical-align: middle;
   cursor: help;
@@ -2774,7 +2778,6 @@ a.pill:hover {
   height: 20px;
   padding: 0 7px;
   border: 1px solid var(--tone-border);
-  border-radius: var(--radius-pill);
   background: var(--tone-soft);
   color: var(--tone-text);
   font-size: var(--fs-xs);
@@ -2816,22 +2819,22 @@ a.pill:hover {
   transition: opacity var(--dur) ease;
 }
 
+/* A square with one open side, turning: the angular take on a spinning ring. */
 .spinner {
   display: inline-block;
   flex: none;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   border: 2px solid currentColor;
   border-right-color: transparent;
-  border-radius: 50%;
   opacity: 0.75;
-  vertical-align: -3px;
-  animation: spin 0.7s linear infinite;
+  vertical-align: -2px;
+  animation: spin 0.9s linear infinite;
 }
 
 .spinner--lg {
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   border-width: 2.5px;
 }
 
@@ -2849,14 +2852,13 @@ a.pill:hover {
   display: block;
   width: var(--skeleton-w, 100%);
   height: 12px;
-  border-radius: var(--radius-sm);
   background: linear-gradient(90deg, var(--skeleton) 25%, var(--skeleton-hi) 37%, var(--skeleton) 63%);
   background-size: 400% 100%;
   animation: shimmer 1.4s ease infinite;
 }
 
 .skeleton--title { width: 40%; height: 18px; }
-.skeleton--block { height: 120px; border-radius: var(--radius-md); }
+.skeleton--block { height: 120px; }
 
 .skeleton-group {
   display: grid;
@@ -2896,7 +2898,6 @@ a.pill:hover {
   flex: none;
   width: 10px;
   height: 10px;
-  border-radius: 3px;
   background: var(--swatch, var(--chart-other));
 }
 
@@ -2910,7 +2911,6 @@ a.pill:hover {
   display: inline-block;
   padding: 8px 12px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
   background: var(--surface-sunken);
   font-size: var(--fs-sm);
   user-select: all;
@@ -2946,7 +2946,6 @@ a.pill:hover {
 .kit-swatches .swatch {
   width: 22px;
   height: 22px;
-  border-radius: 6px;
 }
 
 .kit-icons {
@@ -2960,7 +2959,6 @@ a.pill:hover {
   align-items: center;
   gap: 6px;
   padding: 12px 4px 10px;
-  border-radius: var(--radius-md);
   color: var(--text-secondary);
   font-size: var(--fs-xs);
 }
@@ -3107,7 +3105,6 @@ a.pill:hover {
     gap: 6px;
     height: 36px;
     padding: 0 10px;
-    border-radius: var(--radius-md);
     color: var(--text-secondary);
     font-weight: var(--fw-medium);
     cursor: pointer;
@@ -3251,8 +3248,7 @@ a.pill:hover {
 }
 
 @keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
-  50% { box-shadow: 0 0 0 5px transparent; }
+  50% { opacity: 0.25; }
 }
 
 @keyframes shimmer {

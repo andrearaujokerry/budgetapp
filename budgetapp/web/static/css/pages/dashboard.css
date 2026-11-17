@@ -70,7 +70,6 @@ a.dash-row__name:hover .cat__name {
 /* Ranked bars: one hue, scaled to the largest category. */
 .rank-list__bar {
   height: 6px;
-  border-radius: var(--radius-pill);
   background: var(--track);
 }
 
@@ -79,7 +78,6 @@ a.dash-row__name:hover .cat__name {
   width: calc(var(--value) * 1%);
   min-width: 2px;
   height: 100%;
-  border-radius: inherit;
   background: var(--chart-accent);
 }
 
